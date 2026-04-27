@@ -2,6 +2,7 @@ defmodule SpectreMnemonicStressTest do
   use SpectreMnemonic.MemoryCase
 
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Store.Disk
 
   @moduletag timeout: 30_000
 
@@ -25,108 +26,117 @@ defmodule SpectreMnemonicStressTest do
     task_id = "task-#{div(index - 1, length(@scenario_kinds)) + 1}"
     date = Date.add(~D[2026-01-01], index)
 
-    case kind do
-      :birthday ->
-        %{
-          kind: :personal_fact,
-          stream: :chat,
-          task_id: nil,
-          text: "#{subject} birthday is #{Date.to_iso8601(date)} and the party city is Rome",
-          cue: "when is #{subject} birthday",
-          token: Date.to_iso8601(date)
-        }
+    scenario(kind, subject, task_id, date)
+  end
 
-      :task_status ->
-        %{
-          kind: :task_status,
-          stream: :task_execution,
-          task_id: task_id,
-          text: "#{task_id} status is blocked by missing migration for #{subject}",
-          cue: "how is it going #{task_id}",
-          token: "blocked"
-        }
+  defp scenario(:birthday, subject, _task_id, date) do
+    %{
+      kind: :personal_fact,
+      stream: :chat,
+      task_id: nil,
+      text: "#{subject} birthday is #{Date.to_iso8601(date)} and the party city is Rome",
+      cue: "when is #{subject} birthday",
+      token: Date.to_iso8601(date)
+    }
+  end
 
-      :task_relation ->
-        %{
-          kind: :task_relation,
-          stream: :research,
-          task_id: task_id,
-          text: "#{task_id} depends on #{subject} API contract and schema review",
-          cue: "what is related to #{task_id} API contract",
-          token: "contract"
-        }
+  defp scenario(:task_status, subject, task_id, _date) do
+    %{
+      kind: :task_status,
+      stream: :task_execution,
+      task_id: task_id,
+      text: "#{task_id} status is blocked by missing migration for #{subject}",
+      cue: "how is it going #{task_id}",
+      token: "blocked"
+    }
+  end
 
-      :research ->
-        %{
-          kind: :research,
-          stream: :research,
-          task_id: task_id,
-          text: "research note #{subject}: ETS ordered_set lookup tradeoff for #{task_id}",
-          cue: "recall research #{subject} ETS lookup",
-          token: "ordered_set"
-        }
+  defp scenario(:task_relation, subject, task_id, _date) do
+    %{
+      kind: :task_relation,
+      stream: :research,
+      task_id: task_id,
+      text: "#{task_id} depends on #{subject} API contract and schema review",
+      cue: "what is related to #{task_id} API contract",
+      token: "contract"
+    }
+  end
 
-      :code_learning ->
-        %{
-          kind: :code_learning,
-          stream: :code_learning,
-          task_id: task_id,
-          text:
-            "code learning #{subject}: StreamServer forwards writes through Focus for #{task_id}",
-          cue: "what code insight mentions #{subject} StreamServer",
-          token: "Focus"
-        }
+  defp scenario(:research, subject, task_id, _date) do
+    %{
+      kind: :research,
+      stream: :research,
+      task_id: task_id,
+      text: "research note #{subject}: ETS ordered_set lookup tradeoff for #{task_id}",
+      cue: "recall research #{subject} ETS lookup",
+      token: "ordered_set"
+    }
+  end
 
-      :task_execution ->
-        %{
-          kind: :task_execution,
-          stream: :task_execution,
-          task_id: task_id,
-          text: "execution update #{subject}: implemented disk replay checksum for #{task_id}",
-          cue: "progress #{subject} disk replay checksum",
-          token: "checksum"
-        }
+  defp scenario(:code_learning, subject, task_id, _date) do
+    %{
+      kind: :code_learning,
+      stream: :code_learning,
+      task_id: task_id,
+      text: "code learning #{subject}: StreamServer forwards writes through Focus for #{task_id}",
+      cue: "what code insight mentions #{subject} StreamServer",
+      token: "Focus"
+    }
+  end
 
-      :meeting ->
-        %{
-          kind: :meeting,
-          stream: :chat,
-          task_id: task_id,
-          text: "meeting #{subject} scheduled on #{Date.to_iso8601(date)} about release review",
-          cue: "meeting #{subject} release review",
-          token: "scheduled"
-        }
+  defp scenario(:task_execution, subject, task_id, _date) do
+    %{
+      kind: :task_execution,
+      stream: :task_execution,
+      task_id: task_id,
+      text: "execution update #{subject}: implemented disk replay checksum for #{task_id}",
+      cue: "progress #{subject} disk replay checksum",
+      token: "checksum"
+    }
+  end
 
-      :deadline ->
-        %{
-          kind: :deadline,
-          stream: :chat,
-          task_id: task_id,
-          text: "#{subject} deadline is #{Date.to_iso8601(date)} for docs cleanup",
-          cue: "#{subject} deadline docs cleanup",
-          token: Date.to_iso8601(date)
-        }
+  defp scenario(:meeting, subject, task_id, date) do
+    %{
+      kind: :meeting,
+      stream: :chat,
+      task_id: task_id,
+      text: "meeting #{subject} scheduled on #{Date.to_iso8601(date)} about release review",
+      cue: "meeting #{subject} release review",
+      token: "scheduled"
+    }
+  end
 
-      :decision ->
-        %{
-          kind: :decision,
-          stream: :chat,
-          task_id: task_id,
-          text: "decision #{subject}: use hamming fallback before vector adapter exists",
-          cue: "decision #{subject} hamming fallback",
-          token: "fallback"
-        }
+  defp scenario(:deadline, subject, task_id, date) do
+    %{
+      kind: :deadline,
+      stream: :chat,
+      task_id: task_id,
+      text: "#{subject} deadline is #{Date.to_iso8601(date)} for docs cleanup",
+      cue: "#{subject} deadline docs cleanup",
+      token: Date.to_iso8601(date)
+    }
+  end
 
-      :artifact ->
-        %{
-          kind: :artifact_note,
-          stream: :chat,
-          task_id: task_id,
-          text: "artifact #{subject} lives at /tmp/#{subject}.pdf for #{task_id}",
-          cue: "artifact #{subject} pdf",
-          token: ".pdf"
-        }
-    end
+  defp scenario(:decision, subject, task_id, _date) do
+    %{
+      kind: :decision,
+      stream: :chat,
+      task_id: task_id,
+      text: "decision #{subject}: use hamming fallback before vector adapter exists",
+      cue: "decision #{subject} hamming fallback",
+      token: "fallback"
+    }
+  end
+
+  defp scenario(:artifact, subject, task_id, _date) do
+    %{
+      kind: :artifact_note,
+      stream: :chat,
+      task_id: task_id,
+      text: "artifact #{subject} lives at /tmp/#{subject}.pdf for #{task_id}",
+      cue: "artifact #{subject} pdf",
+      token: ".pdf"
+    }
   end
 
   for index <- 1..100 do
@@ -290,7 +300,7 @@ defmodule SpectreMnemonicStressTest do
   test "disk replay contains appended signal and moment records" do
     {:ok, %{signal: signal, moment: moment}} = SpectreMnemonic.signal("disk replay visible")
 
-    assert {:ok, frames} = SpectreMnemonic.Store.Disk.replay()
+    assert {:ok, frames} = Disk.replay()
     payloads = Enum.map(frames, fn {_seq, _timestamp, payload} -> payload end)
 
     assert {:signals, signal} in payloads
@@ -304,7 +314,7 @@ defmodule SpectreMnemonicStressTest do
       :append
     ])
 
-    assert {:ok, frames} = SpectreMnemonic.Store.Disk.replay()
+    assert {:ok, frames} = Disk.replay()
     payloads = Enum.map(frames, fn {_seq, _timestamp, payload} -> payload end)
 
     assert {:signals, signal} in payloads

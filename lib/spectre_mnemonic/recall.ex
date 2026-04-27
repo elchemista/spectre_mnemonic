@@ -11,29 +11,35 @@ defmodule SpectreMnemonic.Recall do
 
   alias SpectreMnemonic.{Cue, Focus, RecallPacket}
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Recall.Index
 
   @hamming_threshold 0.62
 
   @doc "Starts the recall process."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
   @doc "Returns a neighborhood packet for a cue."
+  @spec recall(term(), keyword()) :: {:ok, RecallPacket.t()}
   def recall(cue, opts \\ []) do
     GenServer.call(__MODULE__, {:recall, cue, opts})
   end
 
   @impl true
+  @spec init(map()) :: {:ok, map()}
   def init(state), do: {:ok, state}
 
   @impl true
+  @spec handle_call({:recall, term(), keyword()}, GenServer.from(), map()) ::
+          {:reply, {:ok, RecallPacket.t()}, map()}
   def handle_call({:recall, cue_input, opts}, _from, state) do
     cue = build_cue(cue_input, opts)
     moments = Focus.moments()
     associations = Focus.associations()
     limit = Keyword.get(opts, :limit, 10)
-    {:ok, index_results} = SpectreMnemonic.Recall.Index.query(cue, opts)
+    {:ok, index_results} = Index.query(cue, opts)
     index_scores = Map.new(index_results, &{&1.id, &1})
 
     ranked =
@@ -54,12 +60,14 @@ defmodule SpectreMnemonic.Recall do
       moments: ranked,
       artifacts: artifacts_for(ranked, associations),
       associations: associations_for(ranked, associations),
+      action_recipes: action_recipes_for(ranked, associations),
       confidence: confidence(ranked)
     }
 
     {:reply, {:ok, packet}, state}
   end
 
+  @spec build_cue(term(), keyword()) :: Cue.t()
   defp build_cue(input, opts) do
     text = if is_binary(input), do: input, else: inspect(input)
     embedding = SpectreMnemonic.Embedding.embed(input, opts)
@@ -77,6 +85,7 @@ defmodule SpectreMnemonic.Recall do
     }
   end
 
+  @spec score(Moment.t(), Cue.t(), map()) :: number()
   defp score(moment, cue, index_scores) do
     keyword_score = overlap(moment.keywords, cue.keywords) * 2
     entity_score = overlap(moment.entities, cue.entities) * 3
@@ -88,6 +97,7 @@ defmodule SpectreMnemonic.Recall do
     if match_score > 0, do: match_score + moment.attention, else: 0
   end
 
+  @spec expand_graph([Moment.t()], [SpectreMnemonic.Association.t()]) :: [Moment.t()]
   defp expand_graph(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
@@ -109,6 +119,8 @@ defmodule SpectreMnemonic.Recall do
     moments ++ linked
   end
 
+  @spec associations_for([Moment.t()], [SpectreMnemonic.Association.t()]) ::
+          [SpectreMnemonic.Association.t()]
   defp associations_for(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
@@ -117,6 +129,7 @@ defmodule SpectreMnemonic.Recall do
     end)
   end
 
+  @spec active_status([Moment.t()]) :: [map()]
   defp active_status(moments) do
     moments
     |> Enum.flat_map(&[&1.stream, &1.task_id])
@@ -131,6 +144,8 @@ defmodule SpectreMnemonic.Recall do
     |> Enum.uniq_by(fn status -> {status.stream, status.task_id} end)
   end
 
+  @spec artifacts_for([Moment.t()], [SpectreMnemonic.Association.t()]) ::
+          [SpectreMnemonic.Artifact.t()]
   defp artifacts_for(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
@@ -145,20 +160,53 @@ defmodule SpectreMnemonic.Recall do
     |> Focus.artifacts()
   end
 
+  @spec action_recipes_for([Moment.t()], [SpectreMnemonic.Association.t()]) ::
+          [SpectreMnemonic.ActionRecipe.t()]
+  defp action_recipes_for(moments, associations) do
+    moment_ids = MapSet.new(Enum.map(moments, & &1.id))
+    related_ids = related_memory_ids(moment_ids, associations)
+
+    associations
+    |> Enum.flat_map(fn assoc ->
+      if MapSet.member?(related_ids, assoc.source_id) and assoc.relation == :attached_action do
+        [assoc.target_id]
+      else
+        []
+      end
+    end)
+    |> Focus.action_recipes()
+  end
+
+  @spec related_memory_ids(MapSet.t(), [SpectreMnemonic.Association.t()]) :: MapSet.t()
+  defp related_memory_ids(moment_ids, associations) do
+    associations
+    |> Enum.reduce(moment_ids, fn assoc, acc ->
+      cond do
+        MapSet.member?(moment_ids, assoc.source_id) -> MapSet.put(acc, assoc.target_id)
+        MapSet.member?(moment_ids, assoc.target_id) -> MapSet.put(acc, assoc.source_id)
+        true -> acc
+      end
+    end)
+  end
+
+  @spec confidence([Moment.t()]) :: float()
   defp confidence([]), do: 0.0
   defp confidence(moments), do: min(1.0, length(moments) / 5)
 
+  @spec status_match?(Moment.t(), Cue.t()) :: boolean()
   defp status_match?(moment, cue) do
     String.contains?(cue.text, "how") and String.contains?(cue.text, "going") and
       not is_nil(moment.task_id)
   end
 
+  @spec overlap([term()], [term()]) :: non_neg_integer()
   defp overlap(left, right) do
     left = MapSet.new(left)
     right = MapSet.new(right)
     MapSet.size(MapSet.intersection(left, right))
   end
 
+  @spec semantic_score(Moment.t() | map(), Cue.t() | map(), map()) :: number()
   defp semantic_score(%{id: id, vector: left, binary_signature: signature}, cue, index_scores)
        when is_binary(left) and is_binary(cue.vector) do
     case Map.fetch(index_scores, id) do
@@ -189,12 +237,14 @@ defmodule SpectreMnemonic.Recall do
     end
   end
 
+  @spec signature_bits(map(), binary() | nil, binary() | nil) :: non_neg_integer()
   defp signature_bits(%{metadata: %{signature_bits: bits}}, _left, _right) when is_integer(bits),
     do: bits
 
   defp signature_bits(_embedding, left, right),
     do: min(byte_size(left || <<>>) * 8, byte_size(right || <<>>) * 8)
 
+  @spec keywords(binary()) :: [binary()]
   defp keywords(text) do
     text
     |> String.downcase()
@@ -203,6 +253,7 @@ defmodule SpectreMnemonic.Recall do
     |> Enum.uniq()
   end
 
+  @spec entities(binary()) :: [binary()]
   defp entities(text) do
     Regex.scan(~r/\b[A-Z][A-Za-z0-9_]+\b/, text)
     |> List.flatten()

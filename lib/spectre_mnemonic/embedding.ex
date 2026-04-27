@@ -1,18 +1,3 @@
-defmodule SpectreMnemonic.Embedding.Adapter do
-  @moduledoc """
-  Behaviour for user-provided embedding adapters.
-
-  Configure with:
-
-      config :spectre_mnemonic, embedding_adapter: MyApp.EmbeddingAdapter
-  """
-
-  @callback embed(input :: term(), opts :: keyword()) ::
-              {:ok, vector :: list(number())}
-              | {:ok, embedding_result :: map()}
-              | {:error, reason :: term()}
-end
-
 defmodule SpectreMnemonic.Embedding do
   @moduledoc """
   Small wrapper around configured embedding providers.
@@ -25,6 +10,7 @@ defmodule SpectreMnemonic.Embedding do
   alias SpectreMnemonic.Embedding.{BinaryQuantizer, Vector}
 
   @doc "Embeds input when an adapter is configured, otherwise returns an empty embedding."
+  @spec embed(input :: term(), opts :: keyword()) :: map()
   def embed(input, opts) do
     adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
 
@@ -40,6 +26,7 @@ defmodule SpectreMnemonic.Embedding do
     end
   end
 
+  @spec embed_with_adapter(module(), term(), keyword()) :: map()
   defp embed_with_adapter(adapter, input, opts) do
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :embed, 2) do
       call_adapter(adapter, input, opts)
@@ -48,6 +35,7 @@ defmodule SpectreMnemonic.Embedding do
     end
   end
 
+  @spec embed_with_fast_provider(term(), keyword()) :: map()
   defp embed_with_fast_provider(input, opts) do
     provider = Keyword.get(fast_config(), :provider, SpectreMnemonic.Embedding.Model2VecStatic)
     provider_opts = Keyword.merge(fast_config(), opts)
@@ -84,6 +72,7 @@ defmodule SpectreMnemonic.Embedding do
     end
   end
 
+  @spec call_adapter(module(), term(), keyword()) :: map()
   defp call_adapter(adapter, input, opts) do
     case adapter.embed(input, opts) do
       {:ok, vector} when is_list(vector) ->
@@ -99,6 +88,7 @@ defmodule SpectreMnemonic.Embedding do
     exception -> %{vector: nil, binary_signature: nil, metadata: %{}, error: exception}
   end
 
+  @spec normalize_result(term(), keyword()) :: map()
   defp normalize_result(result, opts) when is_map(result) do
     vector = fetch_key(result, :vector)
     normalized = Vector.normalize_to_f32_binary(vector)
@@ -127,6 +117,7 @@ defmodule SpectreMnemonic.Embedding do
 
   defp normalize_result(_result, _opts), do: empty()
 
+  @spec metadata(map(), non_neg_integer(), non_neg_integer() | nil, keyword()) :: map()
   defp metadata(result, dimensions, signature_bits, opts) do
     inline_metadata =
       result
@@ -157,27 +148,24 @@ defmodule SpectreMnemonic.Embedding do
     |> Map.merge(result_metadata)
   end
 
+  @spec fast_enabled? :: boolean()
   defp fast_enabled? do
     fast_config()
     |> Keyword.get(:enabled, false)
   end
 
+  @spec fast_config :: keyword()
   defp fast_config do
     :spectre_mnemonic
     |> Application.get_env(:embedding, [])
     |> Keyword.get(:fast, [])
   end
 
+  @spec empty :: map()
   defp empty, do: %{vector: nil, binary_signature: nil, metadata: %{}, error: nil}
 
+  @spec fetch_key(map(), atom()) :: term()
   defp fetch_key(map, key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
-end
-
-defmodule SpectreMnemonic.Summarizer.Adapter do
-  @moduledoc "Optional behaviour for applications that want LLM or local summarization."
-
-  @callback summarize(input :: term(), opts :: keyword()) ::
-              {:ok, gist :: term()} | {:error, reason :: term()}
 end

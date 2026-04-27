@@ -13,6 +13,7 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
   @default_bits 256
 
   @doc "Produces a packed binary signature from a dense vector."
+  @spec quantize(Vector.vector_input(), keyword()) :: binary() | nil
   def quantize(vector, opts \\ []) do
     values = Vector.to_list(vector)
     bits = Keyword.get(opts, :bits, @default_bits)
@@ -24,6 +25,7 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
     end
   end
 
+  @spec sample([number()], pos_integer()) :: [boolean()]
   defp sample(values, bits) do
     dimensions = length(values)
 
@@ -33,6 +35,7 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
     end
   end
 
+  @spec pack([boolean()]) :: binary()
   defp pack(bits) do
     bits
     |> Enum.chunk_every(8, 8, Stream.cycle([false]) |> Enum.take(7))

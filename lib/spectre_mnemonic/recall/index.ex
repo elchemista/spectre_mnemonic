@@ -14,33 +14,45 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @index_table :mnemonic_embedding_index
   @label_table :mnemonic_embedding_labels
+  @type state :: %{
+          next_label: pos_integer(),
+          hnsw: term(),
+          hnsw_dim: pos_integer() | nil,
+          hnsw_max: pos_integer() | nil
+        }
 
   @doc "Starts the index process."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc "Indexes or replaces one moment."
+  @spec upsert(SpectreMnemonic.Moment.t()) :: :ok
   def upsert(moment) do
     call_if_running({:upsert, moment})
   end
 
   @doc "Removes one moment from the index."
+  @spec delete(binary()) :: :ok
   def delete(moment_id) do
     call_if_running({:delete, moment_id})
   end
 
   @doc "Queries indexed active moments by cue embedding."
+  @spec query(map(), keyword()) :: {:ok, [map()]}
   def query(cue, opts \\ []) do
     call_if_running({:query, cue, opts}, {:ok, []})
   end
 
   @doc "Clears ETS index state."
+  @spec reset :: :ok
   def reset do
     call_if_running(:reset)
   end
 
   @impl true
+  @spec init(keyword()) :: {:ok, state()}
   def init(_opts) do
     ensure_table(@index_table)
     ensure_table(@label_table)
@@ -49,6 +61,7 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   @impl true
+  @spec handle_call(term(), GenServer.from(), state()) :: {:reply, term(), state()}
   def handle_call({:upsert, moment}, _from, state) do
     case indexable(moment) do
       {:ok, entry} ->
@@ -92,6 +105,7 @@ defmodule SpectreMnemonic.Recall.Index do
     {:reply, :ok, %{state | hnsw: nil, hnsw_dim: nil, hnsw_max: nil, next_label: 1}}
   end
 
+  @spec brute_force(map(), pos_integer()) :: [map()]
   defp brute_force(%{vector: nil}, _limit), do: []
 
   defp brute_force(cue, limit) do
@@ -107,31 +121,36 @@ defmodule SpectreMnemonic.Recall.Index do
     |> Enum.take(limit)
   end
 
+  @spec query_hnsw(state(), map(), pos_integer()) :: [map()] | nil
   defp query_hnsw(%{hnsw: nil}, _cue, _limit), do: nil
   defp query_hnsw(_state, %{vector: nil}, _limit), do: nil
 
   defp query_hnsw(state, cue, limit) do
     k = min(limit, indexed_count())
 
-    if k > 0 do
-      case HNSWLib.Index.knn_query(state.hnsw, cue.vector, k: k) do
-        {:ok, labels, _distances} ->
-          labels
-          |> Nx.to_flat_list()
-          |> Enum.flat_map(&entry_for_label/1)
-          |> Enum.map(fn {moment_id, entry} ->
-            score_entry(moment_id, entry, cue.vector, cue.binary_signature)
-          end)
-          |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
-
-        {:error, _reason} ->
-          nil
-      end
-    end
+    if k > 0, do: query_hnsw_neighbors(state, cue, k)
   rescue
     _exception -> nil
   end
 
+  @spec query_hnsw_neighbors(state(), map(), pos_integer()) :: [map()] | nil
+  defp query_hnsw_neighbors(state, cue, k) do
+    case HNSWLib.Index.knn_query(state.hnsw, cue.vector, k: k) do
+      {:ok, labels, _distances} ->
+        labels
+        |> Nx.to_flat_list()
+        |> Enum.flat_map(&entry_for_label/1)
+        |> Enum.map(fn {moment_id, entry} ->
+          score_entry(moment_id, entry, cue.vector, cue.binary_signature)
+        end)
+        |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
+
+      {:error, _reason} ->
+        nil
+    end
+  end
+
+  @spec score_entry(binary(), map(), binary() | nil, binary() | nil) :: map()
   defp score_entry(moment_id, entry, cue_vector, cue_signature) do
     cosine = max(0.0, Vector.cosine(entry.vector, cue_vector))
 
@@ -152,6 +171,7 @@ defmodule SpectreMnemonic.Recall.Index do
     }
   end
 
+  @spec indexable(map()) :: {:ok, map()} | :skip
   defp indexable(%{id: id, vector: vector, binary_signature: signature, embedding: embedding})
        when is_binary(id) and is_binary(vector) and is_binary(signature) do
     metadata = embedding_metadata(embedding)
@@ -168,9 +188,11 @@ defmodule SpectreMnemonic.Recall.Index do
 
   defp indexable(_moment), do: :skip
 
+  @spec embedding_metadata(term()) :: map()
   defp embedding_metadata(%{metadata: metadata}) when is_map(metadata), do: metadata
   defp embedding_metadata(_embedding), do: %{}
 
+  @spec existing_label(binary()) :: pos_integer() | nil
   defp existing_label(moment_id) do
     case :ets.lookup(@index_table, moment_id) do
       [{^moment_id, %{label: label}}] -> label
@@ -178,6 +200,7 @@ defmodule SpectreMnemonic.Recall.Index do
     end
   end
 
+  @spec maybe_add_hnsw(state(), map(), pos_integer()) :: state()
   defp maybe_add_hnsw(state, entry, label) do
     with true <- hnsw_enabled?(),
          true <- Code.ensure_loaded?(HNSWLib.Index),
@@ -194,6 +217,7 @@ defmodule SpectreMnemonic.Recall.Index do
     _exception -> state
   end
 
+  @spec ensure_hnsw(state(), pos_integer()) :: {:ok, state()} | {:error, term()}
   defp ensure_hnsw(%{hnsw: nil} = state, dimensions) do
     config = index_config()
     max_elements = Map.get(config, :max_elements, 10_000)
@@ -220,6 +244,7 @@ defmodule SpectreMnemonic.Recall.Index do
   defp ensure_hnsw(%{hnsw_dim: dimensions} = state, dimensions), do: {:ok, state}
   defp ensure_hnsw(_state, _dimensions), do: {:error, :dimension_mismatch}
 
+  @spec ensure_hnsw_capacity(state(), pos_integer()) :: :ok | {:error, term()}
   defp ensure_hnsw_capacity(%{hnsw: nil}, _label), do: :ok
 
   defp ensure_hnsw_capacity(%{hnsw: index, hnsw_max: max_elements}, label)
@@ -229,6 +254,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   defp ensure_hnsw_capacity(_state, _label), do: :ok
 
+  @spec maybe_mark_deleted(term(), pos_integer()) :: :ok
   defp maybe_mark_deleted(nil, _label), do: :ok
 
   defp maybe_mark_deleted(index, label) do
@@ -237,6 +263,7 @@ defmodule SpectreMnemonic.Recall.Index do
     _exception -> :ok
   end
 
+  @spec entry_for_label(pos_integer()) :: [{binary(), map()}]
   defp entry_for_label(label) do
     with [{^label, moment_id}] <- :ets.lookup(@label_table, label),
          [{^moment_id, entry}] <- :ets.lookup(@index_table, moment_id) do
@@ -246,13 +273,16 @@ defmodule SpectreMnemonic.Recall.Index do
     end
   end
 
+  @spec indexed_count :: non_neg_integer()
   defp indexed_count, do: :ets.info(@index_table, :size) || 0
 
+  @spec hnsw_enabled? :: boolean()
   defp hnsw_enabled? do
     config = index_config()
     Map.get(config, :enabled, true) and Map.get(config, :backend, :hnsw) == :hnsw
   end
 
+  @spec index_config :: map()
   defp index_config do
     :spectre_mnemonic
     |> Application.get_env(:embedding, [])
@@ -260,6 +290,7 @@ defmodule SpectreMnemonic.Recall.Index do
     |> Map.new()
   end
 
+  @spec call_if_running(term(), term()) :: term()
   defp call_if_running(message, fallback \\ :ok) do
     if Process.whereis(__MODULE__) do
       GenServer.call(__MODULE__, message)
@@ -268,6 +299,7 @@ defmodule SpectreMnemonic.Recall.Index do
     end
   end
 
+  @spec ensure_table(atom()) :: :ok | :ets.tid()
   defp ensure_table(table) do
     case :ets.whereis(table) do
       :undefined -> :ets.new(table, [:named_table, :public, read_concurrency: true])

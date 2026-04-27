@@ -8,5 +8,6 @@ defmodule SpectreMnemonic.Embedding.EmbeddingGemma do
   """
 
   @doc "Returns an explicit disabled-provider error for v1."
+  @spec embed(term(), keyword()) :: {:error, :deep_embedding_disabled}
   def embed(_input, _opts), do: {:error, :deep_embedding_disabled}
 end

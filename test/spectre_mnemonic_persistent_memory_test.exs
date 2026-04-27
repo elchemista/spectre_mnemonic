@@ -3,6 +3,7 @@ defmodule SpectreMnemonicPersistentMemoryTest do
 
   alias SpectreMnemonic.PersistentMemory
   alias SpectreMnemonic.Store.{FileStorage, Record}
+  alias SpectreMnemonic.Store.{MongoStorage, PostgresStorage, S3Storage}
 
   test "writes to primary and duplicate stores but skips duplicate false stores" do
     configure_stores([
@@ -155,10 +156,10 @@ defmodule SpectreMnemonicPersistentMemoryTest do
   end
 
   test "built-in adapter capabilities describe sql document and object styles" do
-    assert :fulltext_search in SpectreMnemonic.Store.PostgresStorage.capabilities([])
-    assert :search in SpectreMnemonic.Store.MongoStorage.capabilities([])
-    assert :artifact_blob in SpectreMnemonic.Store.S3Storage.capabilities([])
-    refute :search in SpectreMnemonic.Store.S3Storage.capabilities([])
+    assert :fulltext_search in PostgresStorage.capabilities([])
+    assert :search in MongoStorage.capabilities([])
+    assert :artifact_blob in S3Storage.capabilities([])
+    refute :search in S3Storage.capabilities([])
   end
 
   defp configure_file_store do

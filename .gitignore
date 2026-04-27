@@ -7,11 +7,16 @@
 # The directory Mix downloads your dependencies sources to.
 /deps/
 
+.elixir_ls/
+
 # Where third-party dependencies like ExDoc output generated docs.
 /doc/
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# Local append-only memory segments created by the default disk store.
+/mnemonic_data/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
@@ -21,4 +26,3 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 spectre_mnemonic-*.tar
-

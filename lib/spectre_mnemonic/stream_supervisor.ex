@@ -4,11 +4,13 @@ defmodule SpectreMnemonic.StreamSupervisor do
   use DynamicSupervisor
 
   @doc "Starts the stream supervisor."
+  @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(_opts) do
     DynamicSupervisor.start_link(__MODULE__, :ok, name: __MODULE__)
   end
 
   @doc "Ensures a stream server exists for a stream name."
+  @spec ensure_stream(stream :: term()) :: DynamicSupervisor.on_start_child()
   def ensure_stream(stream) do
     spec = {SpectreMnemonic.StreamServer, stream}
 
@@ -20,49 +22,8 @@ defmodule SpectreMnemonic.StreamSupervisor do
   end
 
   @impl true
+  @spec init(:ok) :: DynamicSupervisor.on_start()
   def init(:ok) do
     DynamicSupervisor.init(strategy: :one_for_one)
-  end
-end
-
-defmodule SpectreMnemonic.StreamServer do
-  @moduledoc """
-  Worker for one activity lane.
-
-  V1 records immediately into focus. The process boundary is still useful
-  because future stream-specific throttling, batching, or summarization can land
-  here without changing the public API.
-  """
-
-  use GenServer
-
-  @doc "Starts a stream server registered by stream name."
-  def start_link(stream) do
-    GenServer.start_link(__MODULE__, stream, name: via(stream))
-  end
-
-  @doc "Records input through the stream process."
-  def signal(stream, input, opts) do
-    GenServer.call(via(stream), {:signal, input, opts})
-  end
-
-  @impl true
-  def init(stream) do
-    :ets.insert(
-      :mnemonic_streams,
-      {stream, %{name: stream, status: :active, inserted_at: DateTime.utc_now()}}
-    )
-
-    {:ok, %{stream: stream}}
-  end
-
-  @impl true
-  def handle_call({:signal, input, opts}, _from, %{stream: stream} = state) do
-    opts = Keyword.put(opts, :stream, stream)
-    {:reply, SpectreMnemonic.Focus.record_signal(input, opts), state}
-  end
-
-  defp via(stream) do
-    {:via, Registry, {SpectreMnemonic.StreamRegistry, stream}}
   end
 end

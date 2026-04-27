@@ -13,9 +13,12 @@ defmodule SpectreMnemonic.Store.FileStorage do
   @version 1
 
   @impl true
+  @spec capabilities(keyword()) :: [SpectreMnemonic.Store.Adapter.capability()]
   def capabilities(_opts), do: [:append, :replay, :event_log]
 
   @impl true
+  @spec put(SpectreMnemonic.Store.Record.t(), keyword()) ::
+          {:ok, pos_integer()} | {:error, term()}
   def put(record, opts) do
     root = data_root(opts)
     ensure_root!(root)
@@ -36,12 +39,14 @@ defmodule SpectreMnemonic.Store.FileStorage do
   end
 
   @impl true
+  @spec replay(keyword()) :: {:ok, [tuple()]}
   def replay(opts) do
     root = data_root(opts)
     {:ok, replay_path(active_path(root))}
   end
 
   @doc "Compacts current replayable records into a snapshot file."
+  @spec compact(keyword()) :: {:ok, Path.t()} | {:error, term()}
   def compact(opts \\ []) do
     root = data_root(opts)
     ensure_root!(root)
@@ -55,19 +60,23 @@ defmodule SpectreMnemonic.Store.FileStorage do
   end
 
   @doc "Returns the configured data root."
+  @spec data_root(keyword()) :: Path.t()
   def data_root(opts \\ []) do
     Keyword.get(opts, :data_root) ||
       Application.get_env(:spectre_mnemonic, :data_root, "mnemonic_data")
   end
 
+  @spec ensure_root!(Path.t()) :: :ok
   defp ensure_root!(root) do
     File.mkdir_p!(Path.join(root, "segments"))
     File.mkdir_p!(Path.join(root, "snapshots"))
     File.mkdir_p!(Path.join(root, "artifacts"))
   end
 
+  @spec active_path(Path.t()) :: Path.t()
   defp active_path(root), do: Path.join([root, "segments", "active.smem"])
 
+  @spec next_seq(Path.t()) :: pos_integer()
   defp next_seq(path) do
     replay_path(path)
     |> List.last({0, nil, nil})
@@ -75,6 +84,7 @@ defmodule SpectreMnemonic.Store.FileStorage do
     |> Kernel.+(1)
   end
 
+  @spec replay_path(Path.t()) :: [tuple()]
   defp replay_path(path) do
     case File.read(path) do
       {:ok, binary} -> read_frames(binary, [])
@@ -83,6 +93,7 @@ defmodule SpectreMnemonic.Store.FileStorage do
     end
   end
 
+  @spec read_frames(binary(), [tuple()]) :: [tuple()]
   defp read_frames(
          <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32,
            rest::binary>>,

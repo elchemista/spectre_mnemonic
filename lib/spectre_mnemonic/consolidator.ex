@@ -11,19 +11,24 @@ defmodule SpectreMnemonic.Consolidator do
   alias SpectreMnemonic.{Focus, Knowledge, PersistentMemory}
 
   @doc "Starts the consolidator process."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
   @doc "Consolidates high-attention moments into persistent memory records."
+  @spec consolidate(keyword()) :: {:ok, [Knowledge.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
     GenServer.call(__MODULE__, {:consolidate, opts})
   end
 
   @impl true
+  @spec init(map()) :: {:ok, map()}
   def init(state), do: {:ok, state}
 
   @impl true
+  @spec handle_call({:consolidate, keyword()}, GenServer.from(), map()) ::
+          {:reply, {:ok, [Knowledge.t()]} | {:error, term()}, map()}
   def handle_call({:consolidate, opts}, _from, state) do
     min_attention = Keyword.get(opts, :min_attention, 1.0)
     now = DateTime.utc_now()

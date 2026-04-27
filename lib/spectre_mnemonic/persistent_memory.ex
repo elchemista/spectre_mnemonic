@@ -14,43 +14,63 @@ defmodule SpectreMnemonic.PersistentMemory do
   alias SpectreMnemonic.Store.{FileStorage, Record}
 
   @default_store_id :local_file
+  @type store :: %{
+          id: atom() | binary(),
+          adapter: module(),
+          role: atom() | nil,
+          duplicate: boolean(),
+          families: :all | [atom()],
+          opts: keyword()
+        }
+  @type config :: keyword()
+  @type write_result :: %{store: term(), role: term(), result: :ok | {:error, term()}}
 
   @doc "Starts the persistent memory manager."
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
   @doc "Persists a family-tagged payload using the configured write policy."
+  @spec append(atom(), term(), keyword()) ::
+          {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def append(family, payload, opts \\ []) do
     GenServer.call(__MODULE__, {:append, family, payload, opts})
   end
 
   @doc "Persists an already-built storage record."
+  @spec put(Record.t(), keyword()) ::
+          {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def put(%Record{} = record, opts \\ []) do
     GenServer.call(__MODULE__, {:put, record, opts})
   end
 
   @doc "Replays and deduplicates records from stores that advertise replay."
+  @spec replay(keyword()) :: {:ok, [Record.t()]}
   def replay(opts \\ []) do
     GenServer.call(__MODULE__, {:replay, opts})
   end
 
   @doc "Looks up one durable record from stores that advertise lookup."
+  @spec get(atom(), binary(), keyword()) :: {:ok, term()} | {:error, :not_found}
   def get(family, id, opts \\ []) do
     GenServer.call(__MODULE__, {:get, family, id, opts})
   end
 
   @doc "Searches durable stores that advertise query capabilities."
+  @spec search(term(), keyword()) :: {:ok, [map()]}
   def search(cue, opts \\ []) do
     GenServer.call(__MODULE__, {:search, cue, opts})
   end
 
   @doc "Compacts replayable file stores."
+  @spec compact(keyword()) :: {:ok, [{term(), {:ok, Path.t()} | {:error, term()}}]}
   def compact(opts \\ []) do
     GenServer.call(__MODULE__, {:compact, opts})
   end
 
   @doc "Returns the active persistent-memory configuration."
+  @spec config :: config()
   def config do
     configured = Application.get_env(:spectre_mnemonic, :persistent_memory, [])
 
@@ -63,9 +83,11 @@ defmodule SpectreMnemonic.PersistentMemory do
   end
 
   @impl true
+  @spec init(keyword()) :: {:ok, map()}
   def init(_opts), do: {:ok, %{}}
 
   @impl true
+  @spec handle_call(term(), GenServer.from(), map()) :: {:reply, term(), map()}
   def handle_call({:append, family, payload, opts}, _from, state) do
     record = build_record(family, :put, payload, opts)
     {:reply, persist(record, opts), state}
@@ -118,6 +140,8 @@ defmodule SpectreMnemonic.PersistentMemory do
     {:reply, {:ok, results}, state}
   end
 
+  @spec persist(Record.t(), keyword()) ::
+          {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   defp persist(record, opts) do
     cfg = effective_config(opts)
     stores = selected_stores(cfg, record)
@@ -129,6 +153,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec build_record(atom(), atom(), term(), keyword()) :: Record.t()
   defp build_record(family, operation, payload, opts) do
     now = DateTime.utc_now()
     id = Keyword.get(opts, :record_id) || id("pmem")
@@ -148,6 +173,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     }
   end
 
+  @spec effective_config(keyword()) :: config()
   defp effective_config(opts) do
     override = Keyword.get(opts, :persistent_memory, [])
 
@@ -159,6 +185,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     |> normalize_config()
   end
 
+  @spec defaults :: config()
   defp defaults do
     [
       write_mode: :all,
@@ -176,6 +203,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     ]
   end
 
+  @spec ensure_stores(config()) :: config()
   defp ensure_stores(config) do
     case Keyword.get(config, :stores, []) do
       [] -> Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
@@ -183,6 +211,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec normalize_config(config()) :: config()
   defp normalize_config(config) do
     Keyword.update!(config, :stores, fn stores ->
       stores
@@ -191,6 +220,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end)
   end
 
+  @spec normalize_store(keyword()) :: store()
   defp normalize_store(store) do
     %{
       id: Keyword.fetch!(store, :id),
@@ -202,6 +232,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     }
   end
 
+  @spec ensure_primary_store([store()]) :: [store()]
   defp ensure_primary_store([]), do: []
 
   defp ensure_primary_store(stores) do
@@ -213,6 +244,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec selected_stores(config(), Record.t()) :: [store()]
   defp selected_stores(config, record) do
     stores = Keyword.fetch!(config, :stores)
 
@@ -222,6 +254,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     |> Enum.uniq_by(& &1.id)
   end
 
+  @spec do_selected_stores(term(), [store()], Record.t()) :: [store()]
   defp do_selected_stores(:all, stores, record) do
     Enum.filter(stores, fn store ->
       store.role == :primary or (store.duplicate and handles_family?(store, record.family))
@@ -245,9 +278,11 @@ defmodule SpectreMnemonic.PersistentMemory do
 
   defp do_selected_stores(_unknown, stores, record), do: do_selected_stores(:all, stores, record)
 
+  @spec handles_family?(store(), atom()) :: boolean()
   defp handles_family?(%{families: :all}, _family), do: true
   defp handles_family?(%{families: families}, family), do: family in List.wrap(families)
 
+  @spec write_store(store(), Record.t()) :: write_result()
   defp write_store(store, record) do
     started = System.monotonic_time()
 
@@ -265,11 +300,13 @@ defmodule SpectreMnemonic.PersistentMemory do
     %{store: store.id, role: store.role, result: result}
   end
 
+  @spec normalize_write_result(term()) :: :ok | {:error, term()}
   defp normalize_write_result(:ok), do: :ok
   defp normalize_write_result({:ok, _value}), do: :ok
   defp normalize_write_result({:error, reason}), do: {:error, reason}
   defp normalize_write_result(other), do: {:error, {:unexpected_adapter_result, other}}
 
+  @spec evaluate_results(config(), [store()], [write_result()]) :: :ok | {:error, term()}
   defp evaluate_results(config, stores, results) do
     failure_mode = Keyword.get(config, :failure_mode, :best_effort)
 
@@ -302,6 +339,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec replayable_stores(config()) :: [store()]
   defp replayable_stores(config) do
     config
     |> Keyword.fetch!(:stores)
@@ -310,6 +348,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end)
   end
 
+  @spec lookup_stores(config()) :: [store()]
   defp lookup_stores(config) do
     config
     |> Keyword.fetch!(:stores)
@@ -318,6 +357,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end)
   end
 
+  @spec searchable_stores(config()) :: [store()]
   defp searchable_stores(config) do
     config
     |> Keyword.fetch!(:stores)
@@ -328,6 +368,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end)
   end
 
+  @spec find_record([store()], atom(), binary()) :: {:ok, term()} | {:error, :not_found}
   defp find_record([], _family, _id), do: {:error, :not_found}
 
   defp find_record([store | rest], family, id) do
@@ -342,6 +383,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec replay_store(store()) :: [Record.t() | map()]
   defp replay_store(store) do
     if function_exported?(store.adapter, :replay, 1) do
       case store.adapter.replay(store.opts) do
@@ -353,6 +395,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec search_store(store(), term()) :: [map()]
   defp search_store(store, cue) do
     if function_exported?(store.adapter, :search, 2) do
       case store.adapter.search(cue, store.opts) do
@@ -364,11 +407,13 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec tag_search_result(term(), term()) :: map()
   defp tag_search_result(result, store_id) when is_map(result),
     do: Map.put_new(result, :store, store_id)
 
   defp tag_search_result(result, store_id), do: %{store: store_id, result: result}
 
+  @spec frame_record(term()) :: Record.t() | term()
   defp frame_record({_seq, _timestamp, %Record{} = record}), do: record
 
   defp frame_record({_seq, _timestamp, {family, payload}}),
@@ -377,6 +422,7 @@ defmodule SpectreMnemonic.PersistentMemory do
   defp frame_record(%Record{} = record), do: record
   defp frame_record(other), do: other
 
+  @spec dedupe_records([term()]) :: [Record.t()]
   defp dedupe_records(records) do
     records
     |> Enum.filter(&match?(%Record{}, &1))
@@ -385,6 +431,7 @@ defmodule SpectreMnemonic.PersistentMemory do
     |> Enum.reverse()
   end
 
+  @spec apply_tombstones([Record.t()]) :: [Record.t()]
   defp apply_tombstones(records) do
     forgotten =
       records
@@ -403,14 +450,14 @@ defmodule SpectreMnemonic.PersistentMemory do
     end)
   end
 
+  @spec safe_capabilities(store()) :: [SpectreMnemonic.Store.Adapter.capability()]
   defp safe_capabilities(store) do
-    try do
-      store.adapter.capabilities(store.opts)
-    rescue
-      _exception -> []
-    end
+    store.adapter.capabilities(store.opts)
+  rescue
+    _exception -> []
   end
 
+  @spec emit_write_event(store(), Record.t(), term(), integer()) :: :ok | term()
   defp emit_write_event(store, record, result, duration) do
     if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
       :telemetry.execute(
@@ -421,9 +468,11 @@ defmodule SpectreMnemonic.PersistentMemory do
     end
   end
 
+  @spec payload_id(term()) :: binary() | nil
   defp payload_id(%{id: id}) when is_binary(id), do: id
   defp payload_id(%{id: id}) when is_atom(id), do: Atom.to_string(id)
   defp payload_id(_payload), do: nil
 
+  @spec id(binary()) :: binary()
   defp id(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
 end

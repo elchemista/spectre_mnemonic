@@ -7,9 +7,10 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   and returns the standard Spectre Mnemonic embedding shape.
   """
 
-  alias SpectreMnemonic.Embedding.{BinaryQuantizer, Vector}
+  alias SpectreMnemonic.Embedding.{BinaryQuantizer, ModelDownloader, Vector}
 
   @doc "Embeds input using local Model2Vec artifacts."
+  @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def embed(input, opts \\ []) do
     with {:ok, model_dir} <- model_dir(opts),
          tokenizer_path <- Path.join(model_dir, "tokenizer.json"),
@@ -42,23 +43,22 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
+  @spec model_dir(keyword()) :: {:ok, Path.t()} | {:error, term()}
   defp model_dir(opts) do
-    case Keyword.get(opts, :model_dir) do
-      dir when is_binary(dir) and dir != "" -> {:ok, dir}
-      _missing -> {:error, :model_dir_not_configured}
-    end
+    ModelDownloader.ensure_model(opts)
   end
 
+  @spec load_json(Path.t()) :: {:ok, map()} | {:error, term()}
   defp load_json(path) do
-    with true <- File.exists?(path) || {:error, {:missing_model_file, path}},
-         {:ok, body} <- File.read(path),
-         {:ok, json} <- Jason.decode(body) do
-      {:ok, json}
+    with :ok <- ensure_file(path),
+         {:ok, body} <- File.read(path) do
+      Jason.decode(body)
     end
   end
 
+  @spec load_safetensors(Path.t()) :: {:ok, map()} | {:error, term()}
   defp load_safetensors(path) do
-    with true <- File.exists?(path) || {:error, {:missing_model_file, path}},
+    with :ok <- ensure_file(path),
          {:ok, <<header_size::little-unsigned-integer-64, rest::binary>>} <- File.read(path),
          <<header_json::binary-size(header_size), tensor_data::binary>> <- rest,
          {:ok, header} <- Jason.decode(header_json),
@@ -72,6 +72,12 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
+  @spec ensure_file(Path.t()) :: :ok | {:error, {:missing_model_file, Path.t()}}
+  defp ensure_file(path) do
+    if File.exists?(path), do: :ok, else: {:error, {:missing_model_file, path}}
+  end
+
+  @spec find_f32_matrix(map()) :: {:ok, binary(), map()} | {:error, :missing_f32_matrix}
   defp find_f32_matrix(header) do
     header
     |> Enum.reject(fn {name, _value} -> name == "__metadata__" end)
@@ -85,6 +91,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
+  @spec tokenize(term(), map(), Path.t()) :: [integer()]
   defp tokenize(input, tokenizer, tokenizer_path) do
     text = if is_binary(input), do: input, else: inspect(input)
 
@@ -97,6 +104,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
+  @spec hf_token_ids(binary(), Path.t()) :: {:ok, [integer()]} | :error
   defp hf_token_ids(text, tokenizer_path) do
     with true <- Code.ensure_loaded?(Tokenizers.Tokenizer),
          true <- Code.ensure_loaded?(Tokenizers.Encoding),
@@ -111,6 +119,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     _exception -> :error
   end
 
+  @spec fallback_token_ids(binary(), map()) :: [integer()]
   defp fallback_token_ids(text, tokenizer) do
     text
     |> String.downcase()
@@ -119,6 +128,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     |> Enum.uniq()
   end
 
+  @spec token_ids(binary(), map()) :: [integer()]
   defp token_ids(token, tokenizer) do
     vocab = tokenizer["model"]["vocab"] || tokenizer["vocab"] || %{}
 
@@ -140,6 +150,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end)
   end
 
+  @spec mean_pool(map(), [integer()]) :: {:ok, [float()]} | {:error, :tokens_out_of_vocab}
   defp mean_pool(%{rows: rows, dimensions: dimensions, data: data}, token_ids) do
     vectors =
       token_ids
@@ -163,6 +174,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
+  @spec read_row(binary(), non_neg_integer(), pos_integer()) :: [float()]
   defp read_row(data, row, dimensions) do
     offset = row * dimensions * 4
 

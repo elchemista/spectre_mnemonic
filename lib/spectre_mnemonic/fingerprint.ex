@@ -13,6 +13,7 @@ defmodule SpectreMnemonic.Fingerprint do
   @range 4_294_967_296
 
   @doc "Returns a 32-bit fingerprint for text or any inspectable term."
+  @spec build(term()) :: non_neg_integer()
   def build(input) do
     input
     |> to_text()
@@ -26,6 +27,7 @@ defmodule SpectreMnemonic.Fingerprint do
   end
 
   @doc "Counts differing bits between two integer fingerprints."
+  @spec hamming_distance(integer(), integer()) :: non_neg_integer()
   def hamming_distance(left, right) when is_integer(left) and is_integer(right) do
     left
     |> bxor(right)
@@ -34,12 +36,14 @@ defmodule SpectreMnemonic.Fingerprint do
   end
 
   @doc "Returns similarity in the `0.0..1.0` range from hamming distance."
+  @spec hamming_similarity(term(), term()) :: float()
   def hamming_similarity(left, right) when is_integer(left) and is_integer(right) do
     max(0.0, 1.0 - hamming_distance(left, right) / @bits)
   end
 
   def hamming_similarity(_left, _right), do: 0.0
 
+  @spec vote_token(term(), [integer()]) :: [integer()]
   defp vote_token(token, votes) do
     hash = :erlang.phash2(token, @range)
 
@@ -49,6 +53,7 @@ defmodule SpectreMnemonic.Fingerprint do
     end)
   end
 
+  @spec bits_to_integer([integer()]) :: non_neg_integer()
   defp bits_to_integer(votes) do
     votes
     |> Enum.with_index()
@@ -57,6 +62,7 @@ defmodule SpectreMnemonic.Fingerprint do
     end)
   end
 
+  @spec tokens(binary()) :: [binary()]
   defp tokens(text) do
     text
     |> String.downcase()
@@ -64,6 +70,7 @@ defmodule SpectreMnemonic.Fingerprint do
     |> Enum.reject(&(String.length(&1) < 3))
   end
 
+  @spec to_text(term()) :: binary()
   defp to_text(input) when is_binary(input), do: input
   defp to_text(input), do: inspect(input)
 end

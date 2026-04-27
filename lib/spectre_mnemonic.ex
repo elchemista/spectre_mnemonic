@@ -18,7 +18,11 @@ defmodule SpectreMnemonic do
     * `:task_id` - task identifier used for status and routing
     * `:kind` - signal kind, such as `:chat`, `:research`, or `:tool`
     * `:metadata` - extra context stored with the signal
+    * `:action_recipe` - English-like Action Language text or map stored as data
   """
+  @spec signal(input :: term(), opts :: keyword()) ::
+          {:ok, SpectreMnemonic.Focus.record_result()}
+          | {:error, term()}
   def signal(input, opts \\ []) do
     SpectreMnemonic.Router.signal(input, opts)
   end
@@ -29,6 +33,8 @@ defmodule SpectreMnemonic do
   The first implementation searches active ETS records with keyword, entity,
   hamming, vector, and graph hints when available.
   """
+  @spec recall(cue :: term(), opts :: keyword()) ::
+          {:ok, SpectreMnemonic.RecallPacket.t()} | {:error, term()}
   def recall(cue, opts \\ []) do
     SpectreMnemonic.Recall.recall(cue, opts)
   end
@@ -39,6 +45,7 @@ defmodule SpectreMnemonic do
   Active results come from recall and durable results come from stores that
   advertise `:search`, `:vector_search`, or `:fulltext_search`.
   """
+  @spec search(cue :: term(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
   def search(cue, opts \\ []) do
     with {:ok, packet} <- recall(cue, opts),
          {:ok, durable_results} <- SpectreMnemonic.PersistentMemory.search(cue, opts) do
@@ -69,6 +76,7 @@ defmodule SpectreMnemonic do
   @doc """
   Returns status for a stream name or task id.
   """
+  @spec status(stream_or_task_id :: term()) :: {:ok, map()} | {:error, :not_found}
   def status(stream_or_task_id) do
     SpectreMnemonic.Focus.status(stream_or_task_id)
   end
@@ -79,6 +87,8 @@ defmodule SpectreMnemonic do
   V1 keeps consolidation deliberately simple: selected moments are appended as
   `:knowledge` records, and a consolidation job record marks the run.
   """
+  @spec consolidate(opts :: keyword()) ::
+          {:ok, [SpectreMnemonic.Knowledge.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
     SpectreMnemonic.Consolidator.consolidate(opts)
   end
@@ -86,13 +96,25 @@ defmodule SpectreMnemonic do
   @doc """
   Creates an association between two memory ids.
   """
+  @spec link(binary(), atom(), binary(), keyword()) ::
+          {:ok, SpectreMnemonic.Association.t()} | {:error, term()}
   def link(source_id, relation, target_id, opts \\ []) do
     SpectreMnemonic.Focus.link(source_id, relation, target_id, opts)
   end
 
   @doc """
   Stores an artifact reference or binary payload.
+
+  Pass `:action_recipe` to attach inert Action Language data to the artifact.
   """
+  @spec artifact(path_or_binary :: term(), opts :: keyword()) ::
+          {:ok,
+           SpectreMnemonic.Artifact.t()
+           | %{
+               artifact: SpectreMnemonic.Artifact.t(),
+               action_recipe: SpectreMnemonic.ActionRecipe.t()
+             }}
+          | {:error, term()}
   def artifact(path_or_binary, opts \\ []) do
     SpectreMnemonic.Focus.artifact(path_or_binary, opts)
   end
@@ -103,6 +125,7 @@ defmodule SpectreMnemonic do
   Supported selectors are ids, `{:stream, stream}`, `{:task, task_id}`, and
   predicate functions that receive a moment.
   """
+  @spec forget(SpectreMnemonic.Focus.selector(), keyword()) :: {:ok, non_neg_integer()}
   def forget(selector, opts \\ []) do
     SpectreMnemonic.Focus.forget(selector, opts)
   end

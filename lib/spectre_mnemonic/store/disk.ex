@@ -9,11 +9,13 @@ defmodule SpectreMnemonic.Store.Disk do
   alias SpectreMnemonic.Store.FileStorage
 
   @doc "No-op compatibility start function for older supervision trees."
+  @spec start_link(keyword()) :: Task.on_start()
   def start_link(_opts) do
     Task.start_link(fn -> Process.sleep(:infinity) end)
   end
 
   @doc "Appends a family-tagged record to the default file store."
+  @spec append(atom(), term()) :: {:ok, pos_integer()} | {:error, term()}
   def append(family, record) do
     payload = %SpectreMnemonic.Store.Record{
       id: "pmem_#{System.unique_integer([:positive, :monotonic])}",
@@ -30,25 +32,30 @@ defmodule SpectreMnemonic.Store.Disk do
   end
 
   @doc "Replays all complete frames from the default file store."
+  @spec replay :: {:ok, [tuple()]}
   def replay do
     {:ok, frames} = FileStorage.replay(data_root: data_root())
     {:ok, Enum.map(frames, &legacy_frame/1)}
   end
 
   @doc "Compacts current replayable records into a snapshot file."
+  @spec compact :: {:ok, Path.t()} | {:error, term()}
   def compact do
     FileStorage.compact(data_root: data_root())
   end
 
   @doc "Returns the configured data root."
+  @spec data_root :: Path.t()
   def data_root do
     FileStorage.data_root()
   end
 
+  @spec payload_id(term()) :: binary() | nil
   defp payload_id(%{id: id}) when is_binary(id), do: id
   defp payload_id(%{id: id}) when is_atom(id), do: Atom.to_string(id)
   defp payload_id(_record), do: nil
 
+  @spec legacy_frame(term()) :: term()
   defp legacy_frame({seq, timestamp, %SpectreMnemonic.Store.Record{} = record}) do
     {seq, timestamp, {record.family, record.payload}}
   end
