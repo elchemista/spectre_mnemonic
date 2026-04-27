@@ -28,7 +28,7 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   @doc "Indexes or replaces one moment."
-  @spec upsert(SpectreMnemonic.Moment.t()) :: :ok
+  @spec upsert(SpectreMnemonic.Memory.Moment.t()) :: :ok
   def upsert(moment) do
     call_if_running({:upsert, moment})
   end

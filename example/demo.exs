@@ -2,9 +2,9 @@ Code.require_file("models.ex", __DIR__)
 
 alias ParallelMemoryExample.Parser
 alias SpectreMnemonic.Embedding.Vector
-alias SpectreMnemonic.KnowledgeBase
-alias SpectreMnemonic.PersistentMemory
-alias SpectreMnemonic.Store.FileStorage
+alias SpectreMnemonic.Knowledge.Base
+alias SpectreMnemonic.Persistence.Manager
+alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
 
 log = fn step, message ->
   time = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -116,7 +116,7 @@ Application.put_env(:spectre_mnemonic, :embedding,
   ]
 )
 
-demo_embedding = SpectreMnemonic.Embedding.embed("parallel durable replay task", [])
+demo_embedding = SpectreMnemonic.Embedding.Service.embed("parallel durable replay task", [])
 
 log.(
   "model",
@@ -132,7 +132,7 @@ Application.put_env(:spectre_mnemonic, :persistent_memory,
   stores: [
     [
       id: :example_file,
-      adapter: FileStorage,
+      adapter: StoreFile,
       role: :primary,
       duplicate: true,
       opts: [data_root: data_root]
@@ -298,7 +298,7 @@ knowledge_events = [
     type: :skill,
     name: "Replay durable file memory",
     text:
-      "Call SpectreMnemonic.PersistentMemory.replay/1 to inspect append-only persistent records.",
+      "Call SpectreMnemonic.Persistence.Manager.replay/1 to inspect append-only persistent records.",
     metadata: %{attention: 2.0, example: :parallel_memory}
   },
   %{
@@ -332,7 +332,7 @@ knowledge_events = [
 
 knowledge_sequences =
   Enum.map(knowledge_events, fn event ->
-    {:ok, sequence} = KnowledgeBase.append(event, data_root: data_root)
+    {:ok, sequence} = Base.append(event, data_root: data_root)
     sequence
   end)
 
@@ -424,7 +424,7 @@ Enum.each(queries, fn query ->
 end)
 
 log.("replay", "Replaying persistent records from local file storage")
-{:ok, durable_records} = PersistentMemory.replay()
+{:ok, durable_records} = Manager.replay()
 
 log.(
   "replay",
@@ -459,12 +459,12 @@ end)
 log.("done", "Search returned #{length(search_results)} active/durable result entries")
 
 log.("compact", "Running semantic persistent memory compaction")
-{:ok, semantic_compact_results} = PersistentMemory.compact(mode: :semantic)
+{:ok, semantic_compact_results} = Manager.compact(mode: :semantic)
 
 log.("compact", "semantic #{inspect(semantic_compact_results)}")
 
 log.("compact", "Running semantic plus physical persistent memory compaction")
-{:ok, all_compact_results} = PersistentMemory.compact(mode: :all)
+{:ok, all_compact_results} = Manager.compact(mode: :all)
 
 log.("compact", "all semantic=#{inspect(all_compact_results.semantic)}")
 

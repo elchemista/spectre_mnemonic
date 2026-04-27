@@ -13,15 +13,15 @@ defmodule SpectreMnemonic.Application do
   @spec start(Application.start_type(), term()) :: Supervisor.on_start()
   def start(_type, _args) do
     children = [
-      SpectreMnemonic.Store.ETSOwner,
-      SpectreMnemonic.PersistentMemory,
-      {Registry, keys: :unique, name: SpectreMnemonic.StreamRegistry},
-      SpectreMnemonic.StreamSupervisor,
-      SpectreMnemonic.Router,
+      SpectreMnemonic.Active.ETSOwner,
+      SpectreMnemonic.Persistence.Manager,
+      {Registry, keys: :unique, name: SpectreMnemonic.Active.StreamRegistry},
+      SpectreMnemonic.Active.StreamSupervisor,
+      SpectreMnemonic.Active.Router,
       SpectreMnemonic.Recall.Index,
-      SpectreMnemonic.Focus,
-      SpectreMnemonic.Recall,
-      SpectreMnemonic.Consolidator
+      SpectreMnemonic.Active.Focus,
+      SpectreMnemonic.Recall.Engine,
+      SpectreMnemonic.Knowledge.Consolidator
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: SpectreMnemonic.Supervisor)
