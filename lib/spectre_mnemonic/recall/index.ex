@@ -1,0 +1,277 @@
+defmodule SpectreMnemonic.Recall.Index do
+  @moduledoc """
+  Active-memory embedding index.
+
+  The index keeps a small ETS mirror of dense vectors and packed binary
+  signatures. When `hnswlib` is available and enabled, it is used for dense ANN
+  candidate retrieval; the ETS mirror remains the deterministic brute-force
+  fallback and the source for binary Hamming reranking.
+  """
+
+  use GenServer
+
+  alias SpectreMnemonic.Embedding.Vector
+
+  @index_table :mnemonic_embedding_index
+  @label_table :mnemonic_embedding_labels
+
+  @doc "Starts the index process."
+  def start_link(opts \\ []) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @doc "Indexes or replaces one moment."
+  def upsert(moment) do
+    call_if_running({:upsert, moment})
+  end
+
+  @doc "Removes one moment from the index."
+  def delete(moment_id) do
+    call_if_running({:delete, moment_id})
+  end
+
+  @doc "Queries indexed active moments by cue embedding."
+  def query(cue, opts \\ []) do
+    call_if_running({:query, cue, opts}, {:ok, []})
+  end
+
+  @doc "Clears ETS index state."
+  def reset do
+    call_if_running(:reset)
+  end
+
+  @impl true
+  def init(_opts) do
+    ensure_table(@index_table)
+    ensure_table(@label_table)
+
+    {:ok, %{next_label: 1, hnsw: nil, hnsw_dim: nil, hnsw_max: nil}}
+  end
+
+  @impl true
+  def handle_call({:upsert, moment}, _from, state) do
+    case indexable(moment) do
+      {:ok, entry} ->
+        label = existing_label(moment.id) || state.next_label
+        :ets.insert(@index_table, {moment.id, Map.put(entry, :label, label)})
+        :ets.insert(@label_table, {label, moment.id})
+
+        state =
+          maybe_add_hnsw(%{state | next_label: max(state.next_label, label + 1)}, entry, label)
+
+        {:reply, :ok, state}
+
+      :skip ->
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call({:delete, moment_id}, _from, state) do
+    case :ets.lookup(@index_table, moment_id) do
+      [{^moment_id, %{label: label}}] ->
+        maybe_mark_deleted(state.hnsw, label)
+        :ets.delete(@label_table, label)
+
+      _missing ->
+        :ok
+    end
+
+    :ets.delete(@index_table, moment_id)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:query, cue, opts}, _from, state) do
+    limit = Keyword.get(opts, :overfetch) || get_in(index_config(), [:overfetch]) || 40
+    results = query_hnsw(state, cue, limit) || brute_force(cue, limit)
+    {:reply, {:ok, results}, state}
+  end
+
+  def handle_call(:reset, _from, state) do
+    :ets.delete_all_objects(@index_table)
+    :ets.delete_all_objects(@label_table)
+    {:reply, :ok, %{state | hnsw: nil, hnsw_dim: nil, hnsw_max: nil, next_label: 1}}
+  end
+
+  defp brute_force(%{vector: nil}, _limit), do: []
+
+  defp brute_force(cue, limit) do
+    cue_vector = Map.get(cue, :vector)
+    cue_signature = Map.get(cue, :binary_signature)
+
+    @index_table
+    |> :ets.tab2list()
+    |> Enum.map(fn {moment_id, entry} ->
+      score_entry(moment_id, entry, cue_vector, cue_signature)
+    end)
+    |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
+    |> Enum.take(limit)
+  end
+
+  defp query_hnsw(%{hnsw: nil}, _cue, _limit), do: nil
+  defp query_hnsw(_state, %{vector: nil}, _limit), do: nil
+
+  defp query_hnsw(state, cue, limit) do
+    k = min(limit, indexed_count())
+
+    if k > 0 do
+      case HNSWLib.Index.knn_query(state.hnsw, cue.vector, k: k) do
+        {:ok, labels, _distances} ->
+          labels
+          |> Nx.to_flat_list()
+          |> Enum.flat_map(&entry_for_label/1)
+          |> Enum.map(fn {moment_id, entry} ->
+            score_entry(moment_id, entry, cue.vector, cue.binary_signature)
+          end)
+          |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
+
+        {:error, _reason} ->
+          nil
+      end
+    end
+  rescue
+    _exception -> nil
+  end
+
+  defp score_entry(moment_id, entry, cue_vector, cue_signature) do
+    cosine = max(0.0, Vector.cosine(entry.vector, cue_vector))
+
+    signature_bits =
+      Map.get(entry, :signature_bits, byte_size(entry.binary_signature || <<>>) * 8)
+
+    hamming = Vector.hamming_distance(entry.binary_signature, cue_signature)
+
+    hamming_similarity =
+      Vector.hamming_similarity(entry.binary_signature, cue_signature, signature_bits)
+
+    %{
+      id: moment_id,
+      score: cosine * 4.0 + hamming_similarity * 4.0,
+      cosine: cosine,
+      hamming_distance: hamming,
+      hamming_similarity: hamming_similarity
+    }
+  end
+
+  defp indexable(%{id: id, vector: vector, binary_signature: signature, embedding: embedding})
+       when is_binary(id) and is_binary(vector) and is_binary(signature) do
+    metadata = embedding_metadata(embedding)
+
+    {:ok,
+     %{
+       vector: vector,
+       binary_signature: signature,
+       dimensions: Map.get(metadata, :dimensions) || Vector.dimensions(vector),
+       signature_bits: Map.get(metadata, :signature_bits) || byte_size(signature) * 8,
+       metadata: metadata
+     }}
+  end
+
+  defp indexable(_moment), do: :skip
+
+  defp embedding_metadata(%{metadata: metadata}) when is_map(metadata), do: metadata
+  defp embedding_metadata(_embedding), do: %{}
+
+  defp existing_label(moment_id) do
+    case :ets.lookup(@index_table, moment_id) do
+      [{^moment_id, %{label: label}}] -> label
+      _missing -> nil
+    end
+  end
+
+  defp maybe_add_hnsw(state, entry, label) do
+    with true <- hnsw_enabled?(),
+         true <- Code.ensure_loaded?(HNSWLib.Index),
+         true <- Code.ensure_loaded?(Nx),
+         {:ok, state} <- ensure_hnsw(state, entry.dimensions),
+         :ok <- ensure_hnsw_capacity(state, label),
+         tensor <- Nx.tensor([Vector.to_list(entry.vector)], type: :f32),
+         :ok <- HNSWLib.Index.add_items(state.hnsw, tensor, ids: [label], replace_deleted: true) do
+      state
+    else
+      _fallback -> state
+    end
+  rescue
+    _exception -> state
+  end
+
+  defp ensure_hnsw(%{hnsw: nil} = state, dimensions) do
+    config = index_config()
+    max_elements = Map.get(config, :max_elements, 10_000)
+
+    opts = [
+      m: Map.get(config, :m, 16),
+      ef_construction: Map.get(config, :ef_construction, 200),
+      allow_replace_deleted: true
+    ]
+
+    case HNSWLib.Index.new(Map.get(config, :space, :cosine), dimensions, max_elements, opts) do
+      {:ok, index} ->
+        if ef = Map.get(config, :ef) do
+          HNSWLib.Index.set_ef(index, ef)
+        end
+
+        {:ok, %{state | hnsw: index, hnsw_dim: dimensions, hnsw_max: max_elements}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_hnsw(%{hnsw_dim: dimensions} = state, dimensions), do: {:ok, state}
+  defp ensure_hnsw(_state, _dimensions), do: {:error, :dimension_mismatch}
+
+  defp ensure_hnsw_capacity(%{hnsw: nil}, _label), do: :ok
+
+  defp ensure_hnsw_capacity(%{hnsw: index, hnsw_max: max_elements}, label)
+       when is_integer(max_elements) and label >= max_elements do
+    HNSWLib.Index.resize_index(index, max(max_elements * 2, label + 1))
+  end
+
+  defp ensure_hnsw_capacity(_state, _label), do: :ok
+
+  defp maybe_mark_deleted(nil, _label), do: :ok
+
+  defp maybe_mark_deleted(index, label) do
+    HNSWLib.Index.mark_deleted(index, label)
+  rescue
+    _exception -> :ok
+  end
+
+  defp entry_for_label(label) do
+    with [{^label, moment_id}] <- :ets.lookup(@label_table, label),
+         [{^moment_id, entry}] <- :ets.lookup(@index_table, moment_id) do
+      [{moment_id, entry}]
+    else
+      _missing -> []
+    end
+  end
+
+  defp indexed_count, do: :ets.info(@index_table, :size) || 0
+
+  defp hnsw_enabled? do
+    config = index_config()
+    Map.get(config, :enabled, true) and Map.get(config, :backend, :hnsw) == :hnsw
+  end
+
+  defp index_config do
+    :spectre_mnemonic
+    |> Application.get_env(:embedding, [])
+    |> Keyword.get(:index, [])
+    |> Map.new()
+  end
+
+  defp call_if_running(message, fallback \\ :ok) do
+    if Process.whereis(__MODULE__) do
+      GenServer.call(__MODULE__, message)
+    else
+      fallback
+    end
+  end
+
+  defp ensure_table(table) do
+    case :ets.whereis(table) do
+      :undefined -> :ets.new(table, [:named_table, :public, read_concurrency: true])
+      _tid -> :ok
+    end
+  end
+end
