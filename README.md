@@ -215,6 +215,12 @@ until replaced with app-specific implementations.
 Embeddings are optional. Without an adapter, recall still works through text,
 fingerprints, and associations.
 
+When embeddings are enabled, `SpectreMnemonic.signal/2` embeds each new memory
+at ingestion time. The normalized vector and binary signature are stored on the
+active `%SpectreMnemonic.Moment{}` and indexed by `SpectreMnemonic.Recall.Index`.
+Later, `SpectreMnemonic.recall/2` embeds the cue and uses vector/signature
+similarity as part of the recall score.
+
 Configure a custom adapter:
 
 ```elixir
@@ -239,6 +245,74 @@ config :spectre_mnemonic,
 
 Downloads are opt-in. For production, pre-populate the model cache or provide a
 known `:model_dir`.
+
+For a fully local demo, run:
+
+```bash
+mix run example/demo.exs
+```
+
+The demo configures `SpectreMnemonic.Embedding.Model2VecStatic` with the tiny
+fixture in `example/models/tiny_model2vec`, writes embedded moments, recalls
+with vectors, and persists the resulting memory records.
+
+### Gemma embeddings for consolidation
+
+`SpectreMnemonic.consolidate/1` promotes selected active moments into durable
+`%SpectreMnemonic.Knowledge{}` records. Consolidation does not re-embed text by
+itself; it copies the `vector`, `binary_signature`, and `embedding` already
+stored on each moment. To consolidate memory with Gemma embeddings, configure a
+Gemma-backed embedding adapter before calling `signal/2`, then consolidate:
+
+```elixir
+config :spectre_mnemonic,
+  embedding_adapter: MyApp.GemmaEmbeddingAdapter
+```
+
+```elixir
+defmodule MyApp.GemmaEmbeddingAdapter do
+  @behaviour SpectreMnemonic.Embedding.Adapter
+
+  @impl true
+  def embed(input, _opts) do
+    text = if is_binary(input), do: input, else: inspect(input)
+
+    # Call your Gemma embedding runtime here: Bumblebee/Nx, an HTTP service,
+    # Ollama, EXLA-backed serving, or another local inference process.
+    {:ok, vector} = MyApp.Gemma.embed(text)
+
+    {:ok,
+     %{
+       vector: vector,
+       metadata: %{
+         provider: :gemma,
+         model: "embedding-gemma",
+         purpose: :memory_consolidation
+       }
+     }}
+  end
+end
+```
+
+```elixir
+{:ok, %{moment: moment}} =
+  SpectreMnemonic.signal("User prefers compact technical summaries",
+    stream: :chat,
+    task_id: "session-42",
+    kind: :memory,
+    metadata: %{importance: :high}
+  )
+
+{:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: moment.attention)
+
+Enum.map(knowledge, fn item ->
+  {item.text, item.embedding.metadata.model}
+end)
+```
+
+The reserved module `SpectreMnemonic.Embedding.EmbeddingGemma` is currently a
+disabled placeholder and returns `{:error, :deep_embedding_disabled}`. Use your
+own adapter, as above, until Gemma support is wired into the library.
 
 ## Development
 

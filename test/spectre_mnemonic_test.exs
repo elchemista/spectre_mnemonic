@@ -108,6 +108,18 @@ defmodule SpectreMnemonicTest do
     assert_in_delta Vector.hamming_similarity(left, right, 4), 0.75, 0.0001
   end
 
+  test "vector helpers accept Nx tensors" do
+    tensor = Nx.tensor([3.0, 4.0], type: :f32)
+
+    vector = Vector.normalize_to_f32_binary(tensor)
+
+    assert is_binary(vector)
+    assert Vector.dimensions(tensor) == 2
+    assert Vector.to_list(tensor) == [3.0, 4.0]
+    assert_in_delta Vector.dot(tensor, [0.6, 0.8]), 5.0, 0.0001
+    assert_in_delta Vector.cosine(vector, tensor), 1.0, 0.0001
+  end
+
   test "recall index brute-force fallback ranks indexed embeddings" do
     Application.put_env(:spectre_mnemonic, :embedding_adapter, __MODULE__.TwoVectorAdapter)
 

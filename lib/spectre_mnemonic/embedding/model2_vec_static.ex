@@ -3,8 +3,9 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   Minimal local Model2Vec static embedder.
 
   It reads `tokenizer.json` and `model.safetensors` from a configured model
-  directory, tokenizes text, mean-pools token vectors, normalizes the result,
-  and returns the standard Spectre Mnemonic embedding shape.
+  directory, tokenizes text, mean-pools token vectors with Nx when available,
+  normalizes the result, and returns the standard Spectre Mnemonic embedding
+  shape.
   """
 
   alias SpectreMnemonic.Embedding.{BinaryQuantizer, ModelDownloader, Vector}
@@ -18,9 +19,9 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
          {:ok, model} <- load_safetensors(Path.join(model_dir, "model.safetensors")),
          token_ids when token_ids != [] <- tokenize(input, tokenizer, tokenizer_path),
          {:ok, vector} <- mean_pool(model, token_ids) do
-      dimensions = Keyword.get(opts, :dimensions) || length(vector)
+      dimensions = Keyword.get(opts, :dimensions) || Vector.dimensions(vector)
       signature_bits = Keyword.get(opts, :signature_bits, dimensions)
-      dense = vector |> Vector.normalize() |> Vector.to_f32_binary()
+      dense = Vector.normalize_to_f32_binary(vector)
 
       {:ok,
        %{
@@ -65,7 +66,15 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
          {:ok, tensor_name, tensor} <- find_f32_matrix(header) do
       %{"data_offsets" => [start_offset, end_offset], "shape" => [rows, dimensions]} = tensor
       tensor_bytes = binary_part(tensor_data, start_offset, end_offset - start_offset)
-      {:ok, %{name: tensor_name, rows: rows, dimensions: dimensions, data: tensor_bytes}}
+
+      {:ok,
+       %{
+         name: tensor_name,
+         rows: rows,
+         dimensions: dimensions,
+         data: tensor_bytes,
+         tensor: matrix_tensor(tensor_bytes, rows, dimensions)
+       }}
     else
       {:error, reason} -> {:error, reason}
       _other -> {:error, :invalid_safetensors_file}
@@ -150,7 +159,31 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end)
   end
 
-  @spec mean_pool(map(), [integer()]) :: {:ok, [float()]} | {:error, :tokens_out_of_vocab}
+  @spec matrix_tensor(binary(), pos_integer(), pos_integer()) :: term() | nil
+  defp matrix_tensor(tensor_bytes, rows, dimensions) do
+    if Code.ensure_loaded?(Nx) and function_exported?(Nx, :from_binary, 2) do
+      tensor_bytes
+      |> Nx.from_binary(:f32)
+      |> Nx.reshape({rows, dimensions})
+    end
+  end
+
+  @spec mean_pool(map(), [integer()]) :: {:ok, term()} | {:error, :tokens_out_of_vocab}
+  defp mean_pool(%{rows: rows, tensor: tensor}, token_ids) when not is_nil(tensor) do
+    token_ids = Enum.filter(token_ids, &(&1 >= 0 and &1 < rows))
+
+    if token_ids == [] do
+      {:error, :tokens_out_of_vocab}
+    else
+      mean =
+        tensor
+        |> Nx.take(Nx.tensor(token_ids, type: :s64))
+        |> Nx.mean(axes: [0])
+
+      {:ok, mean}
+    end
+  end
+
   defp mean_pool(%{rows: rows, dimensions: dimensions, data: data}, token_ids) do
     vectors =
       token_ids

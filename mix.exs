@@ -23,8 +23,8 @@ defmodule SpectreMnemonic.MixProject do
     ]
   end
 
-  # Dependencies stay intentionally small for V1. Nx is listed by the plan for
-  # vector math; this first pass still works when no embedding adapter exists.
+  # Nx powers local vector math and Model2Vec pooling. Axon/Bumblebee belong in
+  # higher-level embedding adapters that run neural model forward passes.
   @spec deps :: [{atom(), binary()} | {atom(), binary(), keyword()}]
   defp deps do
     [
