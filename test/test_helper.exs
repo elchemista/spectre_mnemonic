@@ -38,6 +38,8 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
     Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
     Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
+    Application.delete_env(:spectre_mnemonic, :compact_adapter)
+    Application.delete_env(:spectre_mnemonic, :knowledge)
     reset_disk_root()
     clear_memory()
 
@@ -48,6 +50,8 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
       Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
       Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
+      Application.delete_env(:spectre_mnemonic, :compact_adapter)
+      Application.delete_env(:spectre_mnemonic, :knowledge)
       clear_memory()
       File.rm_rf!("mnemonic_data")
       File.rm_rf!("mnemonic_data_secondary")
@@ -77,5 +81,6 @@ defmodule SpectreMnemonic.MemoryCase do
     File.mkdir_p!(Path.join(["mnemonic_data", "segments"]))
     File.mkdir_p!(Path.join(["mnemonic_data", "snapshots"]))
     File.mkdir_p!(Path.join(["mnemonic_data", "artifacts"]))
+    File.mkdir_p!(Path.join(["mnemonic_data", "knowledge"]))
   end
 end

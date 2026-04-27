@@ -18,6 +18,7 @@ defmodule SpectreMnemonic.Store.Adapter do
           | :fulltext_search
           | :artifact_blob
           | :event_log
+          | :semantic_compact
 
   @callback put(Record.t(), keyword()) :: :ok | {:ok, term()} | {:error, term()}
   @callback replay(keyword()) :: {:ok, list()} | {:error, term()}
@@ -25,7 +26,9 @@ defmodule SpectreMnemonic.Store.Adapter do
   @callback search(term(), keyword()) :: {:ok, list()} | {:error, term()}
   @callback delete_or_tombstone(atom(), binary(), keyword()) ::
               :ok | {:ok, term()} | {:error, term()}
+  @callback semantic_compact(input :: map(), opts :: keyword()) ::
+              {:ok, map()} | {:error, term()}
   @callback capabilities(keyword()) :: [capability()]
 
-  @optional_callbacks replay: 1, get: 3, search: 2, delete_or_tombstone: 3
+  @optional_callbacks replay: 1, get: 3, search: 2, delete_or_tombstone: 3, semantic_compact: 2
 end

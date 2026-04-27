@@ -58,6 +58,7 @@ defmodule SpectreMnemonic.Recall do
       cue: cue,
       active_status: active_status(ranked),
       moments: ranked,
+      knowledge: compact_knowledge(opts),
       artifacts: artifacts_for(ranked, associations),
       associations: associations_for(ranked, associations),
       action_recipes: action_recipes_for(ranked, associations),
@@ -192,6 +193,22 @@ defmodule SpectreMnemonic.Recall do
   @spec confidence([Moment.t()]) :: float()
   defp confidence([]), do: 0.0
   defp confidence(moments), do: min(1.0, length(moments) / 5)
+
+  @spec compact_knowledge(keyword()) :: [SpectreMnemonic.Knowledge.t()]
+  defp compact_knowledge(opts) do
+    include? =
+      opts
+      |> Keyword.get(:include_knowledge, true)
+
+    if include? do
+      case SpectreMnemonic.KnowledgeBase.load(opts) do
+        {:ok, %{summary: nil, skills: [], latest_ingestions: [], facts: [], procedures: []}} -> []
+        {:ok, knowledge} -> [knowledge]
+      end
+    else
+      []
+    end
+  end
 
   @spec status_match?(Moment.t(), Cue.t()) :: boolean()
   defp status_match?(moment, cue) do

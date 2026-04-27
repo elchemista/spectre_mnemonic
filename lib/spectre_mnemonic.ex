@@ -88,6 +88,49 @@ defmodule SpectreMnemonic do
   end
 
   @doc """
+  Loads compact progressive knowledge from `knowledge.smem`.
+
+  The loader is budgeted: it returns a compact `%SpectreMnemonic.Knowledge{}`
+  packet instead of hydrating the whole event log into active ETS memory.
+  """
+  @spec knowledge(keyword()) :: {:ok, SpectreMnemonic.Knowledge.t()}
+  def knowledge(opts \\ []) do
+    SpectreMnemonic.KnowledgeBase.load(opts)
+  end
+
+  @doc """
+  Alias for `knowledge/1`.
+  """
+  @spec load_knowledge(keyword()) :: {:ok, SpectreMnemonic.Knowledge.t()}
+  def load_knowledge(opts \\ []) do
+    knowledge(opts)
+  end
+
+  @doc """
+  Searches compact progressive knowledge in `knowledge.smem`.
+
+  This is a targeted read path: it returns scored event matches and does not
+  hydrate the full event log into active ETS memory.
+  """
+  @spec search_knowledge(cue :: term(), opts :: keyword()) :: {:ok, [map()]}
+  def search_knowledge(cue, opts \\ []) do
+    SpectreMnemonic.KnowledgeBase.search(cue, opts)
+  end
+
+  @doc """
+  Compacts active memory and existing `knowledge.smem` events.
+
+  Applications can configure `:compact_adapter` or pass one in opts to use an
+  LLM or custom strategy. Without an adapter, a deterministic compact strategy
+  writes a concise event set.
+  """
+  @spec compact_knowledge(keyword()) ::
+          {:ok, %{events: [map()], count: non_neg_integer()}} | {:error, term()}
+  def compact_knowledge(opts \\ []) do
+    SpectreMnemonic.Compact.compact_knowledge(opts)
+  end
+
+  @doc """
   Returns status for a stream name or task id.
   """
   @spec status(stream_or_task_id :: term()) :: {:ok, map()} | {:error, :not_found}

@@ -37,6 +37,8 @@ The public API is intentionally compact:
 - Optional vector recall through embedding adapters or the local Model2Vec provider.
 - Durable persistence through `SpectreMnemonic.PersistentMemory` and storage adapters.
 - Append-only local file storage with replay, deduplication, tombstones, and compaction.
+- Compact progressive knowledge through `knowledge.smem`, with budgeted loading,
+  targeted search, and adapter-driven compaction.
 - Adapter-driven consolidation for deciding what active memory becomes durable.
 - Inert Action Language recipes attached to memories for external runtimes such
   as `spectre_kinetic`.
@@ -158,10 +160,13 @@ system paths:
   and uses it to generate vectors and binary signatures
 - consolidates active graph memory into durable moments, summaries, categories,
   embeddings, associations, and knowledge records
+- appends compact progressive knowledge events to
+  `example/mnemonic_data/knowledge/knowledge.smem`
+- searches and loads progressive knowledge without hydrating the full event log
 - writes durable memory to the append-only persistent store at
   `example/mnemonic_data/segments/active.smem`
 - writes and registers an example artifact under `example/mnemonic_data/artifacts`
-- compacts persistent memory into `example/mnemonic_data/snapshots`
+- runs semantic and physical persistent memory compaction
 - runs recall and search queries and logs each step
 
 Run it from the repository root:
@@ -177,7 +182,11 @@ model        Smoke test vector_dims=4 signature_bytes=1
 remembered   ... chunks=1 summaries=2 categories=... edges=...
 summary      Remembered 39 events into ... active moments and ... graph edges
 consolidate  Persisted ... knowledge records plus summaries, categories, embeddings, and associations
+knowledge    Appended compact progressive events to .../knowledge/knowledge.smem
+knowledge    search "durable replay" -> ... compact matches
+knowledge    loaded summary_bytes=... skills=... facts=...
 replay       Loaded ... records from .../example/mnemonic_data/segments/active.smem
+compact      semantic %{example_file: %{...}}
 compact      example_file snapshot=.../example/mnemonic_data/snapshots/snapshot-...
 files        models/tiny_model2vec/model.safetensors size=...
 ```
@@ -280,12 +289,135 @@ Storage adapters implement `SpectreMnemonic.Store.Adapter`. Built-in Postgres,
 Mongo, and S3 modules advertise intended capabilities but return setup errors
 until replaced with app-specific implementations.
 
+Persistent memory compaction has explicit modes:
+
+```elixir
+SpectreMnemonic.PersistentMemory.compact()
+SpectreMnemonic.PersistentMemory.compact(mode: :physical)
+SpectreMnemonic.PersistentMemory.compact(mode: :semantic)
+SpectreMnemonic.PersistentMemory.compact(mode: :all)
+```
+
+`:physical` is the default and keeps the original file snapshot behavior.
+`:semantic` first asks an adapter with `:semantic_compact` support to compact
+natively. If the store can replay records, SpectreMnemonic falls back to a
+generic semantic pass and writes compact records or tombstones through the same
+store API. Stores without either path are skipped cleanly. `:all` runs semantic
+compaction first, then physical snapshot compaction.
+
+Configure persistent semantic compaction with a project adapter when you want
+LLM-backed or database-native behavior:
+
+```elixir
+config :spectre_mnemonic,
+  persistent_memory: [
+    compact_mode: :physical,
+    semantic_compact_adapter: MyApp.PersistentCompactAdapter,
+    semantic_compact_families: [:moments, :knowledge, :summaries, :categories, :associations],
+    semantic_compact_limit: 1_000
+  ]
+```
+
+The adapter implements `SpectreMnemonic.PersistentMemory.Compact.Adapter`:
+
+```elixir
+defmodule MyApp.PersistentCompactAdapter do
+  @behaviour SpectreMnemonic.PersistentMemory.Compact.Adapter
+
+  @impl true
+  def compact(input, _opts) do
+    records =
+      input.records
+      |> Enum.group_by(& &1.family)
+      |> Enum.map(fn {family, records} ->
+        {family,
+         %{
+           text: "Compacted #{length(records)} #{family} records",
+           source_record_ids: Enum.map(records, & &1.id)
+         }}
+      end)
+
+    {:ok, %{strategy: :my_app, records: records, replace_ids: []}}
+  end
+end
+```
+
 The durable envelope model is family-based and intentionally Postgres-ready.
 Current consolidation writes families such as `:moments`, `:summaries`,
 `:categories`, `:embeddings`, `:associations`, `:knowledge`,
 `:consolidation_jobs`, and `:tombstones`. A future SQL adapter can index family,
 payload id, graph endpoints, text, vector metadata, source id, and inserted
 time without changing the high-level intake API.
+
+## Progressive Knowledge
+
+`knowledge.smem` is a compact progressive knowledge log, separate from active
+ETS memory and separate from the durable persistent-memory families. It stores
+small knowledge events at `data_root/knowledge/knowledge.smem`:
+
+- `:summary`
+- `:skill`
+- `:latest_ingestion`
+- `:fact`
+- `:procedure`
+- `:compaction_marker`
+
+Write compact events directly:
+
+```elixir
+SpectreMnemonic.KnowledgeBase.append(%{
+  type: :skill,
+  name: "Replay local file storage",
+  text: "Use PersistentMemory.replay/1 to inspect append-only store records.",
+  metadata: %{attention: 2.0}
+})
+
+SpectreMnemonic.KnowledgeBase.append(%{
+  type: :fact,
+  text: "knowledge.smem is loaded by budget and is not expanded into ETS."
+})
+```
+
+Search the knowledge log without loading the whole packet:
+
+```elixir
+{:ok, matches} = SpectreMnemonic.search_knowledge("replay storage", limit: 5)
+```
+
+Load only a compact budgeted packet:
+
+```elixir
+{:ok, knowledge} =
+  SpectreMnemonic.load_knowledge(
+    max_loaded_bytes: 8_000,
+    max_skills: 10,
+    max_latest_ingestions: 10
+  )
+
+knowledge.summary
+knowledge.skills
+knowledge.facts
+knowledge.procedures
+knowledge.latest_ingestions
+```
+
+`SpectreMnemonic.recall/2` includes this compact packet in
+`RecallPacket.knowledge` by default. Pass `include_knowledge: false` when a
+recall should stay active-memory only.
+
+Compact progressive knowledge with the deterministic default or a custom
+adapter:
+
+```elixir
+SpectreMnemonic.compact_knowledge()
+
+config :spectre_mnemonic,
+  compact_adapter: MyApp.KnowledgeCompactAdapter
+```
+
+The adapter implements `SpectreMnemonic.Compact.Adapter` and can call an LLM,
+a local model, or a deterministic app-specific policy. Its output is normalized
+back into compact knowledge events.
 
 ## Summarization
 

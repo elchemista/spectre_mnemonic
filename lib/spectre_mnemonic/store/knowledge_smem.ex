@@ -1,0 +1,267 @@
+defmodule SpectreMnemonic.Store.KnowledgeSMEM do
+  @moduledoc """
+  Compact append-only knowledge event log.
+
+  The file lives at `data_root/knowledge/knowledge.smem` and uses the same
+  framed binary style as the default file store: magic/version bytes, sequence,
+  timestamp, payload length, CRC32, and compressed Erlang term payload.
+  """
+
+  @magic "SKNW"
+  @version 1
+  @max_text_graphemes 2_000
+
+  @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
+
+  @type event_type ::
+          :summary | :skill | :latest_ingestion | :fact | :procedure | :compaction_marker
+
+  @type event :: %{
+          optional(:id) => binary(),
+          optional(:type) => event_type(),
+          optional(:text) => binary(),
+          optional(:summary) => binary(),
+          optional(:name) => binary(),
+          optional(:steps) => [term()],
+          optional(:value) => term(),
+          optional(:source_id) => binary(),
+          optional(:usage) => map(),
+          optional(:metadata) => map(),
+          optional(:inserted_at) => DateTime.t()
+        }
+
+  @doc "Appends one compact knowledge event."
+  @spec append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
+  def append(event, opts \\ []) when is_map(event) do
+    root = data_root(opts)
+    ensure_root!(root)
+    path = active_path(root)
+    seq = next_seq(path)
+    payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
+    crc = :erlang.crc32(payload)
+    timestamp = System.system_time(:millisecond)
+
+    frame =
+      <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32, crc::32,
+        payload::binary>>
+
+    case File.write(path, frame, [:append, :binary]) do
+      :ok -> {:ok, seq}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Appends several compact knowledge events."
+  @spec append_many([event()], keyword()) :: {:ok, [pos_integer()]} | {:error, term()}
+  def append_many(events, opts \\ []) when is_list(events) do
+    Enum.reduce_while(events, {:ok, []}, fn event, {:ok, acc} ->
+      case append(event, opts) do
+        {:ok, seq} -> {:cont, {:ok, acc ++ [seq]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @doc "Replays complete events from `knowledge.smem`."
+  @spec replay(keyword()) :: {:ok, [event()]}
+  def replay(opts \\ []) do
+    root = data_root(opts)
+    {:ok, replay_path(active_path(root))}
+  end
+
+  @doc "Rewrites `knowledge.smem` with a compact replacement event set."
+  @spec replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def replace(events, opts \\ []) when is_list(events) do
+    root = data_root(opts)
+    ensure_root!(root)
+    path = active_path(root)
+    tmp_path = path <> ".tmp"
+
+    with :ok <- File.write(tmp_path, "", [:binary]),
+         {:ok, _seqs} <- append_many_to_path(tmp_path, events),
+         :ok <- File.rename(tmp_path, path) do
+      reset_seq(path)
+      {:ok, length(events)}
+    else
+      {:error, reason} ->
+        File.rm(tmp_path)
+        {:error, reason}
+    end
+  end
+
+  @doc "Returns the configured knowledge directory."
+  @spec data_root(keyword()) :: Path.t()
+  def data_root(opts \\ []) do
+    root =
+      Keyword.get(opts, :data_root) ||
+        Application.get_env(:spectre_mnemonic, :data_root, "mnemonic_data")
+
+    Path.join(root, "knowledge")
+  end
+
+  @doc "Returns the full `knowledge.smem` path."
+  @spec path(keyword()) :: Path.t()
+  def path(opts \\ []), do: active_path(data_root(opts))
+
+  @spec event_types :: [event_type()]
+  def event_types, do: @event_types
+
+  @spec normalize_event(map()) :: event()
+  def normalize_event(event) do
+    event = atomize_known_keys(event)
+    now = DateTime.utc_now()
+    type = event |> Map.get(:type, :fact) |> normalize_type()
+
+    %{
+      id: Map.get(event, :id) || id("know_evt"),
+      type: type,
+      text:
+        compact_text(Map.get(event, :text) || Map.get(event, :summary) || Map.get(event, :name)),
+      summary: compact_text(Map.get(event, :summary)),
+      name: compact_text(Map.get(event, :name)),
+      steps: List.wrap(Map.get(event, :steps, [])),
+      value: Map.get(event, :value),
+      source_id: Map.get(event, :source_id),
+      usage: Map.new(Map.get(event, :usage, %{})),
+      metadata: Map.new(Map.get(event, :metadata, %{})),
+      inserted_at: Map.get(event, :inserted_at) || now
+    }
+  end
+
+  @spec append_many_to_path(Path.t(), [event()]) :: {:ok, [pos_integer()]} | {:error, term()}
+  defp append_many_to_path(path, events) do
+    Enum.reduce_while(Enum.with_index(events, 1), {:ok, []}, fn {event, seq}, {:ok, acc} ->
+      payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
+      crc = :erlang.crc32(payload)
+      timestamp = System.system_time(:millisecond)
+
+      frame =
+        <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32,
+          crc::32, payload::binary>>
+
+      case File.write(path, frame, [:append, :binary]) do
+        :ok -> {:cont, {:ok, acc ++ [seq]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec ensure_root!(Path.t()) :: :ok
+  defp ensure_root!(root), do: File.mkdir_p!(root)
+
+  @spec active_path(Path.t()) :: Path.t()
+  defp active_path(root), do: Path.join(root, "knowledge.smem")
+
+  @spec next_seq(Path.t()) :: pos_integer()
+  defp next_seq(path) do
+    key = {__MODULE__, :seq, path}
+
+    current =
+      case :persistent_term.get(key, :missing) do
+        :missing -> initial_seq(path)
+        seq -> seq
+      end
+
+    seq = current + 1
+    :persistent_term.put(key, seq)
+    seq
+  end
+
+  @spec reset_seq(Path.t()) :: :ok
+  defp reset_seq(path) do
+    :persistent_term.put({__MODULE__, :seq, path}, initial_seq(path))
+    :ok
+  end
+
+  @spec initial_seq(Path.t()) :: non_neg_integer()
+  defp initial_seq(path) do
+    path
+    |> replay_frames()
+    |> List.last({0, nil, nil})
+    |> elem(0)
+  end
+
+  @spec replay_path(Path.t()) :: [event()]
+  defp replay_path(path) do
+    path
+    |> replay_frames()
+    |> Enum.map(fn {_seq, _timestamp, event} -> event end)
+  end
+
+  @spec replay_frames(Path.t()) :: [tuple()]
+  defp replay_frames(path) do
+    case File.read(path) do
+      {:ok, binary} -> read_frames(binary, [])
+      {:error, :enoent} -> []
+      {:error, _reason} -> []
+    end
+  end
+
+  @spec read_frames(binary(), [tuple()]) :: [tuple()]
+  defp read_frames(
+         <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32,
+           rest::binary>>,
+         acc
+       )
+       when byte_size(rest) >= len do
+    <<payload::binary-size(len), tail::binary>> = rest
+
+    if :erlang.crc32(payload) == crc do
+      read_frames(tail, [{seq, timestamp, :erlang.binary_to_term(payload)} | acc])
+    else
+      Enum.reverse(acc)
+    end
+  end
+
+  defp read_frames(_incomplete_or_unknown, acc), do: Enum.reverse(acc)
+
+  @spec atomize_known_keys(map()) :: map()
+  defp atomize_known_keys(map) do
+    known = ~w(id type text summary name steps value source_id usage metadata inserted_at)a
+
+    Enum.reduce(map, %{}, fn {key, value}, acc ->
+      key =
+        if is_binary(key) do
+          Enum.find(known, &(Atom.to_string(&1) == key)) || key
+        else
+          key
+        end
+
+      Map.put(acc, key, value)
+    end)
+  end
+
+  @spec normalize_type(term()) :: event_type()
+  defp normalize_type(type) when type in @event_types, do: type
+
+  defp normalize_type(type) when is_binary(type) do
+    type
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace("-", "_")
+    |> String.to_existing_atom()
+    |> normalize_type()
+  rescue
+    ArgumentError -> :fact
+  end
+
+  defp normalize_type(_type), do: :fact
+
+  @spec compact_text(term()) :: binary() | nil
+  defp compact_text(nil), do: nil
+
+  defp compact_text(text) when is_binary(text) do
+    text
+    |> String.trim()
+    |> String.slice(0, @max_text_graphemes)
+  end
+
+  defp compact_text(text) do
+    text
+    |> inspect(limit: 50)
+    |> compact_text()
+  end
+
+  @spec id(binary()) :: binary()
+  defp id(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+end

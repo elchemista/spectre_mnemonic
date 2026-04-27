@@ -2,6 +2,7 @@ Code.require_file("models.ex", __DIR__)
 
 alias ParallelMemoryExample.Parser
 alias SpectreMnemonic.Embedding.Vector
+alias SpectreMnemonic.KnowledgeBase
 alias SpectreMnemonic.PersistentMemory
 alias SpectreMnemonic.Store.FileStorage
 
@@ -283,6 +284,98 @@ log.(
   "Persisted #{length(knowledge)} knowledge records plus summaries, categories, embeddings, and associations"
 )
 
+log.("knowledge", "Writing compact progressive knowledge events")
+
+knowledge_events = [
+  %{
+    type: :summary,
+    summary:
+      "The demo ingested chat, tasks, tool events, decisions, and research into active graph memory, then consolidated durable records.",
+    usage: %{count: 2},
+    metadata: %{attention: 3.0, example: :parallel_memory}
+  },
+  %{
+    type: :skill,
+    name: "Replay durable file memory",
+    text:
+      "Call SpectreMnemonic.PersistentMemory.replay/1 to inspect append-only persistent records.",
+    metadata: %{attention: 2.0, example: :parallel_memory}
+  },
+  %{
+    type: :skill,
+    name: "Search progressive knowledge",
+    text:
+      "Call SpectreMnemonic.search_knowledge/2 for targeted knowledge.smem lookup without loading the full packet.",
+    metadata: %{attention: 2.0, example: :parallel_memory}
+  },
+  %{
+    type: :fact,
+    text: "knowledge.smem stores compact events under data_root/knowledge/knowledge.smem.",
+    metadata: %{confidence: 1.0, example: :parallel_memory}
+  },
+  %{
+    type: :procedure,
+    name: "Load budgeted knowledge",
+    steps: [
+      "Append compact knowledge events.",
+      "Search with SpectreMnemonic.search_knowledge/2 when a cue is specific.",
+      "Load with SpectreMnemonic.load_knowledge/1 when recall needs a compact packet."
+    ],
+    metadata: %{confidence: 1.0, example: :parallel_memory}
+  },
+  %{
+    type: :latest_ingestion,
+    text: "The latest demo run remembered #{length(remembered)} fixture events.",
+    metadata: %{remembered_events: length(remembered), example: :parallel_memory}
+  }
+]
+
+knowledge_sequences =
+  Enum.map(knowledge_events, fn event ->
+    {:ok, sequence} = KnowledgeBase.append(event, data_root: data_root)
+    sequence
+  end)
+
+log.(
+  "knowledge",
+  "Appended #{length(knowledge_sequences)} compact events to #{Path.join([data_root, "knowledge", "knowledge.smem"])}"
+)
+
+{:ok, knowledge_matches} =
+  SpectreMnemonic.search_knowledge("durable replay storage", data_root: data_root, limit: 4)
+
+log.(
+  "knowledge",
+  "search #{inspect("durable replay storage")} -> #{length(knowledge_matches)} compact matches"
+)
+
+Enum.each(knowledge_matches, fn match ->
+  log.(
+    "know-match",
+    "#{match.type} score=#{match.score} id=#{match.id} #{preview.(match.text)}"
+  )
+end)
+
+{:ok, loaded_knowledge} =
+  SpectreMnemonic.load_knowledge(
+    data_root: data_root,
+    max_loaded_bytes: 2_000,
+    max_skills: 3,
+    max_latest_ingestions: 2
+  )
+
+log.(
+  "knowledge",
+  "loaded summary_bytes=#{byte_size(loaded_knowledge.summary || "")} skills=#{length(loaded_knowledge.skills)} facts=#{length(loaded_knowledge.facts)} procedures=#{length(loaded_knowledge.procedures)} latest=#{length(loaded_knowledge.latest_ingestions)}"
+)
+
+{:ok, compacted_knowledge} = SpectreMnemonic.compact_knowledge(data_root: data_root)
+
+log.(
+  "knowledge",
+  "compacted knowledge.smem events=#{compacted_knowledge.count}"
+)
+
 log.("status", "Checking task statuses created from task/todo lines")
 
 events
@@ -365,8 +458,17 @@ end)
 
 log.("done", "Search returned #{length(search_results)} active/durable result entries")
 
-log.("compact", "Compacting example file store into snapshots/")
-{:ok, compact_results} = PersistentMemory.compact()
+log.("compact", "Running semantic persistent memory compaction")
+{:ok, semantic_compact_results} = PersistentMemory.compact(mode: :semantic)
+
+log.("compact", "semantic #{inspect(semantic_compact_results)}")
+
+log.("compact", "Running semantic plus physical persistent memory compaction")
+{:ok, all_compact_results} = PersistentMemory.compact(mode: :all)
+
+log.("compact", "all semantic=#{inspect(all_compact_results.semantic)}")
+
+compact_results = all_compact_results.physical
 
 Enum.each(compact_results, fn
   {store_id, {:ok, snapshot_path}} ->
@@ -380,6 +482,7 @@ log.("files", "Persistent memory files now on disk")
 
 [
   Path.join([model_dir, "*"]),
+  Path.join([data_root, "knowledge", "*"]),
   Path.join([data_root, "segments", "*"]),
   Path.join([data_root, "snapshots", "*"]),
   Path.join([data_root, "artifacts", "*"])

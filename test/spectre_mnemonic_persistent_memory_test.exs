@@ -115,6 +115,126 @@ defmodule SpectreMnemonicPersistentMemoryTest do
     assert Enum.any?(records, &(&1.family == :tombstones))
   end
 
+  test "compact defaults to physical file snapshot mode" do
+    configure_file_store()
+
+    assert {:ok, _} = PersistentMemory.append(:moments, %{id: "mom_1"})
+
+    assert {:ok, [{:local_file, {:ok, snapshot}}]} = PersistentMemory.compact()
+    assert String.ends_with?(snapshot, ".term")
+    assert File.exists?(snapshot)
+
+    assert {:ok, [{:local_file, {:ok, explicit_snapshot}}]} =
+             PersistentMemory.compact(mode: :physical)
+
+    assert File.exists?(explicit_snapshot)
+  end
+
+  test "semantic compaction uses replay fallback and writes compact records" do
+    configure_file_store()
+
+    assert {:ok, _} = PersistentMemory.append(:moments, %{id: "mom_1", attention: 2.0})
+    assert {:ok, _} = PersistentMemory.append(:moments, %{id: "mom_2", attention: 1.0})
+
+    assert {:ok, %{mode: :semantic, results: [{:local_file, result}], written: 1}} =
+             PersistentMemory.compact(mode: :semantic)
+
+    assert result.strategy == :default
+    assert result.input == 2
+    assert result.written == 1
+
+    assert {:ok, records} = PersistentMemory.replay()
+    assert Enum.any?(records, &(&1.family == :semantic_compaction_jobs))
+  end
+
+  test "semantic compaction can use custom adapter output and tombstone replacements" do
+    source = record(:moments, %{id: "mom_source", attention: 4.0})
+
+    configure_stores([
+      [
+        id: :semantic_replay,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :semantic_replay,
+          capabilities: [:append, :replay],
+          frames: [source]
+        ]
+      ]
+    ])
+
+    assert {:ok, %{results: [{:semantic_replay, result}]}} =
+             PersistentMemory.compact(
+               mode: :semantic,
+               semantic_compact_adapter: __MODULE__.SemanticCompactAdapter,
+               test_pid: self()
+             )
+
+    assert_receive {:semantic_adapter_called, %{records: [%Record{}]}}
+    assert result.strategy == :adapter
+    assert result.written == 2
+    assert result.tombstones == 1
+    assert_receive {:fake_put, :semantic_replay, %Record{family: :knowledge}}
+    assert_receive {:fake_put, :semantic_replay, %Record{family: :tombstones}}
+  end
+
+  test "semantic compaction calls native store adapter when advertised" do
+    configure_stores([
+      [
+        id: :native,
+        adapter: __MODULE__.NativeSemanticAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [send_to: self(), id: :native]
+      ]
+    ])
+
+    assert {:ok, %{results: [{:native, result}], written: 3, tombstones: 1}} =
+             PersistentMemory.compact(mode: :semantic)
+
+    assert_receive {:native_semantic_compact, %{store: %{id: :native}}}
+    assert result.strategy == :native_test
+  end
+
+  test "semantic compaction skips stores without replay or native support" do
+    configure_stores([
+      [
+        id: :append_only,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [send_to: self(), id: :append_only, capabilities: [:append]]
+      ]
+    ])
+
+    assert {:ok,
+            %{
+              results: [{:append_only, {:skipped, :semantic_compact_not_supported}}],
+              written: 0,
+              tombstones: 0
+            }} = PersistentMemory.compact(mode: :semantic)
+  end
+
+  test "all compact mode runs semantic then physical" do
+    configure_file_store()
+
+    assert {:ok, _} = PersistentMemory.append(:moments, %{id: "mom_all", attention: 3.0})
+
+    assert {:ok, %{mode: :all, semantic: semantic, physical: physical}} =
+             PersistentMemory.compact(mode: :all)
+
+    assert semantic.mode == :semantic
+    assert semantic.written == 1
+    assert [{:local_file, {:ok, snapshot}}] = physical
+    assert File.exists?(snapshot)
+  end
+
+  test "invalid compact mode returns a clear error" do
+    assert {:error, {:invalid_compact_mode, :banana}} = PersistentMemory.compact(mode: :banana)
+  end
+
   test "manager lookup uses stores that advertise lookup capability" do
     configure_stores([
       [
@@ -244,5 +364,38 @@ defmodule SpectreMnemonicPersistentMemoryTest do
 
     @impl true
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
+  end
+
+  defmodule SemanticCompactAdapter do
+    @behaviour SpectreMnemonic.PersistentMemory.Compact.Adapter
+
+    @impl true
+    def compact(input, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:semantic_adapter_called, input})
+      [source] = input.records
+
+      {:ok,
+       %{
+         strategy: :adapter,
+         records: [{:knowledge, %{id: "know_compact", text: "compact #{source.payload.id}"}}],
+         replace_ids: [source.id]
+       }}
+    end
+  end
+
+  defmodule NativeSemanticAdapter do
+    @behaviour SpectreMnemonic.Store.Adapter
+
+    @impl true
+    def capabilities(_opts), do: [:append, :semantic_compact]
+
+    @impl true
+    def put(_record, _opts), do: :ok
+
+    @impl true
+    def semantic_compact(input, opts) do
+      send(Keyword.fetch!(opts, :send_to), {:native_semantic_compact, input})
+      {:ok, %{strategy: :native_test, written: 3, tombstones: 1}}
+    end
   end
 end
