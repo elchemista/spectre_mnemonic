@@ -36,6 +36,8 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :embedding)
     Application.delete_env(:spectre_mnemonic, :persistent_memory)
     Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
+    Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
+    Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
     reset_disk_root()
     clear_memory()
 
@@ -44,6 +46,8 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :embedding)
       Application.delete_env(:spectre_mnemonic, :persistent_memory)
       Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
+      Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
+      Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
       clear_memory()
       File.rm_rf!("mnemonic_data")
       File.rm_rf!("mnemonic_data_secondary")

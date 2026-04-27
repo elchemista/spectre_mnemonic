@@ -19,6 +19,7 @@
 /mnemonic_data/
 
 /example/mnemonic_data/
+/example/models/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump

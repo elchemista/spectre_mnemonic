@@ -133,8 +133,8 @@ defmodule SpectreMnemonic.Focus do
     :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
     update_status(stream, task_id, input, kind, now)
 
-    with {:ok, _signal_result} <- PersistentMemory.append(:signals, signal),
-         {:ok, _moment_result} <- PersistentMemory.append(:moments, moment),
+    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
+         {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
          {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
       Index.upsert(moment)
       {:reply, {:ok, record_signal_result(signal, moment, action_recipe)}, state}
@@ -148,7 +148,7 @@ defmodule SpectreMnemonic.Focus do
       association = build_association(source_id, relation, target_id, opts)
       :ets.insert(:mnemonic_associations, {association.id, association})
 
-      {:reply, persist_value(:associations, association), state}
+      {:reply, maybe_persist_value(:associations, association, opts), state}
     else
       {:reply, {:error, :unknown_memory_id}, state}
     end
@@ -253,9 +253,14 @@ defmodule SpectreMnemonic.Focus do
       action_recipe ->
         :ets.insert(:mnemonic_action_recipes, {action_recipe.id, action_recipe})
 
-        with {:ok, _recipe_result} <- PersistentMemory.append(:action_recipes, action_recipe),
+        with {:ok, _recipe_result} <- maybe_persist_value(:action_recipes, action_recipe, opts),
              {:ok, _association} <-
-               persist_attached_action(memory_id, action_recipe.id, action_recipe.inserted_at) do
+               persist_attached_action(
+                 memory_id,
+                 action_recipe.id,
+                 action_recipe.inserted_at,
+                 opts
+               ) do
           {:ok, action_recipe}
         end
     end
@@ -327,9 +332,9 @@ defmodule SpectreMnemonic.Focus do
     |> Map.merge(Map.new(recipe_metadata))
   end
 
-  @spec persist_attached_action(binary(), binary(), DateTime.t()) ::
+  @spec persist_attached_action(binary(), binary(), DateTime.t(), keyword()) ::
           {:ok, Association.t()} | {:error, term()}
-  defp persist_attached_action(memory_id, action_recipe_id, now) do
+  defp persist_attached_action(memory_id, action_recipe_id, now, opts) do
     association = %Association{
       id: id("assoc"),
       source_id: memory_id,
@@ -341,7 +346,7 @@ defmodule SpectreMnemonic.Focus do
     }
 
     :ets.insert(:mnemonic_associations, {association.id, association})
-    persist_value(:associations, association)
+    maybe_persist_value(:associations, association, opts)
   end
 
   @spec record_signal_result(Signal.t(), Moment.t(), ActionRecipe.t() | nil) :: record_result()
@@ -363,6 +368,15 @@ defmodule SpectreMnemonic.Focus do
     case PersistentMemory.append(family, value) do
       {:ok, _result} -> {:ok, value}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec maybe_persist_value(atom(), term(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp maybe_persist_value(family, value, opts) do
+    if Keyword.get(opts, :persist?, true) do
+      persist_value(family, value)
+    else
+      {:ok, value}
     end
   end
 

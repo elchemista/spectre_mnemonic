@@ -173,18 +173,21 @@ events =
   end)
 
 log.("parse", "Normalized #{length(events)} total events")
-log.("save", "Saving events concurrently through SpectreMnemonic.signal/2")
+log.("remember", "Remembering events concurrently through SpectreMnemonic.remember/2")
 
-saved =
+remembered =
   events
   |> Task.async_stream(
     fn event ->
       result =
-        SpectreMnemonic.signal(event.text,
+        SpectreMnemonic.remember(event.text,
+          title: "#{event.source}:#{event.metadata.line} #{event.type}",
           stream: event.stream,
           kind: event.type,
           task_id: event.task_id,
-          metadata: Map.put(event.metadata, :source, event.source)
+          metadata: Map.put(event.metadata, :source, event.source),
+          chunk_words: 42,
+          overlap_words: 8
         )
 
       {event, result}
@@ -193,40 +196,47 @@ saved =
     timeout: 10_000
   )
   |> Enum.map(fn
-    {:ok, {event, {:ok, result}}} ->
-      dimensions = Vector.dimensions(result.moment.vector)
-      signature_bytes = byte_size(result.moment.binary_signature || <<>>)
-      model = get_in(result.moment.embedding, [:metadata, :model])
+    {:ok, {event, {:ok, packet}}} ->
+      root = packet.root
+      dimensions = Vector.dimensions(root.vector)
+      signature_bytes = byte_size(root.binary_signature || <<>>)
+      model = get_in(root.embedding, [:metadata, :model])
 
       log.(
-        "saved",
-        "#{event.source}:#{event.metadata.line} signal=#{result.signal.id} moment=#{result.moment.id} #{event.type}/#{event.stream} vector_dims=#{dimensions} signature_bytes=#{signature_bytes} model=#{model || "-"}"
+        "remembered",
+        "#{event.source}:#{event.metadata.line} root=#{root.id} #{event.type}/#{event.stream} chunks=#{length(packet.chunks)} summaries=#{length(packet.summaries)} categories=#{length(packet.categories)} edges=#{length(packet.associations)} vector_dims=#{dimensions} signature_bytes=#{signature_bytes} model=#{model || "-"}"
       )
 
-      result
+      packet
 
     {:ok, {event, {:error, reason}}} ->
-      raise "failed to save #{event.source}:#{event.metadata.line}: #{inspect(reason)}"
+      raise "failed to remember #{event.source}:#{event.metadata.line}: #{inspect(reason)}"
 
     {:exit, reason} ->
-      raise "parallel save task failed: #{inspect(reason)}"
+      raise "parallel remember task failed: #{inspect(reason)}"
   end)
 
-log.("summary", "Saved #{length(saved)} events from #{length(files)} files")
+remembered_moments = Enum.flat_map(remembered, & &1.moments)
+remembered_edges = Enum.flat_map(remembered, & &1.associations)
 
-embedded_count = Enum.count(saved, &is_binary(&1.moment.vector))
+log.(
+  "summary",
+  "Remembered #{length(remembered)} events into #{length(remembered_moments)} active moments and #{length(remembered_edges)} graph edges"
+)
+
+embedded_count = Enum.count(remembered_moments, &is_binary(&1.vector))
 
 log.(
   "model",
-  "Embedded #{embedded_count}/#{length(saved)} saved moments with #{Path.basename(model_dir)}"
+  "Embedded #{embedded_count}/#{length(remembered_moments)} active moments with #{Path.basename(model_dir)}"
 )
 
-if embedded_count != length(saved) do
-  raise "expected every saved moment to have an embedding, got #{embedded_count}/#{length(saved)}"
+if embedded_count == 0 do
+  raise "expected remembered moments to have embeddings"
 end
 
-saved
-|> Enum.group_by(& &1.moment.kind)
+remembered_moments
+|> Enum.group_by(& &1.kind)
 |> Enum.sort_by(fn {kind, _items} -> kind end)
 |> Enum.each(fn {kind, items} ->
   log.("summary", "#{kind}: #{length(items)}")
@@ -241,9 +251,11 @@ File.mkdir_p!(Path.dirname(artifact_path))
 File.write!(artifact_path, """
 Parallel memory session report
 
-Saved events: #{length(saved)}
+Remembered events: #{length(remembered)}
 Source files: #{Enum.map_join(files, ", ", &Path.basename/1)}
-Purpose: Demonstrate persistent memory, artifact registration, replay, recall, search, and snapshots.
+Active moments: #{length(remembered_moments)}
+Graph edges: #{length(remembered_edges)}
+Purpose: Demonstrate unified intake, graph memory, summaries, persistent memory, artifact registration, replay, recall, search, and snapshots.
 """)
 
 {:ok, artifact} =
@@ -251,7 +263,9 @@ Purpose: Demonstrate persistent memory, artifact registration, replay, recall, s
     content_type: "text/plain",
     metadata: %{
       example: :parallel_memory,
-      saved_events: length(saved),
+      remembered_events: length(remembered),
+      active_moments: length(remembered_moments),
+      graph_edges: length(remembered_edges),
       generated_by: "example/demo.exs"
     }
   )
@@ -259,6 +273,14 @@ Purpose: Demonstrate persistent memory, artifact registration, replay, recall, s
 log.(
   "artifact",
   "Registered artifact=#{artifact.id} source=#{artifact.source} content_type=#{artifact.content_type}"
+)
+
+log.("consolidate", "Promoting active remembered graph into durable records")
+{:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: 1.0)
+
+log.(
+  "consolidate",
+  "Persisted #{length(knowledge)} knowledge records plus summaries, categories, embeddings, and associations"
 )
 
 log.("status", "Checking task statuses created from task/todo lines")

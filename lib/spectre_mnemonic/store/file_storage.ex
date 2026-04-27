@@ -78,10 +78,25 @@ defmodule SpectreMnemonic.Store.FileStorage do
 
   @spec next_seq(Path.t()) :: pos_integer()
   defp next_seq(path) do
-    replay_path(path)
+    key = {__MODULE__, :seq, path}
+
+    current =
+      case :persistent_term.get(key, :missing) do
+        :missing -> initial_seq(path)
+        seq -> seq
+      end
+
+    seq = current + 1
+    :persistent_term.put(key, seq)
+    seq
+  end
+
+  @spec initial_seq(Path.t()) :: non_neg_integer()
+  defp initial_seq(path) do
+    path
+    |> replay_path()
     |> List.last({0, nil, nil})
     |> elem(0)
-    |> Kernel.+(1)
   end
 
   @spec replay_path(Path.t()) :: [tuple()]

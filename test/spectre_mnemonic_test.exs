@@ -62,6 +62,104 @@ defmodule SpectreMnemonicTest do
     assert {:error, :unknown_memory_id} = SpectreMnemonic.link("missing", :mentions, artifact.id)
   end
 
+  test "remember ingests long text as categorized active graph memory" do
+    text = """
+    # Architecture
+    The system design uses a parser module and adapter integration. The decision is to split
+    documents into chunks so recall can digest a long report. This architecture note explains
+    the concept and the model for active memory.
+
+    # Tasks
+    TODO: implement document chunking and verify graph relations. The next action should link
+    every chunk to its section and category. The task also needs status events and tool commands
+    for testing the ingestion path.
+
+    # Risks
+    A bug or failure in chunk overlap could create an error where information is missing.
+    Research evidence should show that adjacent chunks stay connected and related chunks can be
+    recalled together.
+    """
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(text,
+               title: "Long Architecture Report",
+               chunk_words: 24,
+               overlap_words: 6
+             )
+
+    assert packet.root.kind == :task
+    assert packet.persistence == %{mode: :active, durable?: false}
+    assert length(packet.chunks) > 3
+    assert length(packet.summaries) == length(packet.chunks) + 1
+    assert Enum.any?(packet.categories, &(&1.metadata.category == :task))
+    assert Enum.any?(packet.categories, &(&1.metadata.category == :error))
+
+    relations = Enum.map(packet.associations, & &1.relation)
+    assert :contains_chunk in relations
+    assert :next_chunk in relations
+    assert :previous_chunk in relations
+    assert :has_summary in relations
+    assert :categorized_as in relations
+
+    assert {:ok, recalled} =
+             SpectreMnemonic.recall("document chunking graph relations", limit: 30)
+
+    assert Enum.any?(recalled.moments, &(&1.id == packet.root.id))
+    assert Enum.any?(recalled.associations, &(&1.relation in [:contains_chunk, :categorized_as]))
+  end
+
+  test "remember accepts maps lists code and json-looking strings without parsing json" do
+    assert {:ok, task_packet} =
+             SpectreMnemonic.remember(%{
+               type: :task,
+               title: "Ship intake",
+               content: "Implement the memory intake graph",
+               metadata: %{source: "planner"}
+             })
+
+    assert task_packet.root.kind == :task
+    assert task_packet.root.metadata.source == "planner"
+
+    assert {:ok, list_packet} =
+             SpectreMnemonic.remember([
+               %{role: "user", content: "hello"},
+               %{role: "assistant", content: "hi"}
+             ])
+
+    assert list_packet.root.kind == :structured_event
+
+    code = "defmodule Demo do\n  def run(value), do: value + 1\nend"
+    assert {:ok, code_packet} = SpectreMnemonic.remember(code)
+    assert code_packet.root.kind == :code
+
+    json = ~s({"kind":"task","content":"this should stay text"})
+    assert {:ok, json_packet} = SpectreMnemonic.remember(json)
+    assert json_packet.root.kind == :text
+    assert json_packet.chunks |> hd() |> Map.fetch!(:text) == json
+  end
+
+  test "remember uses configured summarizer adapter hierarchically" do
+    Application.put_env(:spectre_mnemonic, :summarizer_adapter, __MODULE__.SummarizerAdapter)
+
+    text = Enum.map_join(1..70, " ", &"task#{&1}")
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(text,
+               title: "Adapter summary",
+               chunk_words: 20,
+               overlap_words: 0,
+               test_pid: self()
+             )
+
+    assert length(packet.chunks) > 1
+    assert Enum.any?(packet.summaries, &String.starts_with?(&1.text, "adapter chunk"))
+    assert Enum.any?(packet.summaries, &String.starts_with?(&1.text, "adapter root"))
+    assert_receive {:summarizer_called, :chunk, _text}
+    assert_receive {:summarizer_called, :root, _text}
+  after
+    Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
+  end
+
   test "forgets selected active moments" do
     {:ok, %{moment: moment}} =
       SpectreMnemonic.signal("temporary low value tool event", stream: :tool)
@@ -284,6 +382,68 @@ defmodule SpectreMnemonicTest do
     assert Enum.any?(knowledge, &(&1.source_id == moment.id))
   end
 
+  test "consolidation persists remember summaries categories associations and embeddings" do
+    Application.put_env(:spectre_mnemonic, :embedding_adapter, __MODULE__.VectorAdapter)
+
+    {:ok, packet} =
+      SpectreMnemonic.remember("TODO implement durable graph summary adapter relation",
+        chunk_words: 6,
+        overlap_words: 0
+      )
+
+    assert {:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: 1.0)
+    assert Enum.any?(knowledge, &(&1.source_id == packet.root.id))
+
+    assert {:ok, records} = SpectreMnemonic.PersistentMemory.replay()
+    assert Enum.any?(records, &(&1.family == :summaries))
+    assert Enum.any?(records, &(&1.family == :categories))
+
+    assert Enum.any?(
+             records,
+             &(&1.family == :associations and &1.payload.relation == :contains_chunk)
+           )
+
+    assert Enum.any?(records, &(&1.family == :embeddings))
+  after
+    Application.delete_env(:spectre_mnemonic, :embedding_adapter)
+  end
+
+  test "consolidation can use runtime function and configured adapter" do
+    {:ok, packet} = SpectreMnemonic.remember("runtime consolidation should keep this memory")
+
+    runtime_fun = fn context ->
+      knowledge =
+        context.moments
+        |> Enum.filter(&(&1.id == packet.root.id))
+        |> Enum.map(fn moment ->
+          %SpectreMnemonic.Knowledge{
+            id: "runtime_#{moment.id}",
+            source_id: moment.id,
+            text: "runtime #{moment.text}",
+            metadata: %{strategy: :runtime},
+            inserted_at: context.now
+          }
+        end)
+
+      {:ok, %{knowledge: knowledge, moments: context.moments, strategy: :runtime_fun}}
+    end
+
+    assert {:ok, runtime_knowledge} = SpectreMnemonic.consolidate(consolidate_with: runtime_fun)
+    assert Enum.any?(runtime_knowledge, &(&1.metadata.strategy == :runtime))
+
+    Application.put_env(
+      :spectre_mnemonic,
+      :consolidation_adapter,
+      __MODULE__.ConsolidationAdapter
+    )
+
+    assert {:ok, adapter_knowledge} = SpectreMnemonic.consolidate(test_pid: self())
+    assert Enum.any?(adapter_knowledge, &(&1.metadata.strategy == :adapter))
+    assert_received {:consolidator_called, count} when count > 0
+  after
+    Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
+  end
+
   test "stores action language recipe with a signal and recalls it as data" do
     recipe_text = "When recalled, refresh JSON from https://example.test/weather"
 
@@ -424,6 +584,52 @@ defmodule SpectreMnemonicTest do
 
     @impl true
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
+  end
+
+  defmodule SummarizerAdapter do
+    @behaviour SpectreMnemonic.Summarizer.Adapter
+
+    @impl true
+    def summarize(%{scope: scope, text: text}, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:summarizer_called, scope, text})
+      end
+
+      {:ok,
+       %{
+         text: "adapter #{scope} #{String.slice(text, 0, 18)}",
+         key_points: ["adapter point"],
+         entities: ["AdapterEntity"],
+         categories: [:adapter_category],
+         relations: [],
+         confidence: 0.9,
+         metadata: %{adapter: true}
+       }}
+    end
+  end
+
+  defmodule ConsolidationAdapter do
+    @behaviour SpectreMnemonic.Consolidator.Adapter
+
+    @impl true
+    def consolidate(context, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:consolidator_called, length(context.moments)})
+      end
+
+      knowledge =
+        Enum.map(context.moments, fn moment ->
+          %SpectreMnemonic.Knowledge{
+            id: "adapter_#{moment.id}",
+            source_id: moment.id,
+            text: "adapter #{moment.text}",
+            metadata: %{strategy: :adapter},
+            inserted_at: context.now
+          }
+        end)
+
+      {:ok, %{knowledge: knowledge, moments: context.moments, strategy: :adapter}}
+    end
   end
 
   defmodule RuntimeAdapter do

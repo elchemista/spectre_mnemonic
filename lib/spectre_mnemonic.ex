@@ -28,6 +28,20 @@ defmodule SpectreMnemonic do
   end
 
   @doc """
+  Remembers any already-parsed information through the unified intake layer.
+
+  `remember/2` accepts text, prompts, chat, tasks, code strings, maps, lists, and
+  JSON-looking strings as plain text. It builds active memory, summaries,
+  categories, and graph links. Durable promotion is handled by consolidation
+  unless `persist?: true` is passed.
+  """
+  @spec remember(input :: term(), opts :: keyword()) ::
+          {:ok, SpectreMnemonic.MemoryPacket.t()} | {:error, term()}
+  def remember(input, opts \\ []) do
+    SpectreMnemonic.MemoryIntake.remember(input, opts)
+  end
+
+  @doc """
   Recalls nearby active memory for a cue.
 
   The first implementation searches active ETS records with keyword, entity,

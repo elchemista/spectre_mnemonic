@@ -13,25 +13,31 @@ nearby context later, and persist those memories through configurable stores.
 The public API is intentionally compact:
 
 ```elixir
-{:ok, %{signal: signal, moment: moment}} =
-  SpectreMnemonic.signal("research found Elixir ETS details",
+{:ok, memory} =
+  SpectreMnemonic.remember("research found Elixir ETS details",
     stream: :research,
     task_id: "task-a"
   )
 
 {:ok, packet} = SpectreMnemonic.recall("how is task-a going?")
 {:ok, results} = SpectreMnemonic.search("ETS details")
-{:ok, association} = SpectreMnemonic.link(moment.id, :supports, "other_memory_id")
+{:ok, knowledge} = SpectreMnemonic.consolidate()
 ```
 
 ## Features
 
-- Stream-aware ingestion through `SpectreMnemonic.Router` and per-stream workers.
+- Unified intake through `SpectreMnemonic.remember/2` for text, prompts, chat,
+  tasks, code strings, maps, lists, and already-parsed external documents.
+- Stream-aware low-level ingestion through `SpectreMnemonic.signal/2`,
+  `SpectreMnemonic.Router`, and per-stream workers.
 - Active memory in ETS for signals, moments, associations, artifacts, and status.
+- Automatic chunking, fallback summarization, categorization, and graph linking
+  for high-level remembered input.
 - Adapter-free recall using keywords, entities, SimHash-style fingerprints, and graph expansion.
 - Optional vector recall through embedding adapters or the local Model2Vec provider.
 - Durable persistence through `SpectreMnemonic.PersistentMemory` and storage adapters.
 - Append-only local file storage with replay, deduplication, tombstones, and compaction.
+- Adapter-driven consolidation for deciding what active memory becomes durable.
 - Inert Action Language recipes attached to memories for external runtimes such
   as `spectre_kinetic`.
 
@@ -53,7 +59,39 @@ supervision, routing, recall indexing, focus, recall, and consolidation.
 
 ## API Overview
 
-`SpectreMnemonic.signal/2` records new input:
+`SpectreMnemonic.remember/2` is the high-level intake API. It accepts any
+already-parsed information, creates active graph memory, chunks long text,
+summarizes, categorizes, links related records, and returns a
+`SpectreMnemonic.MemoryPacket`:
+
+```elixir
+{:ok, memory} =
+  SpectreMnemonic.remember("TODO: implement graph recall over chunked notes",
+    title: "Planner note",
+    task_id: "alpha",
+    metadata: %{source: :agent},
+    chunk_words: 180,
+    overlap_words: 40
+  )
+
+memory.root
+memory.chunks
+memory.summaries
+memory.categories
+memory.associations
+memory.persistence
+```
+
+`remember/2` is active-first by default. It builds hot ETS memory and graph
+edges immediately, but durable promotion is handled by
+`SpectreMnemonic.consolidate/1` unless you pass `persist?: true`.
+
+JSON-looking strings are treated as text. If another library parses JSON, PDF,
+DOCX, HTML, or code into maps/lists/text first, pass that parsed result to
+`remember/2`.
+
+`SpectreMnemonic.signal/2` is the lower-level API for recording one event or
+moment directly:
 
 ```elixir
 SpectreMnemonic.signal("implemented disk replay checksum",
@@ -85,17 +123,42 @@ SpectreMnemonic.forget({:task, "alpha"})
 SpectreMnemonic.forget("mom_123")
 ```
 
+`SpectreMnemonic.consolidate/1` promotes active memory into durable records:
+
+```elixir
+{:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: 1.0)
+```
+
+For experiments, pass a runtime function:
+
+```elixir
+SpectreMnemonic.consolidate(consolidate_with: fn context ->
+  {:ok, %{knowledge: MyApp.choose_knowledge(context.moments)}}
+end)
+```
+
+For production, configure an adapter:
+
+```elixir
+config :spectre_mnemonic,
+  consolidation_adapter: MyApp.MemoryConsolidator
+```
+
 ## Runnable Example
 
 The `example/` folder contains a complete local demo that exercises the main
 system paths:
 
 - parses rich fixture data from `test.txt`, `tasks.txt`, and `chat.txt`
-- saves chat, task, tool, research, decision, error, event, system, and memory
-  records in parallel
+- remembers chat, task, tool, research, decision, error, event, system, and
+  memory records in parallel through `SpectreMnemonic.remember/2`
+- creates chunks, summaries, categories, and graph edges for each remembered
+  fixture event
 - creates a tiny local Model2Vec fixture under `example/models/tiny_model2vec`
   and uses it to generate vectors and binary signatures
-- writes active memory to the append-only persistent store at
+- consolidates active graph memory into durable moments, summaries, categories,
+  embeddings, associations, and knowledge records
+- writes durable memory to the append-only persistent store at
   `example/mnemonic_data/segments/active.smem`
 - writes and registers an example artifact under `example/mnemonic_data/artifacts`
 - compacts persistent memory into `example/mnemonic_data/snapshots`
@@ -111,9 +174,10 @@ Successful output includes lines like:
 
 ```text
 model        Smoke test vector_dims=4 signature_bytes=1
-saved        ... vector_dims=4 signature_bytes=1 model=example/tiny-model2vec
-model        Embedded 39/39 saved moments with tiny_model2vec
-replay       Loaded 79 records from .../example/mnemonic_data/segments/active.smem
+remembered   ... chunks=1 summaries=2 categories=... edges=...
+summary      Remembered 39 events into ... active moments and ... graph edges
+consolidate  Persisted ... knowledge records plus summaries, categories, embeddings, and associations
+replay       Loaded ... records from .../example/mnemonic_data/segments/active.smem
 compact      example_file snapshot=.../example/mnemonic_data/snapshots/snapshot-...
 files        models/tiny_model2vec/model.safetensors size=...
 ```
@@ -170,6 +234,8 @@ the call options.
 ## Project Layout
 
 - `lib/spectre_mnemonic.ex` is the public facade.
+- `lib/spectre_mnemonic/memory_intake.ex` powers `remember/2`.
+- `lib/spectre_mnemonic/memory_packet.ex` is the high-level intake result.
 - `lib/spectre_mnemonic/focus.ex` owns active ETS memory.
 - `lib/spectre_mnemonic/router.ex` chooses streams for incoming signals.
 - `lib/spectre_mnemonic/stream_supervisor.ex` and
@@ -177,6 +243,10 @@ the call options.
 - `lib/spectre_mnemonic/recall.ex` builds recall packets from active memory.
 - `lib/spectre_mnemonic/recall/index.ex` indexes active embeddings.
 - `lib/spectre_mnemonic/persistent_memory.ex` coordinates durable stores.
+- `lib/spectre_mnemonic/summarizer.ex` wraps configured summarization adapters
+  and the deterministic fallback summarizer.
+- `lib/spectre_mnemonic/consolidator.ex` promotes active graph memory into
+  durable families through default, adapter, or runtime-function logic.
 - `lib/spectre_mnemonic/action_runtime.ex` delegates AL analysis/execution to
   an explicitly configured runtime adapter.
 - `lib/spectre_mnemonic/store/*` contains storage behaviours and adapters.
@@ -210,14 +280,40 @@ Storage adapters implement `SpectreMnemonic.Store.Adapter`. Built-in Postgres,
 Mongo, and S3 modules advertise intended capabilities but return setup errors
 until replaced with app-specific implementations.
 
+The durable envelope model is family-based and intentionally Postgres-ready.
+Current consolidation writes families such as `:moments`, `:summaries`,
+`:categories`, `:embeddings`, `:associations`, `:knowledge`,
+`:consolidation_jobs`, and `:tombstones`. A future SQL adapter can index family,
+payload id, graph endpoints, text, vector metadata, source id, and inserted
+time without changing the high-level intake API.
+
+## Summarization
+
+Summarization is optional. Without configuration, `remember/2` uses a
+deterministic fallback to produce chunk summaries, a root summary, key points,
+entities, and heuristic categories.
+
+Configure an adapter for LLM or local model summaries:
+
+```elixir
+config :spectre_mnemonic,
+  summarizer_adapter: MyApp.Summarizer
+```
+
+Adapters implement `SpectreMnemonic.Summarizer.Adapter.summarize/2`. They
+receive `%{scope: :chunk | :root | atom(), text: binary(), metadata: map()}` and
+may return either summary text or a map containing `:text`, `:key_points`,
+`:entities`, `:categories`, `:relations`, `:confidence`, and `:metadata`.
+
 ## Embeddings
 
 Embeddings are optional. Without an adapter, recall still works through text,
 fingerprints, and associations.
 
-When embeddings are enabled, `SpectreMnemonic.signal/2` embeds each new memory
-at ingestion time. The normalized vector and binary signature are stored on the
-active `%SpectreMnemonic.Moment{}` and indexed by `SpectreMnemonic.Recall.Index`.
+When embeddings are enabled, `SpectreMnemonic.signal/2` and `remember/2` embed
+each new memory moment at ingestion time. The normalized vector and binary
+signature are stored on the active `%SpectreMnemonic.Moment{}` and indexed by
+`SpectreMnemonic.Recall.Index`.
 Later, `SpectreMnemonic.recall/2` embeds the cue and uses vector/signature
 similarity as part of the recall score.
 
@@ -253,8 +349,8 @@ mix run example/demo.exs
 ```
 
 The demo configures `SpectreMnemonic.Embedding.Model2VecStatic` with the tiny
-fixture in `example/models/tiny_model2vec`, writes embedded moments, recalls
-with vectors, and persists the resulting memory records.
+fixture in `example/models/tiny_model2vec`, remembers embedded graph memory,
+recalls with vectors, consolidates, and persists the resulting records.
 
 ### Gemma embeddings for consolidation
 
@@ -262,7 +358,8 @@ with vectors, and persists the resulting memory records.
 `%SpectreMnemonic.Knowledge{}` records. Consolidation does not re-embed text by
 itself; it copies the `vector`, `binary_signature`, and `embedding` already
 stored on each moment. To consolidate memory with Gemma embeddings, configure a
-Gemma-backed embedding adapter before calling `signal/2`, then consolidate:
+Gemma-backed embedding adapter before calling `remember/2` or `signal/2`, then
+consolidate:
 
 ```elixir
 config :spectre_mnemonic,
@@ -295,15 +392,15 @@ end
 ```
 
 ```elixir
-{:ok, %{moment: moment}} =
-  SpectreMnemonic.signal("User prefers compact technical summaries",
+{:ok, memory} =
+  SpectreMnemonic.remember("User prefers compact technical summaries",
     stream: :chat,
     task_id: "session-42",
     kind: :memory,
     metadata: %{importance: :high}
   )
 
-{:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: moment.attention)
+{:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: memory.root.attention)
 
 Enum.map(knowledge, fn item ->
   {item.text, item.embedding.metadata.model}
