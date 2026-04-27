@@ -11,6 +11,8 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @version 1
   @max_text_graphemes 2_000
 
+  alias SpectreMnemonic.Result
+
   @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
 
   @type event_type ::
@@ -36,30 +38,13 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     root = data_root(opts)
     ensure_root!(root)
     path = active_path(root)
-    seq = next_seq(path)
-    payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
-    crc = :erlang.crc32(payload)
-    timestamp = System.system_time(:millisecond)
-
-    frame =
-      <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32, crc::32,
-        payload::binary>>
-
-    case File.write(path, frame, [:append, :binary]) do
-      :ok -> {:ok, seq}
-      {:error, reason} -> {:error, reason}
-    end
+    write_event(path, event, next_seq(path))
   end
 
   @doc "Appends several compact knowledge events."
   @spec append_many([event()], keyword()) :: {:ok, [pos_integer()]} | {:error, term()}
   def append_many(events, opts \\ []) when is_list(events) do
-    Enum.reduce_while(events, {:ok, []}, fn event, {:ok, acc} ->
-      case append(event, opts) do
-        {:ok, seq} -> {:cont, {:ok, acc ++ [seq]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    Result.collect_ok(events, &append(&1, opts))
   end
 
   @doc "Replays complete events from `knowledge.smem`."
@@ -130,20 +115,27 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @spec append_many_to_path(Path.t(), [event()]) :: {:ok, [pos_integer()]} | {:error, term()}
   defp append_many_to_path(path, events) do
-    Enum.reduce_while(Enum.with_index(events, 1), {:ok, []}, fn {event, seq}, {:ok, acc} ->
-      payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
-      crc = :erlang.crc32(payload)
-      timestamp = System.system_time(:millisecond)
+    events
+    |> Enum.with_index(1)
+    |> Result.collect_ok(fn {event, seq} -> write_event(path, event, seq) end)
+  end
 
-      frame =
-        <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32,
-          crc::32, payload::binary>>
+  @spec write_event(Path.t(), event(), pos_integer()) :: {:ok, pos_integer()} | {:error, term()}
+  defp write_event(path, event, seq) do
+    case File.write(path, frame(seq, event), [:append, :binary]) do
+      :ok -> {:ok, seq}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-      case File.write(path, frame, [:append, :binary]) do
-        :ok -> {:cont, {:ok, acc ++ [seq]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+  @spec frame(pos_integer(), event()) :: binary()
+  defp frame(seq, event) do
+    payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
+    crc = :erlang.crc32(payload)
+    timestamp = System.system_time(:millisecond)
+
+    <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32, crc::32,
+      payload::binary>>
   end
 
   @spec ensure_root!(Path.t()) :: :ok

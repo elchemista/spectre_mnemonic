@@ -8,6 +8,7 @@ defmodule SpectreMnemonic.Intake do
 
   alias SpectreMnemonic.Intake.{Packet, Summarizer}
   alias SpectreMnemonic.Memory.{Association, Moment, Signal}
+  alias SpectreMnemonic.Result
 
   @default_chunk_words 180
   @default_overlap_words 40
@@ -106,7 +107,7 @@ defmodule SpectreMnemonic.Intake do
     envelope.text
     |> chunk_text(chunk_words(opts), overlap_words(opts))
     |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, []}, fn {chunk, index}, {:ok, acc} ->
+    |> Result.collect_ok(fn {chunk, index} ->
       metadata =
         envelope.metadata
         |> Map.merge(%{
@@ -126,8 +127,8 @@ defmodule SpectreMnemonic.Intake do
              persist?: Keyword.get(opts, :persist?, false),
              metadata: metadata
            ) do
-        {:ok, result} -> {:cont, {:ok, acc ++ [result]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, reason}
       end
     end)
   end
@@ -136,13 +137,13 @@ defmodule SpectreMnemonic.Intake do
           {:ok, [map()]} | {:error, term()}
   defp record_summaries(envelope, root, chunk_results, opts) do
     chunk_summaries =
-      Enum.reduce_while(chunk_results, {:ok, []}, fn %{moment: chunk}, {:ok, acc} ->
+      Result.collect_ok(chunk_results, fn %{moment: chunk} ->
         case record_summary(:chunk, chunk.text, root, envelope, opts,
                chunk_memory_id: chunk.id,
                chunk_index: chunk.metadata.chunk_index
              ) do
-          {:ok, result} -> {:cont, {:ok, acc ++ [result]}}
-          {:error, reason} -> {:halt, {:error, reason}}
+          {:ok, result} -> {:ok, result}
+          {:error, reason} -> {:error, reason}
         end
       end)
 
@@ -205,7 +206,7 @@ defmodule SpectreMnemonic.Intake do
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
-    Enum.reduce_while(labels, {:ok, []}, fn label, {:ok, acc} ->
+    Result.collect_ok(labels, fn label ->
       case SpectreMnemonic.signal("Category: #{label}",
              stream: envelope.stream,
              kind: :memory_category,
@@ -221,8 +222,8 @@ defmodule SpectreMnemonic.Intake do
                  category: label
                })
            ) do
-        {:ok, result} -> {:cont, {:ok, acc ++ [result]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, reason}
       end
     end)
   end
@@ -245,16 +246,15 @@ defmodule SpectreMnemonic.Intake do
         category_edges(chunks ++ summaries, category_by_label) ++
         related_chunk_edges(chunks, opts)
 
-    Enum.reduce_while(planned_edges, {:ok, []}, fn {source, relation, target, edge_opts},
-                                                   {:ok, acc} ->
+    Result.collect_ok(planned_edges, fn {source, relation, target, edge_opts} ->
       case SpectreMnemonic.link(
              source.id,
              relation,
              target.id,
              Keyword.put_new(edge_opts, :persist?, Keyword.get(opts, :persist?, false))
            ) do
-        {:ok, edge} -> {:cont, {:ok, acc ++ [edge]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, edge} -> {:ok, edge}
+        {:error, reason} -> {:error, reason}
       end
     end)
   end
