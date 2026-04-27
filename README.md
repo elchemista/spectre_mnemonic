@@ -4,6 +4,12 @@ SpectreMnemonic is a small Elixir memory engine for live applications. It keeps
 recent working memory in ETS, routes new signals into streams, recalls related
 moments, and writes durable memory envelopes through pluggable storage adapters.
 
+Use it when an application needs short-term and durable memory around live
+work: agent sessions, chat context, task execution, tool events, research notes,
+decisions, artifacts, and recall queries. It is not a full application
+database. It is a memory layer that lets your app record what happened, retrieve
+nearby context later, and persist those memories through configurable stores.
+
 The public API is intentionally compact:
 
 ```elixir
@@ -78,6 +84,49 @@ results from adapters that advertise search capabilities:
 SpectreMnemonic.forget({:task, "alpha"})
 SpectreMnemonic.forget("mom_123")
 ```
+
+## Runnable Example
+
+The `example/` folder contains a complete local demo that exercises the main
+system paths:
+
+- parses rich fixture data from `test.txt`, `tasks.txt`, and `chat.txt`
+- saves chat, task, tool, research, decision, error, event, system, and memory
+  records in parallel
+- creates a tiny local Model2Vec fixture under `example/models/tiny_model2vec`
+  and uses it to generate vectors and binary signatures
+- writes active memory to the append-only persistent store at
+  `example/mnemonic_data/segments/active.smem`
+- writes and registers an example artifact under `example/mnemonic_data/artifacts`
+- compacts persistent memory into `example/mnemonic_data/snapshots`
+- runs recall and search queries and logs each step
+
+Run it from the repository root:
+
+```bash
+mix run example/demo.exs
+```
+
+Successful output includes lines like:
+
+```text
+model        Smoke test vector_dims=4 signature_bytes=1
+saved        ... vector_dims=4 signature_bytes=1 model=example/tiny-model2vec
+model        Embedded 39/39 saved moments with tiny_model2vec
+replay       Loaded 79 records from .../example/mnemonic_data/segments/active.smem
+compact      example_file snapshot=.../example/mnemonic_data/snapshots/snapshot-...
+files        models/tiny_model2vec/model.safetensors size=...
+```
+
+After running, inspect the generated persistent-memory files with:
+
+```bash
+find example -maxdepth 4 -type f | sort
+```
+
+The tiny model files are intentionally committed so the embedding example is
+visible and offline-friendly. The `example/mnemonic_data/` directory is ignored
+because it is generated runtime data.
 
 ## Action Language Recipes
 

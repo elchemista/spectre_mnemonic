@@ -1,0 +1,13 @@
+# Task style events.
+
+TASK: Build parallel ingestion demo for SpectreMnemonic examples folder.
+TODO: Add models.ex with an Event struct and Parser module.
+TODO: Add test.txt containing rich save and retrieve information.
+TODO: Add chat.txt with realistic user and assistant turns.
+TASK: Verify mix run examples/parallel_memory/demo.exs completes without errors.
+EVENT: Task queue received a high-priority request from the user.
+DECISION: Use public APIs only, except replaying persistent memory through the documented manager.
+ERROR: Missing fixture files should raise quickly because the demo is educational.
+TOOL: Task.async_stream is configured with ordered false to demonstrate parallel work.
+MEMORY: Each task event gets a deterministic task_id derived from the line text.
+

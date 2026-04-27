@@ -1,0 +1,12 @@
+# Chat style events.
+
+USER: Can you save this project context and retrieve it later when I ask about parallel work?
+ASSISTANT: Yes. I will store chat, task, tool, research, decision, error, and memory events.
+USER: Please include enough information that recall has useful words to match.
+ASSISTANT: The sample mentions replay, durable records, hot ETS focus, task ids, streams, and metadata.
+SYSTEM: The example should be runnable locally with the existing Mix project.
+USER: Show me a query for tasks and another query for durable replay.
+ASSISTANT: The demo recalls "parallel ingestion task status" and "durable replay local file storage".
+USER: Add events that feel like a real agent session, not just tiny placeholders.
+ASSISTANT: The fixtures include planning, tool usage, decisions, failures, chat turns, and research notes.
+

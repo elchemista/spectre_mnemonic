@@ -1,0 +1,24 @@
+# Large mixed memory fixture for the parallel memory example.
+# Lines use PREFIX: text. The parser maps prefixes to event types.
+
+MEMORY: SpectreMnemonic can save live application events as active moments and durable records.
+RESEARCH: ETS is used for hot working memory, so recall can be fast without a database round trip.
+RESEARCH: Append-only local file storage keeps a replayable event log under an example data root.
+DECISION: Keep the example dependency-free and runnable with mix run examples/parallel_memory/demo.exs.
+EVENT: Agent started a morning planning session for the project.
+EVENT: The user asked for save and retrieve examples with many different event types.
+TOOL: Ran repository inspection and found the public SpectreMnemonic.signal and recall APIs.
+TOOL: Loaded sample files in parallel with Task.async_stream so ingestion can overlap.
+ERROR: If an event has no explicit prefix, the parser stores it as a note instead of failing.
+MEMORY: Durable replay reads records back from the local file store after ingestion.
+MEMORY: Active recall searches nearby moments by keywords, fingerprints, associations, and vectors when configured.
+RESEARCH: The system works without an embedding adapter, falling back to text and fingerprint matching.
+EVENT: Parallel ingestion should preserve every source file name and line number in metadata.
+DECISION: Store examples in examples/parallel_memory so the library code remains untouched.
+MEMORY: A later app could replace the local file store with Postgres, Mongo, S3, or another adapter.
+EVENT: The project uses streams such as chat, research, tool, alerts, decisions, and task_execution.
+TOOL: The demo prints recalled moments for queries about replay, parallel ingestion, and tasks.
+MEMORY: Search combines active recall with durable stores that advertise search capability.
+EVENT: The example intentionally creates varied memory: notes, decisions, research, tasks, errors, tools, and chat.
+DECISION: A small models.ex file keeps parsing and event structs understandable.
+
