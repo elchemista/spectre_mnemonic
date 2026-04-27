@@ -32,8 +32,8 @@ defmodule SpectreMnemonic.MixProject do
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
       {:hnswlib, "~> 0.1", optional: true},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
-      # {:dialyzer, "~> 1.4.7", only: [:dev], runtime: false}
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 end

@@ -9,7 +9,7 @@ defmodule SpectreMnemonic.Store.Disk do
   alias SpectreMnemonic.Store.FileStorage
 
   @doc "No-op compatibility start function for older supervision trees."
-  @spec start_link(keyword()) :: Task.on_start()
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(_opts) do
     Task.start_link(fn -> Process.sleep(:infinity) end)
   end

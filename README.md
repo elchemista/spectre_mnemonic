@@ -199,8 +199,3 @@ Format and test before committing:
 mix format
 mix test
 ```
-
-The codebase follows the local guidelines in `Code Guidelines.md`, `SKILL.md`,
-and `Refactor Agent.md`: one module per file, public docs and specs, specs for
-private helpers, clear control flow, and stable `{:ok, value} | {:error, reason}`
-contracts where operations can fail.

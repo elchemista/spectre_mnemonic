@@ -265,21 +265,21 @@ defmodule SpectreMnemonic.Focus do
   defp build_action_recipe(memory_id, opts, now) do
     case Keyword.get(opts, :action_recipe) do
       recipe when is_binary(recipe) and recipe != "" ->
-        action_recipe(memory_id, recipe, opts, now)
+        action_recipe_from_text(memory_id, recipe, opts, now)
 
       recipe when is_map(recipe) ->
-        action_recipe(recipe, memory_id, opts, now)
+        action_recipe_from_map(recipe, memory_id, opts, now)
 
       recipe when is_list(recipe) ->
-        recipe |> Map.new() |> action_recipe(memory_id, opts, now)
+        recipe |> Map.new() |> action_recipe_from_map(memory_id, opts, now)
 
       _missing ->
         nil
     end
   end
 
-  @spec action_recipe(binary(), binary(), keyword(), DateTime.t()) :: ActionRecipe.t()
-  defp action_recipe(memory_id, text, opts, now) when is_binary(text) do
+  @spec action_recipe_from_text(binary(), binary(), keyword(), DateTime.t()) :: ActionRecipe.t()
+  defp action_recipe_from_text(memory_id, text, opts, now) do
     %ActionRecipe{
       id: id("act"),
       memory_id: memory_id,
@@ -292,8 +292,8 @@ defmodule SpectreMnemonic.Focus do
     }
   end
 
-  @spec action_recipe(map(), binary(), keyword(), DateTime.t()) :: ActionRecipe.t()
-  defp action_recipe(recipe, memory_id, opts, now) do
+  @spec action_recipe_from_map(map(), binary(), keyword(), DateTime.t()) :: ActionRecipe.t()
+  defp action_recipe_from_map(recipe, memory_id, opts, now) do
     metadata = recipe_value(recipe, :metadata, %{})
 
     %ActionRecipe{

@@ -9,7 +9,7 @@ defmodule SpectreMnemonic.Recall do
 
   use GenServer
 
-  alias SpectreMnemonic.{Cue, Focus, RecallPacket}
+  alias SpectreMnemonic.{Cue, Focus, Moment, RecallPacket}
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Recall.Index
 
@@ -219,11 +219,6 @@ defmodule SpectreMnemonic.Recall do
         hamming = Vector.hamming_similarity(signature, cue.binary_signature, signature_bits)
         cosine * 4 + hamming * 4
     end
-  end
-
-  defp semantic_score(%{vector: left}, %{vector: right}, _index_scores)
-       when is_list(left) and is_list(right) do
-    max(0.0, Vector.cosine(left, right)) * 4
   end
 
   defp semantic_score(moment, cue, _index_scores) do
