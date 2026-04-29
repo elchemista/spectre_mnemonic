@@ -11,10 +11,12 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Vector
-  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.{Moment, Secret}
   alias SpectreMnemonic.Recall.{Cue, Index, Packet}
+  alias SpectreMnemonic.Secrets
 
   @hamming_threshold 0.62
+  @type recall_moment :: Moment.t() | Secret.t()
 
   @doc "Starts the recall process."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -55,10 +57,12 @@ defmodule SpectreMnemonic.Recall.Engine do
       |> Enum.uniq_by(& &1.id)
       |> Enum.take(limit)
 
+    revealed = Enum.map(ranked, &Secrets.maybe_reveal(&1, opts))
+
     packet = %Packet{
       cue: cue,
       active_status: active_status(ranked),
-      moments: ranked,
+      moments: revealed,
       knowledge: compact_knowledge(opts),
       artifacts: artifacts_for(ranked, associations),
       associations: associations_for(ranked, associations),
@@ -87,7 +91,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     }
   end
 
-  @spec score(Moment.t(), Cue.t(), map()) :: number()
+  @spec score(recall_moment(), Cue.t(), map()) :: number()
   defp score(moment, cue, index_scores) do
     keyword_score = overlap(moment.keywords, cue.keywords) * 2
     entity_score = overlap(moment.entities, cue.entities) * 3
@@ -99,7 +103,9 @@ defmodule SpectreMnemonic.Recall.Engine do
     if match_score > 0, do: match_score + moment.attention, else: 0
   end
 
-  @spec expand_graph([Moment.t()], [SpectreMnemonic.Memory.Association.t()]) :: [Moment.t()]
+  @spec expand_graph([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) :: [
+          recall_moment()
+        ]
   defp expand_graph(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
@@ -121,7 +127,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     moments ++ linked
   end
 
-  @spec associations_for([Moment.t()], [SpectreMnemonic.Memory.Association.t()]) ::
+  @spec associations_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
           [SpectreMnemonic.Memory.Association.t()]
   defp associations_for(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
@@ -131,7 +137,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     end)
   end
 
-  @spec active_status([Moment.t()]) :: [map()]
+  @spec active_status([recall_moment()]) :: [map()]
   defp active_status(moments) do
     moments
     |> Enum.flat_map(&[&1.stream, &1.task_id])
@@ -146,7 +152,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Enum.uniq_by(fn status -> {status.stream, status.task_id} end)
   end
 
-  @spec artifacts_for([Moment.t()], [SpectreMnemonic.Memory.Association.t()]) ::
+  @spec artifacts_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
           [SpectreMnemonic.Memory.Artifact.t()]
   defp artifacts_for(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
@@ -162,7 +168,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Focus.artifacts()
   end
 
-  @spec action_recipes_for([Moment.t()], [SpectreMnemonic.Memory.Association.t()]) ::
+  @spec action_recipes_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
           [SpectreMnemonic.Memory.ActionRecipe.t()]
   defp action_recipes_for(moments, associations) do
     moment_ids = MapSet.new(Enum.map(moments, & &1.id))
@@ -191,7 +197,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     end)
   end
 
-  @spec confidence([Moment.t()]) :: float()
+  @spec confidence([recall_moment()]) :: float()
   defp confidence([]), do: 0.0
   defp confidence(moments), do: min(1.0, length(moments) / 5)
 
@@ -211,7 +217,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     end
   end
 
-  @spec status_match?(Moment.t(), Cue.t()) :: boolean()
+  @spec status_match?(recall_moment(), Cue.t()) :: boolean()
   defp status_match?(moment, cue) do
     String.contains?(cue.text, "how") and String.contains?(cue.text, "going") and
       not is_nil(moment.task_id)

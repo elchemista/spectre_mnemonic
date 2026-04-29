@@ -6,36 +6,48 @@ defmodule SpectreMnemonic.Intake do
   creates active memory moments, and wires those moments into a graph.
   """
 
-  alias SpectreMnemonic.Intake.{Packet, Summarizer}
-  alias SpectreMnemonic.Memory.{Association, Moment, Signal}
+  alias SpectreMnemonic.Intake.{Memory, Packet, PlugPipeline}
+  alias SpectreMnemonic.Memory.{Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Result
 
   @default_chunk_words 180
   @default_overlap_words 40
+  @default_summary_words 36
   @default_similarity_threshold 0.18
   @default_max_related_edges 40
 
-  @type envelope :: %{
-          input: term(),
-          text: binary(),
-          kind: atom(),
-          stream: term(),
-          task_id: term(),
-          metadata: map(),
-          tags: [term()],
-          title: binary()
-        }
+  @type envelope :: Memory.t()
 
   @doc "Runs unified active-first memory intake."
   @spec remember(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
-    with {:ok, envelope} <- normalize(input, opts),
-         {:ok, root_result} <- record_root(envelope, opts),
-         {:ok, chunk_results} <- record_chunks(envelope, root_result.moment, opts),
+    with {:ok, memory} <- normalize(input, opts),
+         memory <- attach_recent_moments(memory),
+         {:ok, memory} <- run_plugs(memory, opts) do
+      dispatch_memory(memory, opts)
+    else
+      {:halt, %Memory{} = memory} -> dispatch_memory(memory, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec dispatch_memory(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
+  defp dispatch_memory(%Memory{result: nil, secret?: true} = memory, opts),
+    do: remember_secret(memory, opts)
+
+  defp dispatch_memory(%Memory{result: nil} = memory, opts), do: remember_public(memory, opts)
+
+  defp dispatch_memory(%Memory{result: result} = memory, _opts),
+    do: normalize_result(result, memory)
+
+  @spec remember_public(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
+  defp remember_public(%Memory{} = memory, opts) do
+    with {:ok, root_result} <- record_root(memory, opts),
+         {:ok, chunk_results} <- record_chunks(memory, root_result.moment, opts),
          {:ok, summary_results} <-
-           record_summaries(envelope, root_result.moment, chunk_results, opts),
+           record_summaries(memory, root_result.moment, chunk_results, opts),
          {:ok, category_results} <-
-           record_categories(envelope, root_result.moment, chunk_results, summary_results, opts),
+           record_categories(memory, root_result.moment, chunk_results, summary_results, opts),
          {:ok, associations} <-
            link_graph(root_result.moment, chunk_results, summary_results, category_results, opts) do
       results = [root_result] ++ chunk_results ++ summary_results ++ category_results
@@ -49,14 +61,44 @@ defmodule SpectreMnemonic.Intake do
          summaries: Enum.map(summary_results, & &1.moment),
          categories: Enum.map(category_results, & &1.moment),
          associations: associations,
-         warnings: [],
-         errors: [],
+         warnings: memory.warnings,
+         errors: memory.errors,
          persistence: persistence_status(opts)
        }}
     end
   end
 
-  @spec normalize(term(), keyword()) :: {:ok, envelope()} | {:error, :empty_memory}
+  @spec remember_secret(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
+  defp remember_secret(%Memory{} = memory, opts) do
+    with {:ok, result} <-
+           SpectreMnemonic.signal(
+             memory.text,
+             opts
+             |> Keyword.put(:secret?, true)
+             |> Keyword.put(:label, memory.label || "secret")
+             |> Keyword.put(:metadata, memory.metadata)
+             |> Keyword.put(:stream, memory.stream)
+             |> Keyword.put(:task_id, memory.task_id)
+             |> Keyword.put_new(:kind, :secret)
+             |> Keyword.put_new(:persist?, true)
+           ) do
+      {:ok,
+       %Packet{
+         root: result.moment,
+         events: [result.signal],
+         moments: [result.moment],
+         chunks: [],
+         summaries: [],
+         categories: [],
+         associations: [],
+         warnings: memory.warnings,
+         errors: memory.errors,
+         persistence: persistence_status(Keyword.put_new(opts, :persist?, true))
+       }}
+    end
+  end
+
+  @spec normalize(term(), keyword()) :: {:ok, Memory.t()} | {:error, :empty_memory}
   defp normalize(input, opts) do
     text = text_projection(input)
 
@@ -67,7 +109,7 @@ defmodule SpectreMnemonic.Intake do
       metadata = input_metadata(input) |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
 
       {:ok,
-       %{
+       %Memory{
          input: input,
          text: text,
          kind: kind,
@@ -75,13 +117,71 @@ defmodule SpectreMnemonic.Intake do
          task_id: Keyword.get(opts, :task_id) || metadata_value(input, :task_id),
          metadata: metadata,
          tags: List.wrap(Keyword.get(opts, :tags) || metadata_value(input, :tags) || []),
-         title: Keyword.get(opts, :title) || title_for(input, text, kind)
+         title: Keyword.get(opts, :title) || title_for(input, text, kind),
+         secret?: false,
+         label: nil
        }}
     end
   end
 
+  @spec run_plugs(Memory.t(), keyword()) ::
+          {:ok, Memory.t()} | {:halt, Memory.t()} | {:error, term()}
+  defp run_plugs(%Memory{} = memory, opts), do: PlugPipeline.run(memory, opts)
+
+  @spec attach_recent_moments(Memory.t()) :: Memory.t()
+  defp attach_recent_moments(%Memory{} = memory) do
+    recent =
+      SpectreMnemonic.Active.Focus.moments()
+      |> Enum.filter(fn moment ->
+        moment.stream == memory.stream or
+          (not is_nil(memory.task_id) and moment.task_id == memory.task_id)
+      end)
+      |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
+      |> Enum.take(12)
+
+    %{memory | recent_moments: recent}
+  end
+
+  @spec normalize_result(term(), Memory.t()) :: {:ok, Packet.t()} | {:error, term()}
+  defp normalize_result({:ok, result}, memory), do: normalize_result(result, memory)
+  defp normalize_result(%Packet{} = packet, _memory), do: {:ok, packet}
+
+  defp normalize_result(%Moment{} = moment, memory) do
+    {:ok,
+     %Packet{
+       root: moment,
+       moments: [moment],
+       warnings: memory.warnings,
+       errors: memory.errors,
+       persistence: %{mode: :plug, durable?: false}
+     }}
+  end
+
+  defp normalize_result(%Secret{} = secret, memory) do
+    {:ok,
+     %Packet{
+       root: secret,
+       moments: [secret],
+       warnings: memory.warnings,
+       errors: memory.errors,
+       persistence: %{mode: :plug, durable?: false}
+     }}
+  end
+
+  defp normalize_result(%Signal{} = signal, memory) do
+    {:ok,
+     %Packet{
+       events: [signal],
+       warnings: memory.warnings,
+       errors: memory.errors,
+       persistence: %{mode: :plug, durable?: false}
+     }}
+  end
+
+  defp normalize_result(other, _memory), do: {:error, {:invalid_plug_result, other}}
+
   @spec record_root(envelope(), keyword()) ::
-          {:ok, %{signal: Signal.t(), moment: Moment.t()}} | {:error, term()}
+          {:ok, %{signal: Signal.t(), moment: Moment.t() | Secret.t()}} | {:error, term()}
   defp record_root(envelope, opts) do
     SpectreMnemonic.signal(root_text(envelope),
       stream: envelope.stream,
@@ -138,13 +238,10 @@ defmodule SpectreMnemonic.Intake do
   defp record_summaries(envelope, root, chunk_results, opts) do
     chunk_summaries =
       Result.collect_ok(chunk_results, fn %{moment: chunk} ->
-        case record_summary(:chunk, chunk.text, root, envelope, opts,
-               chunk_memory_id: chunk.id,
-               chunk_index: chunk.metadata.chunk_index
-             ) do
-          {:ok, result} -> {:ok, result}
-          {:error, reason} -> {:error, reason}
-        end
+        record_summary(:chunk, chunk.text, root, envelope, opts,
+          chunk_memory_id: chunk.id,
+          chunk_index: chunk.metadata.chunk_index
+        )
       end)
 
     with {:ok, summaries} <- chunk_summaries do
@@ -168,32 +265,27 @@ defmodule SpectreMnemonic.Intake do
       title: envelope.title
     }
 
-    with {:ok, summary} <-
-           Summarizer.summarize(
-             scope,
-             text,
-             Keyword.merge(opts, metadata: Map.merge(metadata, Map.new(metadata_opts)))
-           ) do
-      SpectreMnemonic.signal(summary.text,
-        stream: envelope.stream,
-        kind: :memory_summary,
-        task_id: nil,
-        attention: Keyword.get(opts, :summary_attention, 1.5),
-        persist?: Keyword.get(opts, :persist?, false),
-        metadata:
-          envelope.metadata
-          |> Map.merge(metadata)
-          |> Map.merge(Map.new(metadata_opts))
-          |> Map.merge(%{
-            key_points: summary.key_points,
-            entities: summary.entities,
-            categories: summary.categories,
-            relations: summary.relations,
-            confidence: summary.confidence,
-            summarizer: summary.metadata
-          })
-      )
-    end
+    summary = summarize(scope, text, opts)
+
+    SpectreMnemonic.signal(summary.text,
+      stream: envelope.stream,
+      kind: :memory_summary,
+      task_id: nil,
+      attention: Keyword.get(opts, :summary_attention, 1.5),
+      persist?: Keyword.get(opts, :persist?, false),
+      metadata:
+        envelope.metadata
+        |> Map.merge(metadata)
+        |> Map.merge(Map.new(metadata_opts))
+        |> Map.merge(%{
+          key_points: summary.key_points,
+          entities: summary.entities,
+          categories: summary.categories,
+          relations: summary.relations,
+          confidence: summary.confidence,
+          summary_provider: summary.metadata
+        })
+    )
   end
 
   @spec record_categories(envelope(), Moment.t(), [map()], [map()], keyword()) ::
@@ -423,10 +515,67 @@ defmodule SpectreMnemonic.Intake do
 
   @spec categories_for(binary()) :: [atom()]
   defp categories_for(text) do
-    case Summarizer.summarize(:classification, text) do
-      {:ok, %{categories: categories}} when categories != [] -> categories
-      _other -> [:note]
+    case categories(text) do
+      [] -> [:note]
+      categories -> categories
     end
+  end
+
+  @spec summarize(atom(), binary(), keyword()) :: map()
+  defp summarize(scope, text, opts) do
+    words = words(text)
+    limit = opts |> Keyword.get(:summary_words, @default_summary_words) |> max(1)
+
+    %{
+      scope: scope,
+      text: words |> Enum.take(limit) |> Enum.join(" "),
+      key_points: key_points(text),
+      entities: entities(text),
+      categories: categories(text),
+      relations: [],
+      confidence: if(words == [], do: 0.0, else: 0.35),
+      metadata: %{provider: :deterministic}
+    }
+  end
+
+  @spec key_points(binary()) :: [binary()]
+  defp key_points(text) do
+    text
+    |> String.split(~r/(?<=[.!?])\s+/u, trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.take(3)
+  end
+
+  @spec categories(binary()) :: [atom()]
+  defp categories(text) do
+    tokens = MapSet.new(words(text) |> Enum.map(&String.downcase/1))
+
+    category_rules()
+    |> Enum.filter(fn {_label, rule_words} ->
+      Enum.any?(rule_words, &MapSet.member?(tokens, &1))
+    end)
+    |> Enum.map(fn {label, _rule_words} -> label end)
+  end
+
+  @spec category_rules :: [{atom(), [binary()]}]
+  defp category_rules do
+    [
+      decision: ~w(decision decide decided choose chosen tradeoff because therefore),
+      task: ~w(task todo action next must should implement build fix verify deadline),
+      research: ~w(research evidence study source finding observed analysis hypothesis),
+      error: ~w(error failure failed exception bug issue risk problem blocked),
+      tool: ~w(tool command api endpoint script adapter integration function module),
+      event: ~w(event happened meeting call update status timeline milestone),
+      concept: ~w(concept definition means architecture design pattern model system)
+    ]
+  end
+
+  @spec entities(binary()) :: [binary()]
+  defp entities(text) do
+    Regex.scan(~r/\b[A-Z][A-Za-z0-9_]+\b/, text)
+    |> List.flatten()
+    |> Enum.uniq()
   end
 
   @spec keyword_similarity(Moment.t(), Moment.t()) :: float()

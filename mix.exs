@@ -31,7 +31,7 @@ defmodule SpectreMnemonic.MixProject do
   def application do
     [
       mod: {SpectreMnemonic.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:logger, :crypto]
     ]
   end
 

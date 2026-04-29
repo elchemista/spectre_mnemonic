@@ -9,9 +9,10 @@ defmodule SpectreMnemonic.Active.Focus do
 
   use GenServer
 
-  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Signal}
+  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Index
+  alias SpectreMnemonic.Secrets
   alias SpectreMnemonic.Active.ETSOwner
 
   @default_attention 1.0
@@ -21,10 +22,10 @@ defmodule SpectreMnemonic.Active.Focus do
           binary()
           | {:stream, term()}
           | {:task, term()}
-          | (Moment.t() -> boolean())
+          | (Moment.t() | Secret.t() -> boolean())
   @type record_result :: %{
           required(:signal) => Signal.t(),
-          required(:moment) => Moment.t(),
+          required(:moment) => Moment.t() | Secret.t(),
           optional(:action_recipe) => ActionRecipe.t()
         }
 
@@ -74,7 +75,7 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @doc "Returns all active moments. Recall and consolidation use this read path."
-  @spec moments :: [Moment.t()]
+  @spec moments :: [Moment.t() | Secret.t()]
   def moments do
     :ets.tab2list(:mnemonic_moments)
     |> Enum.map(fn {_id, moment} -> moment end)
@@ -111,36 +112,10 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec handle_call(term(), GenServer.from(), state()) ::
           {:reply, term(), state()}
   def handle_call({:record_signal, input, opts}, _from, state) do
-    now = DateTime.utc_now()
-    stream = Keyword.get(opts, :stream) || :chat
-    task_id = Keyword.get(opts, :task_id)
-    kind = Keyword.get(opts, :kind, infer_kind(input, opts))
-    metadata = Map.new(Keyword.get(opts, :metadata, %{}))
-
-    signal = %Signal{
-      id: id("sig"),
-      input: input,
-      kind: kind,
-      stream: stream,
-      task_id: task_id,
-      metadata: metadata,
-      inserted_at: now
-    }
-
-    moment = build_moment(signal, opts, now)
-
-    :ets.insert(:mnemonic_signals, {signal.id, signal})
-    :ets.insert(:mnemonic_moments, {moment.id, moment})
-    :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
-    update_status(stream, task_id, input, kind, now)
-
-    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
-         {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
-         {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
-      Index.upsert(moment)
-      {:reply, {:ok, record_signal_result(signal, moment, action_recipe)}, state}
+    if Keyword.get(opts, :secret?, false) do
+      {:reply, record_secret_signal(input, opts), state}
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:reply, record_plain_signal(input, opts), state}
     end
   end
 
@@ -178,6 +153,78 @@ defmodule SpectreMnemonic.Active.Focus do
     Enum.each(forget_ids, &forget_moment/1)
 
     {:reply, {:ok, length(forget_ids)}, state}
+  end
+
+  @spec record_plain_signal(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
+  defp record_plain_signal(input, opts) do
+    now = DateTime.utc_now()
+    stream = Keyword.get(opts, :stream) || :chat
+    task_id = Keyword.get(opts, :task_id)
+    kind = Keyword.get(opts, :kind, infer_kind(input, opts))
+    metadata = Map.new(Keyword.get(opts, :metadata, %{}))
+
+    signal = %Signal{
+      id: id("sig"),
+      input: input,
+      kind: kind,
+      stream: stream,
+      task_id: task_id,
+      metadata: metadata,
+      inserted_at: now
+    }
+
+    moment = build_moment(signal, opts, now)
+
+    :ets.insert(:mnemonic_signals, {signal.id, signal})
+    :ets.insert(:mnemonic_moments, {moment.id, moment})
+    :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
+    update_status(stream, task_id, input, kind, now)
+
+    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
+         {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
+         {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
+      Index.upsert(moment)
+      {:ok, record_signal_result(signal, moment, action_recipe)}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec record_secret_signal(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
+  defp record_secret_signal(input, opts) do
+    now = DateTime.utc_now()
+    stream = Keyword.get(opts, :stream) || :secrets
+    task_id = Keyword.get(opts, :task_id)
+    kind = Keyword.get(opts, :kind, :secret)
+    metadata = Map.new(Keyword.get(opts, :metadata, %{}))
+    label = secret_label(opts, metadata)
+    plaintext = to_text(input)
+    redacted = redacted_secret_text(label)
+    metadata = secret_metadata(metadata, label)
+
+    signal = %Signal{
+      id: id("sig"),
+      input: redacted,
+      kind: kind,
+      stream: stream,
+      task_id: task_id,
+      metadata: metadata,
+      inserted_at: now
+    }
+
+    with {:ok, moment} <- build_secret(signal, label, redacted, plaintext, opts, now) do
+      :ets.insert(:mnemonic_signals, {signal.id, signal})
+      :ets.insert(:mnemonic_moments, {moment.id, moment})
+      :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
+      update_status(stream, task_id, signal.input, kind, now)
+
+      with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
+           {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
+           {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
+        Index.upsert(moment)
+        {:ok, record_signal_result(signal, moment, action_recipe)}
+      end
+    end
   end
 
   @spec lookup_artifact(binary()) :: [Artifact.t()]
@@ -218,6 +265,55 @@ defmodule SpectreMnemonic.Active.Focus do
       metadata: signal.metadata,
       inserted_at: now
     }
+  end
+
+  @spec build_secret(Signal.t(), binary(), binary(), binary(), keyword(), DateTime.t()) ::
+          {:ok, Secret.t()} | {:error, term()}
+  defp build_secret(signal, label, redacted, plaintext, opts, now) do
+    memory_id = id("mom")
+    secret_id = id("sec")
+
+    context = %{
+      memory_id: memory_id,
+      signal_id: signal.id,
+      secret_id: secret_id,
+      label: label,
+      metadata: signal.metadata
+    }
+
+    with {:ok, encrypted} <- Secrets.encrypt(plaintext, context, opts) do
+      embedding = SpectreMnemonic.Embedding.Service.embed(redacted, secret_embedding_opts(opts))
+
+      {:ok,
+       %Secret{
+         id: memory_id,
+         signal_id: signal.id,
+         secret_id: secret_id,
+         label: label,
+         stream: signal.stream,
+         task_id: signal.task_id,
+         kind: signal.kind,
+         text: redacted,
+         input: redacted,
+         vector: embedding.vector,
+         binary_signature: Map.get(embedding, :binary_signature),
+         embedding: embedding,
+         keywords: keywords(redacted),
+         entities: entities(redacted),
+         fingerprint: fingerprint(redacted),
+         attention: Keyword.get(opts, :attention, @default_attention),
+         locked?: true,
+         revealed?: false,
+         algorithm: Map.fetch!(encrypted, :algorithm),
+         ciphertext: Map.fetch!(encrypted, :ciphertext),
+         iv: Map.fetch!(encrypted, :iv),
+         tag: Map.fetch!(encrypted, :tag),
+         aad: Map.fetch!(encrypted, :aad),
+         reveal: Secrets.reveal_instruction(),
+         metadata: signal.metadata,
+         inserted_at: now
+       }}
+    end
   end
 
   @spec build_association(binary(), atom(), binary(), keyword()) :: Association.t()
@@ -350,7 +446,8 @@ defmodule SpectreMnemonic.Active.Focus do
     maybe_persist_value(:associations, association, opts)
   end
 
-  @spec record_signal_result(Signal.t(), Moment.t(), ActionRecipe.t() | nil) :: record_result()
+  @spec record_signal_result(Signal.t(), Moment.t() | Secret.t(), ActionRecipe.t() | nil) ::
+          record_result()
   defp record_signal_result(signal, moment, nil), do: %{signal: signal, moment: moment}
 
   defp record_signal_result(signal, moment, action_recipe) do
@@ -414,7 +511,7 @@ defmodule SpectreMnemonic.Active.Focus do
       ETSOwner.member?(:mnemonic_artifacts, id) or ETSOwner.member?(:mnemonic_action_recipes, id)
   end
 
-  @spec selected?(Moment.t(), selector()) :: boolean()
+  @spec selected?(Moment.t() | Secret.t(), selector()) :: boolean()
   defp selected?(moment, id) when is_binary(id), do: moment.id == id or moment.signal_id == id
   defp selected?(moment, {:stream, stream}), do: moment.stream == stream
   defp selected?(moment, {:task, task_id}), do: moment.task_id == task_id
@@ -428,6 +525,33 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec to_text(term()) :: binary()
   defp to_text(input) when is_binary(input), do: input
   defp to_text(input), do: inspect(input)
+
+  @spec secret_label(keyword(), map()) :: binary()
+  defp secret_label(opts, metadata) do
+    opts
+    |> Keyword.get(:label, Map.get(metadata, :label, Map.get(metadata, "label", "secret")))
+    |> to_string()
+  end
+
+  @spec redacted_secret_text(binary()) :: binary()
+  defp redacted_secret_text(label), do: "secret: #{label}"
+
+  @spec secret_metadata(map(), binary()) :: map()
+  defp secret_metadata(metadata, label) do
+    metadata
+    |> Map.put(:secret?, true)
+    |> Map.put(:label, label)
+  end
+
+  @spec secret_embedding_opts(keyword()) :: keyword()
+  defp secret_embedding_opts(opts) do
+    Keyword.drop(opts, [
+      :secret_key,
+      :secret_key_fun,
+      :authorization_adapter,
+      :authorization_context
+    ])
+  end
 
   @spec keywords(term()) :: [binary()]
   defp keywords(input) do

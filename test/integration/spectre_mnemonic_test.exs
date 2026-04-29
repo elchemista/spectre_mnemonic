@@ -2,9 +2,12 @@ defmodule SpectreMnemonic.IntegrationTest do
   use SpectreMnemonic.MemoryCase
 
   alias SpectreMnemonic.Actions.Runtime
-  alias SpectreMnemonic.Memory.ActionRecipe
+  alias SpectreMnemonic.Intake.Packet
+  alias SpectreMnemonic.Knowledge.Consolidation
+  alias SpectreMnemonic.Memory.{ActionRecipe, Moment, Secret, Signal}
   alias SpectreMnemonic.Embedding.{BinaryQuantizer, Model2VecStatic, ModelDownloader, Vector}
   alias SpectreMnemonic.Recall.Index
+  alias SpectreMnemonic.Secrets.Crypto.AESGCM
 
   test "records a signal without an embedding adapter" do
     assert {:ok, %{signal: signal, moment: moment}} =
@@ -139,26 +142,408 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert json_packet.chunks |> hd() |> Map.fetch!(:text) == json
   end
 
-  test "remember uses configured summarizer adapter hierarchically" do
-    Application.put_env(:spectre_mnemonic, :summarizer_adapter, __MODULE__.SummarizerAdapter)
+  test "remember ignores direct secret options unless a plug routes the draft" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("github_pat_super_secret",
+               secret?: true,
+               label: "github token",
+               secret_key: secret_key()
+             )
 
-    text = Enum.map_join(1..70, " ", &"task#{&1}")
+    assert %Moment{} = packet.root
+    assert packet.root.text == "text: github_pat_super_secret"
+    refute packet.root.metadata[:secret?]
+    assert packet.persistence == %{mode: :active, durable?: false}
+  end
+
+  test "secret signal persists only encrypted and redacted memory" do
+    plaintext = "github_pat_super_secret"
+
+    assert {:ok, %{signal: signal, moment: secret}} =
+             SpectreMnemonic.signal(plaintext,
+               secret?: true,
+               label: "github token",
+               secret_key: secret_key()
+             )
+
+    assert %Secret{} = secret
+    assert signal.input == "secret: github token"
+    assert secret.text == "secret: github token"
+    assert secret.input == "secret: github token"
+    assert is_binary(secret.ciphertext)
+    refute secret.ciphertext == plaintext
+
+    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    rendered = inspect(records, limit: :infinity)
+    refute String.contains?(rendered, plaintext)
+    assert String.contains?(rendered, "secret: github token")
+  end
+
+  test "remember plugs compose global and per-call memory mutations" do
+    Application.put_env(:spectre_mnemonic, :plugs, [__MODULE__.GlobalMemoryPlug])
 
     assert {:ok, packet} =
-             SpectreMnemonic.remember(text,
-               title: "Adapter summary",
-               chunk_words: 20,
-               overlap_words: 0,
+             SpectreMnemonic.remember("plain plug memory",
+               plugs: [__MODULE__.PerCallMemoryPlug],
                test_pid: self()
              )
 
-    assert length(packet.chunks) > 1
-    assert Enum.any?(packet.summaries, &String.starts_with?(&1.text, "adapter chunk"))
-    assert Enum.any?(packet.summaries, &String.starts_with?(&1.text, "adapter root"))
-    assert_receive {:summarizer_called, :chunk, _text}
-    assert_receive {:summarizer_called, :root, _text}
+    assert packet.root.metadata.global_plug? == true
+    assert packet.root.metadata.per_call_plug? == true
+    assert packet.root.metadata.plug_order == [:global, :per_call]
+    assert_received {:plug_called, :global, "plain plug memory"}
+    assert_received {:plug_called, :per_call, [:global]}
   after
-    Application.delete_env(:spectre_mnemonic, :summarizer_adapter)
+    Application.delete_env(:spectre_mnemonic, :plugs)
+  end
+
+  test "remember tuple plugs receive plug-specific options" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("tuple plug memory",
+               plugs: [{__MODULE__.TupleOptionPlug, route: :billing, confidence: 0.81}],
+               test_pid: self()
+             )
+
+    assert packet.root.metadata.route == :billing
+    assert packet.root.metadata.confidence == 0.81
+    assert_received {:tuple_option_plug, :billing, 0.81}
+  end
+
+  test "remember plug can mutate draft text kind title tags and metadata" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("plain incoming chat",
+               plugs: [__MODULE__.MemoryMutatorPlug],
+               chunk_words: 50
+             )
+
+    assert packet.root.kind == :task
+    assert packet.root.text == "task: Ship the plug-generated task"
+    assert packet.root.metadata.intent == :implementation
+    assert packet.root.metadata.tags == [:plugged, :task]
+    assert [chunk] = packet.chunks
+    assert chunk.text == "TODO implement the plug-generated task"
+    assert chunk.metadata.intent == :implementation
+  end
+
+  test "remember plug halt with memory stops later plugs and dispatches the draft" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("halt this draft",
+               plugs: [__MODULE__.HaltMemoryPlug, __MODULE__.ShouldNotRunPlug],
+               test_pid: self()
+             )
+
+    assert packet.root.metadata.halted_by_plug? == true
+    assert packet.warnings == [:halted_by_memory_plug]
+    assert packet.root.text == "text: Halted by memory plug"
+    refute_received {:should_not_run_plug, _text}
+  end
+
+  test "remember returns clear errors for unavailable or invalid plugs" do
+    assert {:error, {:plug_not_available, __MODULE__.MissingPlug}} =
+             SpectreMnemonic.remember("missing plug", plugs: [__MODULE__.MissingPlug])
+
+    assert {:error, {:invalid_plug, "bad plug"}} =
+             SpectreMnemonic.remember("invalid plug", plugs: ["bad plug"])
+  end
+
+  test "remember plugs route secrets with recent memory before encryption" do
+    {:ok, %{moment: context}} =
+      SpectreMnemonic.signal("Deploy Stripe payments to production",
+        stream: :chat,
+        task_id: "session-1"
+      )
+
+    context_id = context.id
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("sk_live_super_secret",
+               stream: :chat,
+               task_id: "session-1",
+               secret_key: secret_key(),
+               plugs: [__MODULE__.StripeSecretRouterPlug],
+               test_pid: self()
+             )
+
+    secret = packet.root
+    assert %Secret{} = secret
+    assert secret.text == "secret: Stripe production secret key"
+    assert secret.label == "Stripe production secret key"
+    assert secret.metadata.provider == :stripe
+    assert secret.metadata.environment == :production
+    assert secret.metadata.plug_confidence == 0.92
+
+    assert_received {:secret_router_context, ["Deploy Stripe payments to production"],
+                     ^context_id}
+  end
+
+  test "remember plug-routed secrets persist encrypted replay records without plaintext" do
+    plaintext = "plug_routed_super_secret"
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(plaintext,
+               plugs: [__MODULE__.AlwaysSecretPlug],
+               secret_key: secret_key(),
+               metadata: %{provider: :github}
+             )
+
+    assert %Secret{} = secret = packet.root
+    assert secret.text == "secret: GitHub automation token"
+    assert secret.input == "secret: GitHub automation token"
+    assert secret.metadata.provider == :github
+    assert secret.metadata.secret? == true
+    refute secret.ciphertext == plaintext
+
+    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    rendered = inspect(records, limit: :infinity)
+
+    refute String.contains?(rendered, plaintext)
+    assert String.contains?(rendered, "secret: GitHub automation token")
+    assert String.contains?(rendered, secret.id)
+  end
+
+  test "remember plugs can halt with packet moment secret or signal results" do
+    assert {:ok, %Packet{warnings: [:halted_packet]}} =
+             SpectreMnemonic.remember("halt packet", plugs: [__MODULE__.HaltPacketPlug])
+
+    assert {:ok, %Packet{root: %Moment{id: "plug_moment"}}} =
+             SpectreMnemonic.remember("halt moment", plugs: [__MODULE__.HaltMomentPlug])
+
+    assert {:ok, %Packet{root: %Secret{id: "plug_secret"}}} =
+             SpectreMnemonic.remember("halt secret", plugs: [__MODULE__.HaltSecretPlug])
+
+    assert {:ok, %Packet{events: [%Signal{id: "plug_signal"}]}} =
+             SpectreMnemonic.remember("halt signal", plugs: [__MODULE__.HaltSignalPlug])
+  end
+
+  test "recall leaves secret moments locked without authorization" do
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal("github_pat_super_secret",
+        secret?: true,
+        label: "github token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, packet} = SpectreMnemonic.recall("github token")
+    recalled = Enum.find(packet.moments, &(&1.id == secret.id))
+
+    assert %Secret{} = recalled
+    assert recalled.locked? == true
+    assert recalled.revealed? == false
+    assert recalled.text == "secret: github token"
+    assert recalled.authorization.status == :required
+    assert recalled.authorization.reason == :authorization_not_configured
+    assert recalled.authorization.request.operation == :recall
+    assert recalled.authorization.request.label == "github token"
+    assert recalled.reveal == %{module: SpectreMnemonic, function: :reveal, arity: 2}
+  end
+
+  test "recall reveals secret moments after authorization succeeds" do
+    plaintext = "github_pat_super_secret"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "github token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("github token",
+               secret_key: secret_key(),
+               authorization_adapter: __MODULE__.ApprovingSecretAuth,
+               authorization_context: %{user_id: "user-1"},
+               test_pid: self()
+             )
+
+    recalled = Enum.find(packet.moments, &(&1.id == secret.id))
+    assert %Secret{} = recalled
+    assert recalled.locked? == false
+    assert recalled.revealed? == true
+    assert recalled.text == plaintext
+    assert recalled.input == plaintext
+    assert recalled.authorization.status == :authorized
+    assert recalled.authorization.grant == %{authorized?: true}
+    assert recalled.authorization.request.label == "github token"
+
+    assert_received {:secret_authorize,
+                     %{
+                       operation: :recall,
+                       secret_id: secret_id,
+                       memory_id: memory_id,
+                       label: "github token",
+                       authorization_context: %{user_id: "user-1"}
+                     }}
+
+    assert secret_id == secret.secret_id
+    assert memory_id == secret.id
+  end
+
+  test "recall keeps secret locked when authorization denies" do
+    plaintext = "github_pat_super_secret"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "github token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("github token",
+               secret_key: secret_key(),
+               authorization_adapter: __MODULE__.DenyingSecretAuth
+             )
+
+    recalled = Enum.find(packet.moments, &(&1.id == secret.id))
+    assert %Secret{} = recalled
+    assert recalled.locked? == true
+    assert recalled.revealed? == false
+    assert recalled.text == "secret: github token"
+    refute recalled.text == plaintext
+    assert recalled.authorization.status == :denied
+    assert recalled.authorization.reason == :denied
+  end
+
+  test "recall uses configured authorization adapter when options omit one" do
+    Application.put_env(
+      :spectre_mnemonic,
+      :secret_authorization_adapter,
+      __MODULE__.ApprovingSecretAuth
+    )
+
+    plaintext = "configured_auth_secret"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "configured token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("configured token",
+               secret_key: secret_key(),
+               test_pid: self()
+             )
+
+    recalled = Enum.find(packet.moments, &(&1.id == secret.id))
+    assert %Secret{locked?: false, revealed?: true} = recalled
+    assert recalled.text == plaintext
+    assert recalled.authorization.status == :authorized
+    assert_received {:secret_authorize, %{label: "configured token"}}
+  after
+    Application.delete_env(:spectre_mnemonic, :secret_authorization_adapter)
+  end
+
+  test "agents can reveal a locked recalled secret after asking for authorization" do
+    plaintext = "github_pat_super_secret"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "github token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, packet} = SpectreMnemonic.recall("github token")
+    locked = Enum.find(packet.moments, &(&1.id == secret.id))
+
+    assert %Secret{locked?: true} = locked
+    assert locked.reveal == %{module: SpectreMnemonic, function: :reveal, arity: 2}
+
+    assert {:ok, revealed} =
+             SpectreMnemonic.reveal(locked,
+               secret_key: secret_key(),
+               authorization_adapter: __MODULE__.ApprovingSecretAuth,
+               authorization_context: %{user_id: "user-1"},
+               test_pid: self()
+             )
+
+    assert revealed.id == locked.id
+    assert revealed.locked? == false
+    assert revealed.revealed? == true
+    assert revealed.text == plaintext
+    assert revealed.authorization.status == :authorized
+    assert_received {:secret_authorize, %{memory_id: memory_id, label: "github token"}}
+    assert memory_id == locked.id
+  end
+
+  test "reveal supports configured secret key functions" do
+    plaintext = "key_fun_secret"
+
+    key_fun = fn
+      %{label: "key fun token"} -> secret_key()
+      _context -> wrong_secret_key()
+    end
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "key fun token",
+        secret_key_fun: key_fun
+      )
+
+    assert {:ok, revealed} =
+             SpectreMnemonic.reveal(secret,
+               secret_key_fun: key_fun,
+               authorization_adapter: __MODULE__.ApprovingSecretAuth,
+               test_pid: self()
+             )
+
+    assert revealed.text == plaintext
+    assert revealed.authorization.status == :authorized
+    assert_received {:secret_authorize, %{label: "key fun token"}}
+  end
+
+  test "reveal returns already revealed secrets without requiring authorization again" do
+    plaintext = "already_revealed_secret"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "already revealed token",
+        secret_key: secret_key()
+      )
+
+    assert {:ok, revealed} =
+             SpectreMnemonic.reveal(secret,
+               secret_key: secret_key(),
+               authorization_adapter: __MODULE__.ApprovingSecretAuth,
+               test_pid: self()
+             )
+
+    assert_receive {:secret_authorize, %{label: "already revealed token"}}
+
+    assert {:ok, same_secret} = SpectreMnemonic.reveal(revealed, test_pid: self())
+    assert same_secret == revealed
+    refute_received {:secret_authorize, _request}
+  end
+
+  test "AES-GCM adapter rejects missing invalid and wrong keys cleanly" do
+    context = %{secret_id: "sec_test", memory_id: "mom_test", label: "api key"}
+
+    assert {:error, :secret_key_not_configured} = AESGCM.encrypt("secret", context, [])
+
+    assert {:error, {:invalid_secret_key, expected_bytes: 32}} =
+             AESGCM.encrypt("secret", context, secret_key: "short")
+
+    assert {:ok, encrypted} = AESGCM.encrypt("secret", context, secret_key: secret_key())
+
+    secret =
+      struct!(
+        Secret,
+        Map.merge(encrypted, %{
+          id: "mom_test",
+          signal_id: "sig_test",
+          secret_id: "sec_test",
+          label: "api key",
+          text: "secret: api key",
+          input: "secret: api key"
+        })
+      )
+
+    assert {:error, :invalid_secret_ciphertext} =
+             AESGCM.decrypt(secret, context, secret_key: wrong_secret_key())
   end
 
   test "forgets selected active moments" do
@@ -413,6 +798,8 @@ defmodule SpectreMnemonic.IntegrationTest do
     {:ok, packet} = SpectreMnemonic.remember("runtime consolidation should keep this memory")
 
     runtime_fun = fn context ->
+      assert %Consolidation{} = context
+
       knowledge =
         context.moments
         |> Enum.filter(&(&1.id == packet.root.id))
@@ -440,9 +827,116 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert {:ok, adapter_knowledge} = SpectreMnemonic.consolidate(test_pid: self())
     assert Enum.any?(adapter_knowledge, &(&1.metadata.strategy == :adapter))
-    assert_received {:consolidator_called, count} when count > 0
+
+    assert_received {:consolidator_called, count, window_count}
+                    when count > 0 and window_count > 0
   after
     Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
+  end
+
+  test "consolidation adapter receives graph windows and can return a struct plan" do
+    {:ok, %{moment: left}} =
+      SpectreMnemonic.signal("connected graph window left memory",
+        task_id: "window-a",
+        attention: 2.0
+      )
+
+    {:ok, %{moment: right}} =
+      SpectreMnemonic.signal("connected graph window right memory",
+        task_id: "window-a",
+        attention: 2.0
+      )
+
+    {:ok, %{moment: solo}} =
+      SpectreMnemonic.signal("standalone graph window memory",
+        task_id: "window-b",
+        attention: 2.0
+      )
+
+    assert {:ok, link} = SpectreMnemonic.link(left.id, :supports, right.id)
+
+    test_pid = self()
+
+    runtime_fun = fn %Consolidation{} = consolidation ->
+      send(test_pid, {:consolidation_windows, consolidation.windows})
+
+      knowledge =
+        Enum.map(consolidation.windows, fn window ->
+          %SpectreMnemonic.Knowledge.Record{
+            id: "window_knowledge_#{window.id}",
+            source_id: hd(window.moment_ids),
+            text: "window #{window.id} #{Enum.join(window.moment_ids, ",")}",
+            metadata: %{window_id: window.id},
+            inserted_at: consolidation.now
+          }
+        end)
+
+      {:ok,
+       %{
+         consolidation
+         | knowledge: knowledge,
+           records: [{:custom_consolidation, %{id: "custom_record", window_count: 2}}],
+           tombstones: [%{family: :moments, id: solo.id, reason: :compressed}],
+           strategy: :struct_chain,
+           metadata: %{chain: :test},
+           warnings: [:window_compressed]
+       }}
+    end
+
+    assert {:ok, knowledge} =
+             SpectreMnemonic.consolidate(min_attention: 2.0, consolidate_with: runtime_fun)
+
+    assert length(knowledge) == 2
+
+    assert_received {:consolidation_windows, windows}
+
+    connected =
+      Enum.find(windows, fn window ->
+        MapSet.equal?(MapSet.new(window.moment_ids), MapSet.new([left.id, right.id]))
+      end)
+
+    singleton = Enum.find(windows, &(&1.moment_ids == [solo.id]))
+
+    assert connected.association_ids == [link.id]
+    assert connected.task_ids == ["window-a"]
+    assert singleton.task_ids == ["window-b"]
+
+    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert Enum.any?(records, &(&1.family == :custom_consolidation))
+    assert Enum.any?(records, &(&1.family == :tombstones and &1.payload.id == solo.id))
+
+    job =
+      Enum.find(
+        records,
+        &(&1.family == :consolidation_jobs and &1.payload.strategy == :struct_chain)
+      )
+
+    assert job.payload.windows == 2
+    assert job.payload.tombstones == 1
+    assert job.payload.metadata == %{chain: :test}
+    assert job.payload.warnings == [:window_compressed]
+  end
+
+  test "consolidation keeps secret plaintext out of durable records" do
+    plaintext = "consolidation_secret_plaintext"
+
+    {:ok, %{moment: secret}} =
+      SpectreMnemonic.signal(plaintext,
+        secret?: true,
+        label: "consolidation token",
+        secret_key: secret_key(),
+        attention: 2.0
+      )
+
+    assert %Secret{} = secret
+    assert {:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: 2.0)
+    assert Enum.any?(knowledge, &(&1.source_id == secret.id))
+    assert Enum.all?(knowledge, &(not String.contains?(&1.text, plaintext)))
+
+    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    rendered = inspect(records, limit: :infinity)
+    refute String.contains?(rendered, plaintext)
+    assert String.contains?(rendered, "secret: consolidation token")
   end
 
   test "stores action language recipe with a signal and recalls it as data" do
@@ -587,35 +1081,15 @@ defmodule SpectreMnemonic.IntegrationTest do
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
   end
 
-  defmodule SummarizerAdapter do
-    @behaviour SpectreMnemonic.Intake.Summarizer.Adapter
-
-    @impl true
-    def summarize(%{scope: scope, text: text}, opts) do
-      if pid = Keyword.get(opts, :test_pid) do
-        send(pid, {:summarizer_called, scope, text})
-      end
-
-      {:ok,
-       %{
-         text: "adapter #{scope} #{String.slice(text, 0, 18)}",
-         key_points: ["adapter point"],
-         entities: ["AdapterEntity"],
-         categories: [:adapter_category],
-         relations: [],
-         confidence: 0.9,
-         metadata: %{adapter: true}
-       }}
-    end
-  end
-
   defmodule ConsolidationAdapter do
     @behaviour SpectreMnemonic.Knowledge.Consolidator.Adapter
 
     @impl true
     def consolidate(context, opts) do
+      %Consolidation{} = context
+
       if pid = Keyword.get(opts, :test_pid) do
-        send(pid, {:consolidator_called, length(context.moments)})
+        send(pid, {:consolidator_called, length(context.moments), length(context.windows)})
       end
 
       knowledge =
@@ -647,6 +1121,208 @@ defmodule SpectreMnemonic.IntegrationTest do
       send(Keyword.fetch!(opts, :test_pid), {:runtime_called, :run, recipe, context})
       {:ok, %{refreshed?: true}}
     end
+  end
+
+  defmodule ApprovingSecretAuth do
+    @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
+
+    @impl true
+    def authorize(request, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:secret_authorize, request})
+      end
+
+      {:ok, %{authorized?: true}}
+    end
+  end
+
+  defmodule DenyingSecretAuth do
+    @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
+
+    @impl true
+    def authorize(_request, _opts), do: {:error, :denied}
+  end
+
+  defmodule GlobalMemoryPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:plug_called, :global, memory.text})
+      end
+
+      metadata =
+        memory.metadata
+        |> Map.put(:global_plug?, true)
+        |> Map.put(:plug_order, [:global])
+
+      %{memory | metadata: metadata}
+    end
+  end
+
+  defmodule PerCallMemoryPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      order = Map.get(memory.metadata, :plug_order, [])
+
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:plug_called, :per_call, order})
+      end
+
+      metadata =
+        memory.metadata
+        |> Map.put(:per_call_plug?, true)
+        |> Map.put(:plug_order, order ++ [:per_call])
+
+      %{memory | metadata: metadata}
+    end
+  end
+
+  defmodule TupleOptionPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      route = Keyword.fetch!(opts, :route)
+      confidence = Keyword.fetch!(opts, :confidence)
+
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:tuple_option_plug, route, confidence})
+      end
+
+      metadata =
+        memory.metadata
+        |> Map.put(:route, route)
+        |> Map.put(:confidence, confidence)
+
+      %{memory | metadata: metadata}
+    end
+  end
+
+  defmodule MemoryMutatorPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, _opts) do
+      metadata = Map.put(memory.metadata, :intent, :implementation)
+
+      %{
+        memory
+        | text: "TODO implement the plug-generated task",
+          kind: :task,
+          title: "Ship the plug-generated task",
+          tags: [:plugged, :task],
+          metadata: metadata
+      }
+    end
+  end
+
+  defmodule HaltMemoryPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, _opts) do
+      metadata = Map.put(memory.metadata, :halted_by_plug?, true)
+
+      {:halt,
+       %{
+         memory
+         | title: "Halted by memory plug",
+           metadata: metadata,
+           warnings: [:halted_by_memory_plug | memory.warnings]
+       }}
+    end
+  end
+
+  defmodule ShouldNotRunPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:should_not_run_plug, memory.text})
+      end
+
+      %{memory | metadata: Map.put(memory.metadata, :should_not_run?, true)}
+    end
+  end
+
+  defmodule StripeSecretRouterPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      recent_text = Enum.map(memory.recent_moments, & &1.text)
+      stripe_context = Enum.find(memory.recent_moments, &String.contains?(&1.text, "Stripe"))
+
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:secret_router_context, recent_text, stripe_context.id})
+      end
+
+      if String.starts_with?(memory.text, "sk_live_") and stripe_context do
+        metadata =
+          memory.metadata
+          |> Map.put(:provider, :stripe)
+          |> Map.put(:environment, :production)
+          |> Map.put(:plug_confidence, 0.92)
+
+        %{
+          memory
+          | secret?: true,
+            label: "Stripe production secret key",
+            metadata: metadata
+        }
+      else
+        memory
+      end
+    end
+  end
+
+  defmodule AlwaysSecretPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, _opts) do
+      metadata = Map.put(memory.metadata, :source, :always_secret_plug)
+
+      %{
+        memory
+        | secret?: true,
+          label: "GitHub automation token",
+          metadata: metadata
+      }
+    end
+  end
+
+  defmodule HaltPacketPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(_memory, _opts), do: {:ok, %Packet{warnings: [:halted_packet]}}
+  end
+
+  defmodule HaltMomentPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(_memory, _opts), do: %Moment{id: "plug_moment", text: "plug moment"}
+  end
+
+  defmodule HaltSecretPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(_memory, _opts), do: %Secret{id: "plug_secret", text: "secret: plug"}
+  end
+
+  defmodule HaltSignalPlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(_memory, _opts), do: %Signal{id: "plug_signal", input: "plug signal"}
   end
 
   defp write_model2vec_fixture(model_dir) do
@@ -751,4 +1427,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     |> URI.decode()
     |> String.trim_leading("/")
   end
+
+  defp secret_key, do: <<1::256>>
+  defp wrong_secret_key, do: <<2::256>>
 end

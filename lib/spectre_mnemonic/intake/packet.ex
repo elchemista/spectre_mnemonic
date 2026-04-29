@@ -6,10 +6,11 @@ defmodule SpectreMnemonic.Intake.Packet do
   chunks, summaries, category nodes, graph edges, and operational notes.
   """
 
+  @typedoc "Return packet produced by `SpectreMnemonic.remember/2`."
   @type t :: %__MODULE__{
-          root: SpectreMnemonic.Memory.Moment.t() | nil,
+          root: SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t() | nil,
           events: [SpectreMnemonic.Memory.Signal.t()],
-          moments: [SpectreMnemonic.Memory.Moment.t()],
+          moments: [SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t()],
           chunks: [SpectreMnemonic.Memory.Moment.t()],
           summaries: [SpectreMnemonic.Memory.Moment.t()],
           categories: [SpectreMnemonic.Memory.Moment.t()],

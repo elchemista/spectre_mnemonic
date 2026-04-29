@@ -33,6 +33,10 @@ The public API is intentionally compact:
 - Active memory in ETS for signals, moments, associations, artifacts, and status.
 - Automatic chunking, fallback summarization, categorization, and graph linking
   for high-level remembered input.
+- Phoenix-style `remember/2` plug pipeline for app-defined classification,
+  enrichment, routing, summarization, compression, or custom intake results.
+- First-class encrypted secret memories that recall through the same API and
+  reveal only after application-defined authorization.
 - Adapter-free recall using keywords, entities, SimHash-style fingerprints, and graph expansion.
 - Optional vector recall through embedding adapters or the local Model2Vec provider.
 - Durable persistence through `SpectreMnemonic.Persistence.Manager` and storage adapters.
@@ -134,8 +138,8 @@ SpectreMnemonic.forget("mom_123")
 For experiments, pass a runtime function:
 
 ```elixir
-SpectreMnemonic.consolidate(consolidate_with: fn context ->
-  {:ok, %{knowledge: MyApp.choose_knowledge(context.moments)}}
+SpectreMnemonic.consolidate(consolidate_with: fn consolidation ->
+  {:ok, %{consolidation | knowledge: MyApp.choose_knowledge(consolidation.windows)}}
 end)
 ```
 
@@ -145,6 +149,346 @@ For production, configure an adapter:
 config :spectre_mnemonic,
   consolidation_adapter: MyApp.MemoryConsolidator
 ```
+
+Consolidation adapters receive one `%SpectreMnemonic.Knowledge.Consolidation{}`
+struct. The library fills selected active moments, graph associations, graph
+windows, vectors, and default durable outputs; the adapter can modify the same
+struct and return it:
+
+```elixir
+defmodule MyApp.MemoryConsolidator do
+  @behaviour SpectreMnemonic.Knowledge.Consolidator.Adapter
+
+  @impl true
+  def consolidate(consolidation, _opts) do
+    consolidation =
+      consolidation
+      |> MyApp.MemoryChain.compress_windows()
+      |> MyApp.MemoryChain.choose_knowledge()
+      |> MyApp.MemoryChain.preserve_important_edges()
+
+    {:ok, %{consolidation | strategy: :my_app_chain}}
+  end
+end
+```
+
+Each `consolidation.windows` item is a plain map with related `moment_ids`,
+`association_ids`, stream/task/time metadata, keywords, and metadata. This lets
+the adapter work on chunks of connected memory while SpectreMnemonic still owns
+the durable family writes, graph records, vector records, and secret redaction.
+
+## Remember Plug Pipeline
+
+`remember/2` can run a composable plug pipeline before the input becomes stored
+memory. This is the place to add app-specific classification, routing,
+metadata, summarization, compression, filtering, or secret detection without
+teaching agents new memory APIs.
+
+Plugs receive a `%SpectreMnemonic.Intake.Memory{}` draft:
+
+```elixir
+%SpectreMnemonic.Intake.Memory{
+  input: original_input,
+  text: "normalized text passed to the normal intake path",
+  kind: :text,
+  stream: :memory,
+  task_id: "chat-123",
+  metadata: %{},
+  tags: [],
+  title: "normalized title",
+  secret?: false,
+  label: nil,
+  assigns: %{},
+  warnings: [],
+  errors: [],
+  recent_moments: [...],
+  result: nil,
+  halted?: false
+}
+```
+
+`recent_moments` contains recent memories from the same stream or task. That is
+useful when a user describes what a secret is several messages before they paste
+the secret itself.
+
+Configure global plugs:
+
+```elixir
+config :spectre_mnemonic,
+  plugs: [
+    MyApp.Memory.ProjectPlug,
+    {MyApp.Memory.SecretRouterPlug, providers: [:github, :stripe]}
+  ]
+```
+
+Add per-call plugs when a caller needs a local pipeline. Global plugs run first;
+per-call plugs run after them:
+
+```elixir
+SpectreMnemonic.remember("sk_live_...",
+  task_id: "chat-123",
+  plugs: [MyApp.Memory.SessionPlug],
+  secret_key: secret_key_32_bytes
+)
+```
+
+Implement a plug with `SpectreMnemonic.Intake.Plug`:
+
+```elixir
+defmodule MyApp.Memory.ProjectPlug do
+  @behaviour SpectreMnemonic.Intake.Plug
+
+  @impl true
+  def call(memory, _opts) do
+    %{
+      memory
+      | metadata: Map.put(memory.metadata, :project, :billing),
+        tags: [:billing | memory.tags]
+    }
+  end
+end
+```
+
+A plug can change the draft before the normal graph intake continues:
+
+```elixir
+defmodule MyApp.Memory.TaskPlug do
+  @behaviour SpectreMnemonic.Intake.Plug
+
+  @impl true
+  def call(memory, _opts) do
+    if String.starts_with?(memory.text, "TODO") do
+      %{memory | kind: :task, stream: :planning, title: "Task from chat"}
+    else
+      memory
+    end
+  end
+end
+```
+
+Plugs may return:
+
+- `%SpectreMnemonic.Intake.Memory{}` or `{:cont, memory}` to continue.
+- `{:halt, memory}` to stop later plugs and store the current draft.
+- `{:ok, result}` to stop and normalize a final result.
+- A final `%SpectreMnemonic.Intake.Packet{}`, `%SpectreMnemonic.Memory.Moment{}`,
+  `%SpectreMnemonic.Memory.Secret{}`, or `%SpectreMnemonic.Memory.Signal{}`.
+
+Low-level `signal/2` does not run remember plugs. It remains the explicit event
+primitive for callers that already know exactly what they want to store.
+
+## Secret Memory
+
+Secrets are first-class memory structs:
+
+```elixir
+%SpectreMnemonic.Memory.Secret{
+  text: "secret: GitHub token",
+  locked?: true,
+  revealed?: false,
+  ciphertext: <<...>>,
+  iv: <<...>>,
+  tag: <<...>>,
+  label: "GitHub token"
+}
+```
+
+Agents should keep using `remember/2` and `recall/2`. The recommended path is:
+
+1. A remember plug decides that the draft is a secret.
+2. The plug sets `memory.secret? = true` and a human-readable `memory.label`.
+3. SpectreMnemonic encrypts the original draft text and stores a locked
+   `%SpectreMnemonic.Memory.Secret{}`.
+4. Recall finds the secret by redacted label and metadata.
+5. Recall either reveals it through an authorization adapter or returns the
+   locked struct with instructions for later reveal.
+
+Example secret router plug:
+
+```elixir
+defmodule MyApp.Memory.SecretRouterPlug do
+  @behaviour SpectreMnemonic.Intake.Plug
+
+  @impl true
+  def call(memory, _opts) do
+    github_context? =
+      Enum.any?(memory.recent_moments, fn moment ->
+        String.contains?(String.downcase(moment.text), "github")
+      end)
+
+    cond do
+      String.starts_with?(memory.text, "github_pat_") ->
+        %{
+          memory
+          | secret?: true,
+            label: "GitHub personal access token",
+            metadata: Map.merge(memory.metadata, %{provider: :github, kind: :pat})
+        }
+
+      github_context? and String.starts_with?(memory.text, "ghp_") ->
+        %{
+          memory
+          | secret?: true,
+            label: "GitHub token",
+            metadata: Map.merge(memory.metadata, %{provider: :github})
+        }
+
+      true ->
+        memory
+    end
+  end
+end
+```
+
+Use the same `remember/2` call agents already know:
+
+```elixir
+{:ok, packet} =
+  SpectreMnemonic.remember("github_pat_...",
+    task_id: "chat-123",
+    plugs: [MyApp.Memory.SecretRouterPlug],
+    secret_key: secret_key_32_bytes
+  )
+
+packet.root
+#=> %SpectreMnemonic.Memory.Secret{text: "secret: GitHub personal access token", locked?: true}
+```
+
+Direct `remember(secret?: true)` is intentionally ignored. Secrets created
+through `remember/2` should be routed by plugs so the app can classify them,
+label them, and attach metadata consistently. The low-level `signal/2` still
+accepts `secret?: true` for explicit internal use:
+
+```elixir
+SpectreMnemonic.signal("github_pat_...",
+  secret?: true,
+  label: "GitHub token",
+  secret_key: secret_key_32_bytes
+)
+```
+
+Secret plaintext is encrypted before it enters active ETS memory or durable
+persistence. The indexed text is redacted:
+
+```elixir
+secret.text
+#=> "secret: GitHub token"
+
+secret.input
+#=> "secret: GitHub token"
+```
+
+The built-in crypto adapter is AES-256-GCM. Provide a 32-byte key with
+`:secret_key`, app config, or `:secret_key_fun`:
+
+```elixir
+config :spectre_mnemonic,
+  secret_key_fun: fn -> MyApp.Keys.memory_secret_key() end
+```
+
+Key functions can be arity 0 or arity 1. Arity 1 receives the secret context:
+
+```elixir
+config :spectre_mnemonic,
+  secret_key_fun: fn %{label: label, metadata: metadata} ->
+    MyApp.Keys.fetch_memory_key(label, metadata)
+  end
+```
+
+Configure `:secret_crypto_adapter` when using KMS, Vault, TPM, platform
+keychains, or another provider.
+
+### Secret Recall And Reveal
+
+Recall automatically asks the configured authorization adapter before revealing
+matching secret moments. If authorization is denied or not configured, recall
+still succeeds and returns the locked redacted secret:
+
+```elixir
+{:ok, packet} = SpectreMnemonic.recall("github token")
+secret = Enum.find(packet.moments, &match?(%SpectreMnemonic.Memory.Secret{}, &1))
+
+secret.locked?
+#=> true
+
+secret.authorization.request
+#=> %{operation: :recall, label: "github token", ...}
+
+secret.reveal
+#=> %{module: SpectreMnemonic, function: :reveal, arity: 2}
+```
+
+That shape is intentional for agents. They can recall normally, see that the
+matching memory is locked, ask the host application or user for authorization,
+then call the standard reveal instruction.
+
+When the app is ready to reveal, call `SpectreMnemonic.reveal/2` on the same
+secret struct:
+
+```elixir
+{:ok, revealed} =
+  SpectreMnemonic.reveal(secret,
+    secret_key: secret_key_32_bytes,
+    authorization_adapter: MyApp.SecretAuthorization,
+    authorization_context: %{user_id: current_user.id}
+  )
+
+revealed.text
+#=> "github_pat_..."
+```
+
+Authorization is application-defined:
+
+```elixir
+defmodule MyApp.SecretAuthorization do
+  @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
+
+  @impl true
+  def authorize(%{operation: :recall, label: label}, opts) do
+    MyApp.Auth.unlock_secret(label, opts[:authorization_context])
+  end
+end
+```
+
+The authorization request includes `:operation`, `:secret_id`, `:memory_id`,
+`:signal_id`, `:label`, `:metadata`, and `:authorization_context`. Your adapter
+can implement fingerprint unlock, email confirmation, password entry, OS
+keychain prompts, session checks, or anything else:
+
+```elixir
+config :spectre_mnemonic,
+  secret_authorization_adapter: MyApp.SecretAuthorization
+```
+
+```elixir
+{:ok, packet} =
+  SpectreMnemonic.recall("github token",
+    authorization_context: %{user_id: current_user.id}
+  )
+```
+
+Or pass the adapter per call:
+
+```elixir
+SpectreMnemonic.recall("github token",
+  authorization_adapter: MyApp.SecretAuthorization,
+  authorization_context: %{user_id: current_user.id}
+)
+```
+
+An approving adapter returns `{:ok, grant}`. A denied adapter returns
+`{:error, reason}`. Denials do not fail the whole recall packet; the secret
+stays locked:
+
+```elixir
+%SpectreMnemonic.Memory.Secret{
+  locked?: true,
+  authorization: %{status: :denied, reason: :denied}
+}
+```
+
+Calling `SpectreMnemonic.reveal/2` on an already revealed secret returns it
+unchanged and does not ask for authorization again.
 
 ## Runnable Example
 
@@ -287,6 +631,22 @@ Storage adapters implement `SpectreMnemonic.Persistence.Store.Adapter`. Built-in
 Mongo, and S3 modules advertise intended capabilities but return setup errors
 until replaced with app-specific implementations.
 
+For SQL or JSONB adapters, use `SpectreMnemonic.Persistence.Store.Codec` to
+store arbitrary persistent-memory envelopes safely, including encrypted
+`%SpectreMnemonic.Memory.Secret{}` values with binary ciphertext:
+
+```elixir
+encoded = SpectreMnemonic.Persistence.Store.Codec.encode_record(record)
+# insert encoded into a JSONB column
+
+{:ok, record} = SpectreMnemonic.Persistence.Store.Codec.decode_record(encoded)
+```
+
+The codec stores a JSON-safe map with an opaque base64 Erlang term, preserving
+structs, binaries, atoms, and DateTimes for replay. Secret plaintext is not
+present in the record as long as the secret was created through the encrypted
+secret path.
+
 Persistent memory compaction has explicit modes:
 
 ```elixir
@@ -417,23 +777,16 @@ The adapter implements `SpectreMnemonic.Knowledge.Compact.Adapter` and can call 
 a local model, or a deterministic app-specific policy. Its output is normalized
 back into compact knowledge events.
 
-## Summarization
+## Summaries And Categories
 
-Summarization is optional. Without configuration, `remember/2` uses a
-deterministic fallback to produce chunk summaries, a root summary, key points,
-entities, and heuristic categories.
+`remember/2` always keeps a deterministic local path for graph support: it
+chunks long text, creates chunk/root summaries, extracts key points, entities,
+and heuristic categories, then links the resulting memory graph. This path has
+no adapter configuration.
 
-Configure an adapter for LLM or local model summaries:
-
-```elixir
-config :spectre_mnemonic,
-  summarizer_adapter: MyApp.Summarizer
-```
-
-Adapters implement `SpectreMnemonic.Intake.Summarizer.Adapter.summarize/2`. They
-receive `%{scope: :chunk | :root | atom(), text: binary(), metadata: map()}` and
-may return either summary text or a map containing `:text`, `:key_points`,
-`:entities`, `:categories`, `:relations`, `:confidence`, and `:metadata`.
+Use the remember plug pipeline when an application wants model-backed
+classification, compression, custom metadata, secret routing, or a completely
+custom intake result before the default graph machinery runs.
 
 ## Embeddings
 

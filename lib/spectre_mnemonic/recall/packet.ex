@@ -6,7 +6,7 @@ defmodule SpectreMnemonic.Recall.Packet do
   @type t :: %__MODULE__{
           cue: SpectreMnemonic.Recall.Cue.t() | term(),
           active_status: [map()],
-          moments: [SpectreMnemonic.Memory.Moment.t()],
+          moments: [SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t()],
           episodes: [SpectreMnemonic.Memory.Episode.t()],
           knowledge: [SpectreMnemonic.Knowledge.Record.t()],
           artifacts: [SpectreMnemonic.Memory.Artifact.t()],

@@ -1,8 +1,9 @@
 defmodule SpectreMnemonic.Persistence.ManagerTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
-  alias SpectreMnemonic.Persistence.Store.{Mongo, Postgres, Record, S3}
+  alias SpectreMnemonic.Persistence.Store.{Codec, Mongo, Postgres, Record, S3}
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
 
   test "writes to primary and duplicate stores but skips duplicate false stores" do
@@ -280,6 +281,37 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert :search in Mongo.capabilities([])
     assert :artifact_blob in S3.capabilities([])
     refute :search in S3.capabilities([])
+  end
+
+  test "store codec round trips encrypted secret records for JSONB adapters" do
+    secret = %Secret{
+      id: "mom_secret",
+      signal_id: "sig_secret",
+      secret_id: "sec_secret",
+      label: "github token",
+      stream: :chat,
+      kind: :secret,
+      text: "secret: github token",
+      input: "secret: github token",
+      algorithm: :aes_256_gcm,
+      ciphertext: <<1, 2, 3>>,
+      iv: <<4, 5, 6>>,
+      tag: <<7, 8, 9>>,
+      aad: "sec_secret:mom_secret:github token",
+      reveal: %{module: SpectreMnemonic, function: :reveal, arity: 2},
+      inserted_at: DateTime.utc_now(),
+      metadata: %{provider: :github}
+    }
+
+    record = record(:moments, secret)
+    encoded = Codec.encode_record(record)
+
+    assert Jason.encode!(encoded)
+    refute inspect(encoded) =~ "github_pat"
+    assert {:ok, decoded} = Codec.decode_record(encoded)
+    assert decoded.family == :moments
+    assert decoded.payload == secret
+    assert decoded.payload.ciphertext == <<1, 2, 3>>
   end
 
   defp configure_file_store do

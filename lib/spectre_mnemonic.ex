@@ -54,6 +54,20 @@ defmodule SpectreMnemonic do
   end
 
   @doc """
+  Reveals a locked secret returned by recall.
+
+  Applications provide authorization through `:authorization_adapter` or
+  `:secret_authorization_adapter` config. The same `:secret_key`,
+  `:secret_key_fun`, or custom crypto adapter used for storage must be available
+  to decrypt the secret.
+  """
+  @spec reveal(SpectreMnemonic.Memory.Secret.t(), keyword()) ::
+          {:ok, SpectreMnemonic.Memory.Secret.t()} | {:error, term()}
+  def reveal(secret, opts \\ []) do
+    SpectreMnemonic.Secrets.reveal(secret, opts)
+  end
+
+  @doc """
   Searches active memory and durable stores.
 
   Active results come from recall and durable results come from stores that
