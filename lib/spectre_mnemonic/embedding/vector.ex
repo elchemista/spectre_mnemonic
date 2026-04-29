@@ -158,6 +158,9 @@ defmodule SpectreMnemonic.Embedding.Vector do
 
   @doc "Computes cosine similarity for equally sized vectors."
   @spec cosine(vector_input(), vector_input()) :: float()
+  def cosine(left, right) when is_binary(left) and is_binary(right),
+    do: cosine_f32_binary(left, right)
+
   def cosine(left, right) do
     if nx_available?() do
       cosine_with_nx(left, right)
@@ -252,25 +255,64 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Counts set bits in a byte."
   @spec popcount(0..255) :: non_neg_integer()
   def popcount(byte) when is_integer(byte) and byte >= 0 and byte <= 255 do
-    byte
-    |> Integer.digits(2)
-    |> Enum.count(&(&1 == 1))
+    byte = byte - Bitwise.band(Bitwise.bsr(byte, 1), 0x55)
+    byte = Bitwise.band(byte, 0x33) + Bitwise.band(Bitwise.bsr(byte, 2), 0x33)
+    Bitwise.band(byte + Bitwise.bsr(byte, 4), 0x0F)
   end
 
   @doc "Computes Hamming distance between two equally sized packed binaries."
   @spec hamming_distance(term(), term()) :: non_neg_integer() | :infinity
   def hamming_distance(left, right) when is_binary(left) and is_binary(right) do
     if byte_size(left) == byte_size(right) do
-      left
-      |> :binary.bin_to_list()
-      |> Enum.zip(:binary.bin_to_list(right))
-      |> Enum.reduce(0, fn {a, b}, acc -> acc + popcount(Bitwise.bxor(a, b)) end)
+      hamming_distance_bytes(left, right, 0)
     else
       :infinity
     end
   end
 
   def hamming_distance(_left, _right), do: :infinity
+
+  @spec cosine_f32_binary(binary(), binary()) :: float()
+  defp cosine_f32_binary(left, right)
+       when byte_size(left) == byte_size(right) and rem(byte_size(left), 4) == 0 do
+    {dot, left_norm, right_norm} = cosine_f32_binary(left, right, 0.0, 0.0, 0.0)
+
+    if left_norm == 0.0 or right_norm == 0.0 do
+      0.0
+    else
+      dot / :math.sqrt(left_norm * right_norm)
+    end
+  end
+
+  defp cosine_f32_binary(_left, _right), do: 0.0
+
+  @spec cosine_f32_binary(binary(), binary(), float(), float(), float()) ::
+          {float(), float(), float()}
+  defp cosine_f32_binary(<<>>, <<>>, dot, left_norm, right_norm),
+    do: {dot, left_norm, right_norm}
+
+  defp cosine_f32_binary(
+         <<left::little-float-32, left_rest::binary>>,
+         <<right::little-float-32, right_rest::binary>>,
+         dot,
+         left_norm,
+         right_norm
+       ) do
+    cosine_f32_binary(
+      left_rest,
+      right_rest,
+      dot + left * right,
+      left_norm + left * left,
+      right_norm + right * right
+    )
+  end
+
+  @spec hamming_distance_bytes(binary(), binary(), non_neg_integer()) :: non_neg_integer()
+  defp hamming_distance_bytes(<<>>, <<>>, acc), do: acc
+
+  defp hamming_distance_bytes(<<left, left_rest::binary>>, <<right, right_rest::binary>>, acc) do
+    hamming_distance_bytes(left_rest, right_rest, acc + popcount(Bitwise.bxor(left, right)))
+  end
 
   @doc "Returns Hamming similarity in the 0.0..1.0 range."
   @spec hamming_similarity(term(), term(), non_neg_integer() | nil) :: float()

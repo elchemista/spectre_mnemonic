@@ -87,6 +87,51 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert Enum.count(records, &(&1.dedupe_key == "moments:put:mom_1")) == 1
   end
 
+  test "manager replay prefers replay_fold when an adapter advertises it" do
+    replay_record = record(:moments, %{id: "from_replay"})
+    fold_record = record(:moments, %{id: "from_fold"})
+
+    configure_stores([
+      [
+        id: :folding,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :folding,
+          capabilities: [:append, :replay, :replay_fold],
+          frames: [replay_record],
+          fold_frames: [fold_record]
+        ]
+      ]
+    ])
+
+    assert {:ok, records} = Manager.replay()
+    assert Enum.map(records, & &1.payload.id) == ["from_fold"]
+    assert_receive {:fake_replay_fold, :folding}
+  end
+
+  test "manager replay falls back to replay when replay_fold is unavailable" do
+    configure_stores([
+      [
+        id: :list_replay,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :list_replay,
+          capabilities: [:append, :replay],
+          frames: [record(:moments, %{id: "from_replay"})]
+        ]
+      ]
+    ])
+
+    assert {:ok, records} = Manager.replay()
+    assert Enum.map(records, & &1.payload.id) == ["from_replay"]
+  end
+
   test "file replay stops at incomplete trailing frames" do
     configure_file_store()
 
@@ -95,6 +140,26 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert {:ok, records} = Manager.replay()
     assert Enum.any?(records, &(&1.family == :moments and &1.payload.id == "mom_1"))
+  end
+
+  test "file replay fold restores sequence after the sequence cache is cleared" do
+    root =
+      Path.join(System.tmp_dir!(), "spectre-file-store-#{System.unique_integer([:positive])}")
+
+    opts = [data_root: root]
+
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:ok, 1} = StoreFile.put(record(:moments, %{id: "mom_1"}), opts)
+    assert {:ok, 2} = StoreFile.put(record(:moments, %{id: "mom_2"}), opts)
+
+    path = Path.join([root, "segments", "active.smem"])
+    :persistent_term.erase({StoreFile, :seq, path})
+
+    assert {:ok, 3} = StoreFile.put(record(:moments, %{id: "mom_3"}), opts)
+
+    assert {:ok, frames} = StoreFile.replay(opts)
+    assert Enum.map(frames, fn {seq, _timestamp, _payload} -> seq end) == [1, 2, 3]
   end
 
   test "replay tombstones suppress forgotten records" do
@@ -179,6 +244,40 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert result.tombstones == 1
     assert_receive {:fake_put, :semantic_replay, %Record{family: :knowledge}}
     assert_receive {:fake_put, :semantic_replay, %Record{family: :tombstones}}
+  end
+
+  test "semantic compaction builds adapter input from replay_fold when available" do
+    source = record(:moments, %{id: "mom_fold_source", attention: 5.0})
+
+    configure_stores([
+      [
+        id: :semantic_fold,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :semantic_fold,
+          capabilities: [:append, :replay, :replay_fold],
+          frames: [],
+          fold_frames: [source]
+        ]
+      ]
+    ])
+
+    assert {:ok, %{results: [{:semantic_fold, result}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: __MODULE__.SemanticCompactAdapter,
+               test_pid: self()
+             )
+
+    assert_receive {:fake_replay_fold, :semantic_fold}
+
+    assert_receive {:semantic_adapter_called,
+                    %{records: [%Record{payload: %{id: "mom_fold_source"}}]}}
+
+    assert result.strategy == :adapter
   end
 
   test "semantic compaction calls native store adapter when advertised" do
@@ -385,6 +484,21 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     @impl true
     def replay(opts), do: {:ok, Keyword.get(opts, :frames, [])}
+
+    @impl true
+    def replay_fold(opts, acc, fun) do
+      send(Keyword.fetch!(opts, :send_to), {:fake_replay_fold, Keyword.fetch!(opts, :id)})
+
+      opts
+      |> Keyword.get(:fold_frames, Keyword.get(opts, :frames, []))
+      |> Enum.reduce_while(acc, fn frame, acc ->
+        case fun.(frame, acc) do
+          {:cont, acc} -> {:cont, acc}
+          {:halt, acc} -> {:halt, acc}
+        end
+      end)
+      |> then(&{:ok, &1})
+    end
 
     @impl true
     def get(family, id, opts) do

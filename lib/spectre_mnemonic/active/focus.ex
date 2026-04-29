@@ -9,11 +9,11 @@ defmodule SpectreMnemonic.Active.Focus do
 
   use GenServer
 
+  alias SpectreMnemonic.Active.ETSOwner
   alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Secrets
-  alias SpectreMnemonic.Active.ETSOwner
 
   @default_attention 1.0
 
@@ -88,6 +88,48 @@ defmodule SpectreMnemonic.Active.Focus do
     |> Enum.map(fn {_id, association} -> association end)
   end
 
+  @doc false
+  @spec fold_moments(term(), (Moment.t() | Secret.t(), term() -> term())) :: term()
+  def fold_moments(acc, fun) when is_function(fun, 2) do
+    :ets.foldl(fn {_id, moment}, acc -> fun.(moment, acc) end, acc, :mnemonic_moments)
+  end
+
+  @doc false
+  @spec recent_moments(term(), term(), pos_integer()) :: [Moment.t() | Secret.t()]
+  def recent_moments(stream, task_id, limit) do
+    stream_ids = indexed_ids(:mnemonic_moments_by_stream, stream)
+
+    task_ids =
+      if is_nil(task_id) do
+        []
+      else
+        indexed_ids(:mnemonic_moments_by_task, task_id)
+      end
+
+    (stream_ids ++ task_ids)
+    |> moments_by_ids()
+    |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
+    |> Enum.take(limit)
+  end
+
+  @doc false
+  @spec moments_by_ids([binary()] | MapSet.t(binary())) :: [Moment.t() | Secret.t()]
+  def moments_by_ids(ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup_moment/1)
+  end
+
+  @doc false
+  @spec associations_for_ids([binary()] | MapSet.t(binary())) :: [Association.t()]
+  def associations_for_ids(ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.flat_map(&indexed_ids(:mnemonic_associations_by_memory, &1))
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup_association/1)
+  end
+
   @doc "Returns active artifacts by id."
   @spec artifacts([binary()]) :: [Artifact.t()]
   def artifacts(ids) do
@@ -122,7 +164,7 @@ defmodule SpectreMnemonic.Active.Focus do
   def handle_call({:link, source_id, relation, target_id, opts}, _from, state) do
     if memory_id?(source_id) and memory_id?(target_id) do
       association = build_association(source_id, relation, target_id, opts)
-      :ets.insert(:mnemonic_associations, {association.id, association})
+      insert_association(association)
 
       {:reply, maybe_persist_value(:associations, association, opts), state}
     else
@@ -145,11 +187,7 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   def handle_call({:forget, selector, _opts}, _from, state) do
-    forget_ids =
-      moments()
-      |> Enum.filter(&selected?(&1, selector))
-      |> Enum.map(& &1.id)
-
+    forget_ids = forget_ids(selector)
     Enum.each(forget_ids, &forget_moment/1)
 
     {:reply, {:ok, length(forget_ids)}, state}
@@ -176,7 +214,7 @@ defmodule SpectreMnemonic.Active.Focus do
     moment = build_moment(signal, opts, now)
 
     :ets.insert(:mnemonic_signals, {signal.id, signal})
-    :ets.insert(:mnemonic_moments, {moment.id, moment})
+    insert_moment(moment)
     :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
     update_status(stream, task_id, input, kind, now)
 
@@ -214,7 +252,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
     with {:ok, moment} <- build_secret(signal, label, redacted, plaintext, opts, now) do
       :ets.insert(:mnemonic_signals, {signal.id, signal})
-      :ets.insert(:mnemonic_moments, {moment.id, moment})
+      insert_moment(moment)
       :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
       update_status(stream, task_id, signal.input, kind, now)
 
@@ -231,6 +269,22 @@ defmodule SpectreMnemonic.Active.Focus do
   defp lookup_artifact(id) do
     case :ets.lookup(:mnemonic_artifacts, id) do
       [{^id, artifact}] -> [artifact]
+      [] -> []
+    end
+  end
+
+  @spec lookup_moment(binary()) :: [Moment.t() | Secret.t()]
+  defp lookup_moment(id) do
+    case :ets.lookup(:mnemonic_moments, id) do
+      [{^id, moment}] -> [moment]
+      [] -> []
+    end
+  end
+
+  @spec lookup_association(binary()) :: [Association.t()]
+  defp lookup_association(id) do
+    case :ets.lookup(:mnemonic_associations, id) do
+      [{^id, association}] -> [association]
       [] -> []
     end
   end
@@ -442,7 +496,7 @@ defmodule SpectreMnemonic.Active.Focus do
       inserted_at: now
     }
 
-    :ets.insert(:mnemonic_associations, {association.id, association})
+    insert_association(association)
     maybe_persist_value(:associations, association, opts)
   end
 
@@ -478,10 +532,35 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
+  @spec insert_moment(Moment.t() | Secret.t()) :: true
+  defp insert_moment(moment) do
+    :ets.insert(:mnemonic_moments, {moment.id, moment})
+    :ets.insert(:mnemonic_moments_by_stream, {moment.stream, moment.id})
+
+    if moment.task_id do
+      :ets.insert(:mnemonic_moments_by_task, {moment.task_id, moment.id})
+    end
+
+    :ets.insert(:mnemonic_moments_by_signal, {moment.signal_id, moment.id})
+  end
+
+  @spec insert_association(Association.t()) :: true
+  defp insert_association(association) do
+    :ets.insert(:mnemonic_associations, {association.id, association})
+    :ets.insert(:mnemonic_associations_by_memory, {association.source_id, association.id})
+    :ets.insert(:mnemonic_associations_by_memory, {association.target_id, association.id})
+  end
+
   @spec forget_moment(binary()) :: :ok
   defp forget_moment(id) do
+    case lookup_moment(id) do
+      [moment] -> delete_moment_indexes(moment)
+      [] -> :ok
+    end
+
     :ets.delete(:mnemonic_moments, id)
     :ets.delete(:mnemonic_attention, id)
+    :ets.delete(:mnemonic_associations_by_memory, id)
     Index.delete(id)
 
     Manager.append(:tombstones, %{
@@ -491,6 +570,45 @@ defmodule SpectreMnemonic.Active.Focus do
     })
 
     :ok
+  end
+
+  @spec delete_moment_indexes(Moment.t() | Secret.t()) :: true
+  defp delete_moment_indexes(moment) do
+    :ets.delete_object(:mnemonic_moments_by_stream, {moment.stream, moment.id})
+
+    if moment.task_id do
+      :ets.delete_object(:mnemonic_moments_by_task, {moment.task_id, moment.id})
+    end
+
+    :ets.delete(:mnemonic_moments_by_signal, moment.signal_id)
+  end
+
+  @spec forget_ids(selector()) :: [binary()]
+  defp forget_ids({:stream, stream}), do: indexed_ids(:mnemonic_moments_by_stream, stream)
+  defp forget_ids({:task, task_id}), do: indexed_ids(:mnemonic_moments_by_task, task_id)
+
+  defp forget_ids(id) when is_binary(id) do
+    direct_ids =
+      case :ets.lookup(:mnemonic_moments, id) do
+        [{^id, _moment}] -> [id]
+        [] -> []
+      end
+
+    signal_ids = indexed_ids(:mnemonic_moments_by_signal, id)
+    Enum.uniq(direct_ids ++ signal_ids)
+  end
+
+  defp forget_ids(selector) do
+    fold_moments([], fn moment, ids ->
+      if selected?(moment, selector), do: [moment.id | ids], else: ids
+    end)
+  end
+
+  @spec indexed_ids(atom(), term()) :: [binary()]
+  defp indexed_ids(table, key) do
+    table
+    |> :ets.lookup(key)
+    |> Enum.map(fn {_key, id} -> id end)
   end
 
   @spec update_status(term(), term(), term(), atom(), DateTime.t()) :: true

@@ -120,16 +120,18 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   @spec default_consolidation([term()], [term()], DateTime.t(), keyword()) :: Consolidation.t()
   defp default_consolidation(moments, associations, now, opts) do
+    outputs = default_outputs(moments, now)
+
     %Consolidation{
       moments: moments,
       associations: associations,
       windows: graph_windows(moments, associations),
       now: now,
       opts: opts,
-      knowledge: Enum.map(moments, &knowledge_record(&1, now)),
-      summaries: Enum.filter(moments, &(&1.kind == :memory_summary)),
-      categories: Enum.filter(moments, &(&1.kind == :memory_category)),
-      embeddings: Enum.flat_map(moments, &embedding_record/1),
+      knowledge: outputs.knowledge,
+      summaries: outputs.summaries,
+      categories: outputs.categories,
+      embeddings: outputs.embeddings,
       records: [],
       tombstones: [],
       strategy: :default
@@ -176,23 +178,51 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   @spec persist_consolidation(Consolidation.t()) :: :ok | {:error, term()}
   defp persist_consolidation(%Consolidation{} = consolidation) do
-    results =
-      consolidation
-      |> durable_family_writes()
-      |> Kernel.++(Enum.map(consolidation.records, &append_record/1))
-      |> Kernel.++(Enum.map(consolidation.tombstones, &append_tombstone/1))
-      |> Kernel.++([Manager.append(:consolidation_jobs, consolidation_job(consolidation))])
-
-    case Enum.find(results, &match?({:error, _reason}, &1)) do
-      nil -> :ok
-      {:error, reason} -> {:error, reason}
+    with :ok <- persist_family_writes(consolidation),
+         :ok <- persist_adapter_records(consolidation.records),
+         :ok <- persist_tombstones(consolidation.tombstones),
+         {:ok, _result} <- Manager.append(:consolidation_jobs, consolidation_job(consolidation)) do
+      :ok
     end
   end
 
   @spec candidate_moments(number()) :: [term()]
   defp candidate_moments(min_attention) do
-    Focus.moments()
-    |> Enum.filter(&(&1.attention >= min_attention))
+    []
+    |> Focus.fold_moments(fn moment, acc ->
+      if moment.attention >= min_attention, do: [moment | acc], else: acc
+    end)
+    |> Enum.reverse()
+  end
+
+  @spec default_outputs([term()], DateTime.t()) :: map()
+  defp default_outputs(moments, now) do
+    outputs =
+      Enum.reduce(moments, %{knowledge: [], summaries: [], categories: [], embeddings: []}, fn
+        %{kind: :memory_summary} = moment, acc ->
+          acc
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:summaries, &[moment | &1])
+          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+
+        %{kind: :memory_category} = moment, acc ->
+          acc
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:categories, &[moment | &1])
+          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+
+        moment, acc ->
+          acc
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+      end)
+
+    %{
+      knowledge: Enum.reverse(outputs.knowledge),
+      summaries: Enum.reverse(outputs.summaries),
+      categories: Enum.reverse(outputs.categories),
+      embeddings: Enum.reverse(outputs.embeddings)
+    }
   end
 
   @spec knowledge_record(term(), DateTime.t()) :: Record.t()
@@ -209,8 +239,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     }
   end
 
-  @spec durable_family_writes(Consolidation.t()) :: [term()]
-  defp durable_family_writes(%Consolidation{} = consolidation) do
+  @spec persist_family_writes(Consolidation.t()) :: :ok | {:error, term()}
+  defp persist_family_writes(%Consolidation{} = consolidation) do
     [
       moments: consolidation.moments,
       knowledge: consolidation.knowledge,
@@ -219,8 +249,41 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       embeddings: consolidation.embeddings,
       associations: consolidation.associations
     ]
-    |> Enum.flat_map(fn {family, values} ->
-      Enum.map(values, &Manager.append(family, &1))
+    |> Enum.reduce_while(:ok, fn {family, values}, :ok ->
+      case persist_values(family, values) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec persist_values(atom(), [term()]) :: :ok | {:error, term()}
+  defp persist_values(family, values) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case Manager.append(family, value) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec persist_adapter_records([term()]) :: :ok | {:error, term()}
+  defp persist_adapter_records(records) do
+    Enum.reduce_while(records, :ok, fn record, :ok ->
+      case append_record(record) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec persist_tombstones([term()]) :: :ok | {:error, term()}
+  defp persist_tombstones(tombstones) do
+    Enum.reduce_while(tombstones, :ok, fn tombstone, :ok ->
+      case append_tombstone(tombstone) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
     end)
   end
 
@@ -319,14 +382,17 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     end)
   end
 
-  @spec connected_components(MapSet.t(), map()) :: [[binary()]]
+  @typep memory_id :: binary()
+  @typep adjacency :: %{memory_id() => MapSet.t(memory_id())}
+
+  @spec connected_components(MapSet.t(memory_id()), adjacency()) :: [[memory_id()]]
   defp connected_components(ids, adjacency) do
     {components, _seen} =
       Enum.reduce(ids, {[], MapSet.new()}, fn id, {components, seen} ->
         if MapSet.member?(seen, id) do
           {components, seen}
         else
-          component = visit_component([id], adjacency, MapSet.new())
+          component = visit_component([id], adjacency, %{}) |> Map.keys() |> MapSet.new()
           {[Enum.sort(MapSet.to_list(component)) | components], MapSet.union(seen, component)}
         end
       end)
@@ -334,15 +400,17 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     components
   end
 
-  @spec visit_component([binary()], map(), MapSet.t()) :: MapSet.t()
+  @spec visit_component([memory_id()], adjacency(), %{optional(memory_id()) => true}) :: %{
+          optional(memory_id()) => true
+        }
   defp visit_component([], _adjacency, seen), do: seen
 
   defp visit_component([id | rest], adjacency, seen) do
-    if MapSet.member?(seen, id) do
+    if Map.has_key?(seen, id) do
       visit_component(rest, adjacency, seen)
     else
       neighbors = adjacency |> Map.get(id, MapSet.new()) |> MapSet.to_list()
-      visit_component(neighbors ++ rest, adjacency, MapSet.put(seen, id))
+      visit_component(neighbors ++ rest, adjacency, Map.put(seen, id, true))
     end
   end
 

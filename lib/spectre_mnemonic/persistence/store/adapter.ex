@@ -12,6 +12,7 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
   @type capability ::
           :append
           | :replay
+          | :replay_fold
           | :lookup
           | :search
           | :vector_search
@@ -22,6 +23,9 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
 
   @callback put(Record.t(), keyword()) :: :ok | {:ok, term()} | {:error, term()}
   @callback replay(keyword()) :: {:ok, list()} | {:error, term()}
+  @callback replay_fold(keyword(), acc, (term(), acc -> {:cont, acc} | {:halt, acc})) ::
+              {:ok, acc} | {:error, term()}
+            when acc: term()
   @callback get(atom(), binary(), keyword()) :: {:ok, term()} | {:error, :not_found | term()}
   @callback search(term(), keyword()) :: {:ok, list()} | {:error, term()}
   @callback delete_or_tombstone(atom(), binary(), keyword()) ::
@@ -30,5 +34,10 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
               {:ok, map()} | {:error, term()}
   @callback capabilities(keyword()) :: [capability()]
 
-  @optional_callbacks replay: 1, get: 3, search: 2, delete_or_tombstone: 3, semantic_compact: 2
+  @optional_callbacks replay: 1,
+                      replay_fold: 3,
+                      get: 3,
+                      search: 2,
+                      delete_or_tombstone: 3,
+                      semantic_compact: 2
 end

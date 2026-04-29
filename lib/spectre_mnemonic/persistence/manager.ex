@@ -26,6 +26,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @type config :: keyword()
   @type write_result :: %{store: term(), role: term(), result: :ok | {:error, term()}}
   @type compact_mode :: :physical | :semantic | :all
+  @type replay_state :: %{position: non_neg_integer(), records: map()}
 
   @doc "Starts the persistent memory manager."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -113,9 +114,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
       opts
       |> effective_config()
       |> replayable_stores()
-      |> Enum.flat_map(&replay_store/1)
-      |> dedupe_records()
-      |> apply_tombstones()
+      |> replay_records()
 
     {:reply, {:ok, records}, state}
   end
@@ -341,7 +340,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
           function_exported?(store.adapter, :semantic_compact, 2) ->
         {store.id, native_semantic_compact(store, cfg, opts)}
 
-      :replay in capabilities and function_exported?(store.adapter, :replay, 1) ->
+      replay_supported?(store, capabilities) ->
         {store.id, replay_semantic_compact(store, cfg, opts)}
 
       true ->
@@ -375,8 +374,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec replay_semantic_compact(store(), config(), keyword()) :: map() | {:error, term()}
   defp replay_semantic_compact(store, cfg, opts) do
-    with {:ok, frames} <- store.adapter.replay(store.opts),
-         records <- frames |> Enum.map(&frame_record/1) |> dedupe_records() |> apply_tombstones(),
+    with records <- replay_records([store]),
          selected <- select_semantic_records(records, cfg, opts),
          input <- semantic_input(store, selected, cfg, opts),
          {:ok, output} <- run_semantic_adapter(input, cfg, opts),
@@ -688,7 +686,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     config
     |> Keyword.fetch!(:stores)
     |> Enum.filter(fn store ->
-      :replay in safe_capabilities(store)
+      replay_supported?(store, safe_capabilities(store))
     end)
   end
 
@@ -727,16 +725,94 @@ defmodule SpectreMnemonic.Persistence.Manager do
     end
   end
 
-  @spec replay_store(store()) :: [Record.t() | map()]
-  defp replay_store(store) do
-    if function_exported?(store.adapter, :replay, 1) do
-      case store.adapter.replay(store.opts) do
-        {:ok, frames} -> Enum.map(frames, &frame_record/1)
-        {:error, reason} -> [%{store: store.id, error: reason}]
-      end
-    else
-      []
+  @spec replay_supported?(store(), [SpectreMnemonic.Persistence.Store.Adapter.capability()]) ::
+          boolean()
+  defp replay_supported?(store, capabilities) do
+    (:replay_fold in capabilities and function_exported?(store.adapter, :replay_fold, 3)) or
+      (:replay in capabilities and function_exported?(store.adapter, :replay, 1))
+  end
+
+  @spec replay_records([store()]) :: [Record.t()]
+  defp replay_records(stores) do
+    stores
+    |> Enum.reduce(replay_state(), &replay_store_into/2)
+    |> replay_state_records()
+    |> apply_tombstones()
+  end
+
+  @spec replay_state :: replay_state()
+  defp replay_state, do: %{position: 0, records: %{}}
+
+  @spec replay_store_into(store(), replay_state()) :: replay_state()
+  defp replay_store_into(store, state) do
+    capabilities = safe_capabilities(store)
+
+    cond do
+      replay_fold_supported?(store, capabilities) ->
+        replay_store_fold(store, state)
+
+      replay_list_supported?(store, capabilities) ->
+        replay_store_list(store, state)
+
+      true ->
+        state
     end
+  end
+
+  @spec replay_fold_supported?(
+          store(),
+          [SpectreMnemonic.Persistence.Store.Adapter.capability()]
+        ) :: boolean()
+  defp replay_fold_supported?(store, capabilities) do
+    :replay_fold in capabilities and function_exported?(store.adapter, :replay_fold, 3)
+  end
+
+  @spec replay_list_supported?(store(), [SpectreMnemonic.Persistence.Store.Adapter.capability()]) ::
+          boolean()
+  defp replay_list_supported?(store, capabilities) do
+    :replay in capabilities and function_exported?(store.adapter, :replay, 1)
+  end
+
+  @spec replay_store_fold(store(), replay_state()) :: replay_state()
+  defp replay_store_fold(store, state) do
+    case store.adapter.replay_fold(store.opts, state, fn frame, acc ->
+           {:cont, absorb_frame(frame, acc)}
+         end) do
+      {:ok, state} -> state
+      {:error, _reason} -> state
+    end
+  end
+
+  @spec replay_store_list(store(), replay_state()) :: replay_state()
+  defp replay_store_list(store, state) do
+    case store.adapter.replay(store.opts) do
+      {:ok, frames} -> Enum.reduce(frames, state, &absorb_frame/2)
+      {:error, _reason} -> state
+    end
+  end
+
+  @spec absorb_frame(term(), replay_state()) :: replay_state()
+  defp absorb_frame(frame, state) do
+    case frame_record(frame) do
+      %Record{} = record ->
+        position = state.position + 1
+
+        %{
+          position: position,
+          records: Map.put(state.records, record.dedupe_key, {position, record})
+        }
+
+      _other ->
+        state
+    end
+  end
+
+  @spec replay_state_records(replay_state()) :: [Record.t()]
+  defp replay_state_records(state) do
+    state.records
+    |> Map.values()
+    |> Enum.sort_by(fn {position, _record} -> position end)
+    |> Enum.map(fn {_position, record} -> record end)
   end
 
   @spec search_store(store(), term()) :: [map()]
@@ -765,15 +841,6 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   defp frame_record(%Record{} = record), do: record
   defp frame_record(other), do: other
-
-  @spec dedupe_records([term()]) :: [Record.t()]
-  defp dedupe_records(records) do
-    records
-    |> Enum.filter(&match?(%Record{}, &1))
-    |> Enum.reverse()
-    |> Enum.uniq_by(& &1.dedupe_key)
-    |> Enum.reverse()
-  end
 
   @spec apply_tombstones([Record.t()]) :: [Record.t()]
   defp apply_tombstones(records) do

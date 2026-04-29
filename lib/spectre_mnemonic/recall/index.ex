@@ -28,7 +28,7 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   @doc "Indexes or replaces one moment."
-  @spec upsert(SpectreMnemonic.Memory.Moment.t()) :: :ok
+  @spec upsert(SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t()) :: :ok
   def upsert(moment) do
     call_if_running({:upsert, moment})
   end
@@ -107,19 +107,33 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec brute_force(map(), pos_integer()) :: [map()]
   defp brute_force(%{vector: nil}, _limit), do: []
+  defp brute_force(_cue, limit) when limit <= 0, do: []
 
   defp brute_force(cue, limit) do
     cue_vector = Map.get(cue, :vector)
     cue_signature = Map.get(cue, :binary_signature)
 
-    @index_table
-    |> :ets.tab2list()
-    |> Enum.map(fn {moment_id, entry} ->
-      score_entry(moment_id, entry, cue_vector, cue_signature)
-    end)
-    |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
+    :ets.foldl(
+      fn {moment_id, entry}, ranked ->
+        moment_id
+        |> score_entry(entry, cue_vector, cue_signature)
+        |> insert_ranked_entry(ranked, limit)
+      end,
+      [],
+      @index_table
+    )
+    |> Enum.sort_by(&entry_rank_key/1)
+  end
+
+  @spec insert_ranked_entry(map(), [map()], pos_integer()) :: [map()]
+  defp insert_ranked_entry(candidate, ranked, limit) do
+    [candidate | ranked]
+    |> Enum.sort_by(&entry_rank_key/1)
     |> Enum.take(limit)
   end
+
+  @spec entry_rank_key(map()) :: {number(), non_neg_integer() | :infinity, binary()}
+  defp entry_rank_key(entry), do: {-entry.score, entry.hamming_distance, entry.id}
 
   @spec query_hnsw(state(), map(), pos_integer()) :: [map()] | nil
   defp query_hnsw(%{hnsw: nil}, _cue, _limit), do: nil

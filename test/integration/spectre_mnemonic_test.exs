@@ -276,6 +276,30 @@ defmodule SpectreMnemonic.IntegrationTest do
                      ^context_id}
   end
 
+  test "remember plugs receive indexed recent stream and task context newest first" do
+    {:ok, _} = SpectreMnemonic.signal("old indexed chat context", stream: :chat)
+
+    {:ok, _} =
+      SpectreMnemonic.signal("indexed task-only context", stream: :research, task_id: "idx")
+
+    {:ok, _} = SpectreMnemonic.signal("indexed stream context", stream: :chat)
+
+    assert {:ok, _packet} =
+             SpectreMnemonic.remember("probe indexed recent context",
+               stream: :chat,
+               task_id: "idx",
+               plugs: [__MODULE__.RecentProbePlug],
+               test_pid: self()
+             )
+
+    assert_received {:recent_probe, recent_text}
+    assert "indexed stream context" in recent_text
+    assert "indexed task-only context" in recent_text
+
+    assert Enum.find_index(recent_text, &(&1 == "indexed stream context")) <
+             Enum.find_index(recent_text, &(&1 == "old indexed chat context"))
+  end
+
   test "remember plug-routed secrets persist encrypted replay records without plaintext" do
     plaintext = "plug_routed_super_secret"
 
@@ -583,6 +607,7 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert is_binary(vector)
     assert Vector.dimensions(vector) == 2
+    assert_in_delta Vector.cosine(vector, vector), 1.0, 0.0001
     assert_in_delta Vector.cosine(vector, [0.6, 0.8]), 1.0, 0.0001
 
     left = BinaryQuantizer.quantize([1.0, -1.0, 1.0, -1.0], bits: 4)
@@ -1278,6 +1303,19 @@ defmodule SpectreMnemonic.IntegrationTest do
       else
         memory
       end
+    end
+  end
+
+  defmodule RecentProbePlug do
+    @behaviour SpectreMnemonic.Intake.Plug
+
+    @impl true
+    def call(memory, opts) do
+      if pid = Keyword.get(opts, :test_pid) do
+        send(pid, {:recent_probe, Enum.map(memory.recent_moments, & &1.text)})
+      end
+
+      memory
     end
   end
 

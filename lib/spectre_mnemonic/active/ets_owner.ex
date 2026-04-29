@@ -9,14 +9,18 @@ defmodule SpectreMnemonic.Active.ETSOwner do
   use GenServer
 
   @tables [
-    :mnemonic_signals,
-    :mnemonic_streams,
-    :mnemonic_moments,
-    :mnemonic_status,
-    :mnemonic_associations,
-    :mnemonic_attention,
-    :mnemonic_artifacts,
-    :mnemonic_action_recipes
+    {:mnemonic_signals, :set},
+    {:mnemonic_streams, :set},
+    {:mnemonic_moments, :set},
+    {:mnemonic_moments_by_stream, :bag},
+    {:mnemonic_moments_by_task, :bag},
+    {:mnemonic_moments_by_signal, :set},
+    {:mnemonic_status, :set},
+    {:mnemonic_associations, :set},
+    {:mnemonic_associations_by_memory, :bag},
+    {:mnemonic_attention, :set},
+    {:mnemonic_artifacts, :set},
+    {:mnemonic_action_recipes, :set}
   ]
 
   @doc "Starts the ETS owner process."
@@ -40,10 +44,10 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:ok, state}
   end
 
-  @spec create_table(atom()) :: :ok | :ets.tid()
-  defp create_table(table) do
+  @spec create_table({atom(), :set | :bag}) :: :ok | :ets.tid()
+  defp create_table({table, type}) do
     if :ets.whereis(table) == :undefined do
-      :ets.new(table, [:named_table, :public, :set, read_concurrency: true])
+      :ets.new(table, [:named_table, :public, type, read_concurrency: true])
     end
   end
 end

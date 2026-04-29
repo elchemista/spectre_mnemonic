@@ -28,6 +28,19 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert File.exists?(Path.join(["mnemonic_data", "knowledge", "knowledge.smem"]))
   end
 
+  test "knowledge smem reduces framed events without full replay" do
+    {:ok, _} = SMEM.append(%{type: :fact, text: "folded fact"})
+    {:ok, _} = SMEM.append(%{type: :skill, name: "folded-skill", steps: ["reduce"]})
+
+    assert {:ok, frames} =
+             SMEM.reduce([], [], fn {seq, _timestamp, event}, acc ->
+               {:cont, [{seq, event.type} | acc]}
+             end)
+
+    [{first_seq, :fact}, {second_seq, :skill}] = Enum.reverse(frames)
+    assert second_seq > first_seq
+  end
+
   test "load knowledge respects item and byte budgets" do
     Application.put_env(:spectre_mnemonic, :knowledge,
       max_loaded_bytes: 1_200,

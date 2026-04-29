@@ -130,15 +130,7 @@ defmodule SpectreMnemonic.Intake do
 
   @spec attach_recent_moments(Memory.t()) :: Memory.t()
   defp attach_recent_moments(%Memory{} = memory) do
-    recent =
-      SpectreMnemonic.Active.Focus.moments()
-      |> Enum.filter(fn moment ->
-        moment.stream == memory.stream or
-          (not is_nil(memory.task_id) and moment.task_id == memory.task_id)
-      end)
-      |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
-      |> Enum.take(12)
-
+    recent = SpectreMnemonic.Active.Focus.recent_moments(memory.stream, memory.task_id, 12)
     %{memory | recent_moments: recent}
   end
 

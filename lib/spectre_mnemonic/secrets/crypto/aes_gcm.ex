@@ -93,8 +93,7 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
       Map.get(context, :memory_id),
       Map.get(context, :label)
     ]
-    |> Enum.map(&to_string(&1 || ""))
-    |> Enum.join(":")
+    |> Enum.map_join(":", &to_string(&1 || ""))
   end
 
   @spec supported_algorithm(atom()) :: :ok | {:error, term()}

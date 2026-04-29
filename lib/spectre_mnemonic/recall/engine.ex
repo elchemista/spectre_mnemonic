@@ -39,24 +39,18 @@ defmodule SpectreMnemonic.Recall.Engine do
           {:reply, {:ok, Packet.t()}, map()}
   def handle_call({:recall, cue_input, opts}, _from, state) do
     cue = build_cue(cue_input, opts)
-    moments = Focus.moments()
-    associations = Focus.associations()
     limit = Keyword.get(opts, :limit, 10)
     {:ok, index_results} = Index.query(cue, opts)
     index_scores = Map.new(index_results, &{&1.id, &1})
 
     ranked =
-      moments
-      |> Enum.map(&{score(&1, cue, index_scores), &1})
-      |> Enum.filter(fn {score, _moment} -> score > 0 end)
-      |> Enum.sort_by(fn {score, moment} ->
-        {-score, DateTime.to_unix(moment.inserted_at, :microsecond)}
-      end)
-      |> Enum.map(fn {_score, moment} -> moment end)
-      |> expand_graph(associations)
+      cue
+      |> ranked_moments(index_scores, limit)
+      |> expand_graph()
       |> Enum.uniq_by(& &1.id)
       |> Enum.take(limit)
 
+    associations = ranked |> Enum.map(& &1.id) |> Focus.associations_for_ids()
     revealed = Enum.map(ranked, &Secrets.maybe_reveal(&1, opts))
 
     packet = %Packet{
@@ -65,13 +59,39 @@ defmodule SpectreMnemonic.Recall.Engine do
       moments: revealed,
       knowledge: compact_knowledge(opts),
       artifacts: artifacts_for(ranked, associations),
-      associations: associations_for(ranked, associations),
+      associations: associations,
       action_recipes: action_recipes_for(ranked, associations),
       confidence: confidence(ranked)
     }
 
     {:reply, {:ok, packet}, state}
   end
+
+  @spec ranked_moments(Cue.t(), map(), integer()) :: [recall_moment()]
+  defp ranked_moments(_cue, _index_scores, limit) when limit <= 0, do: []
+
+  defp ranked_moments(cue, index_scores, limit) do
+    []
+    |> Focus.fold_moments(fn moment, ranked ->
+      case score(moment, cue, index_scores) do
+        score when score > 0 -> insert_ranked({score, moment}, ranked, limit)
+        _score -> ranked
+      end
+    end)
+    |> Enum.sort_by(&rank_key/1)
+    |> Enum.map(fn {_score, moment} -> moment end)
+  end
+
+  @spec insert_ranked({number(), recall_moment()}, [{number(), recall_moment()}], pos_integer()) ::
+          [{number(), recall_moment()}]
+  defp insert_ranked(candidate, ranked, limit) do
+    [candidate | ranked]
+    |> Enum.sort_by(&rank_key/1)
+    |> Enum.take(limit)
+  end
+
+  @spec rank_key({number(), recall_moment()}) :: {number(), integer()}
+  defp rank_key({score, moment}), do: {-score, DateTime.to_unix(moment.inserted_at, :microsecond)}
 
   @spec build_cue(term(), keyword()) :: Cue.t()
   defp build_cue(input, opts) do
@@ -103,11 +123,10 @@ defmodule SpectreMnemonic.Recall.Engine do
     if match_score > 0, do: match_score + moment.attention, else: 0
   end
 
-  @spec expand_graph([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) :: [
-          recall_moment()
-        ]
-  defp expand_graph(moments, associations) do
+  @spec expand_graph([recall_moment()]) :: [recall_moment()]
+  defp expand_graph(moments) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
+    associations = Focus.associations_for_ids(ids)
 
     linked_ids =
       associations
@@ -120,21 +139,7 @@ defmodule SpectreMnemonic.Recall.Engine do
       end)
       |> MapSet.new()
 
-    linked =
-      Focus.moments()
-      |> Enum.filter(&MapSet.member?(linked_ids, &1.id))
-
-    moments ++ linked
-  end
-
-  @spec associations_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
-          [SpectreMnemonic.Memory.Association.t()]
-  defp associations_for(moments, associations) do
-    ids = MapSet.new(Enum.map(moments, & &1.id))
-
-    Enum.filter(associations, fn assoc ->
-      MapSet.member?(ids, assoc.source_id) or MapSet.member?(ids, assoc.target_id)
-    end)
+    moments ++ Focus.moments_by_ids(linked_ids)
   end
 
   @spec active_status([recall_moment()]) :: [map()]
@@ -174,7 +179,8 @@ defmodule SpectreMnemonic.Recall.Engine do
     moment_ids = MapSet.new(Enum.map(moments, & &1.id))
     related_ids = related_memory_ids(moment_ids, associations)
 
-    associations
+    related_ids
+    |> Focus.associations_for_ids()
     |> Enum.flat_map(fn assoc ->
       if MapSet.member?(related_ids, assoc.source_id) and assoc.relation == :attached_action do
         [assoc.target_id]

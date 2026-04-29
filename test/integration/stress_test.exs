@@ -215,6 +215,22 @@ defmodule SpectreMnemonic.Integration.StressTest do
     assert MapSet.member?(ids, code.id)
   end
 
+  test "graph expansion uses indexed associations without losing linked memories" do
+    {:ok, %{moment: anchor}} =
+      SpectreMnemonic.signal("indexed graph anchor phrase", stream: :research)
+
+    {:ok, %{moment: linked}} =
+      SpectreMnemonic.signal("context reachable only through graph edge", stream: :code_learning)
+
+    assert {:ok, _association} = SpectreMnemonic.link(anchor.id, :supports, linked.id)
+
+    assert {:ok, packet} = SpectreMnemonic.recall("indexed graph anchor phrase", limit: 2)
+    ids = MapSet.new(Enum.map(packet.moments, & &1.id))
+
+    assert MapSet.member?(ids, anchor.id)
+    assert MapSet.member?(ids, linked.id)
+  end
+
   test "date-like birthday facts remain recallable without embeddings" do
     {:ok, %{moment: birthday}} =
       SpectreMnemonic.signal("Marta birthday is 1988-07-14 and favorite cake is lemon",
@@ -238,6 +254,50 @@ defmodule SpectreMnemonic.Integration.StressTest do
     assert {:ok, 5} = SpectreMnemonic.forget({:task, "forget-me"})
     assert {:ok, packet} = SpectreMnemonic.recall("cleanup task memory")
     refute Enum.any?(packet.moments, &(&1.task_id == "forget-me"))
+  end
+
+  test "indexed forget paths match id signal stream and task selectors" do
+    {:ok, %{signal: direct_signal, moment: direct}} =
+      SpectreMnemonic.signal("direct indexed forget target")
+
+    {:ok, %{signal: signal_selector, moment: by_signal}} =
+      SpectreMnemonic.signal("signal indexed forget target")
+
+    stream_results =
+      for index <- 1..2 do
+        {:ok, %{moment: moment}} =
+          SpectreMnemonic.signal("stream indexed forget target #{index}",
+            stream: :indexed_forget_stream
+          )
+
+        moment
+      end
+
+    task_results =
+      for index <- 1..2 do
+        {:ok, %{moment: moment}} =
+          SpectreMnemonic.signal("task indexed forget target #{index}", task_id: "indexed-forget")
+
+        moment
+      end
+
+    assert {:ok, 1} = SpectreMnemonic.forget(direct.id)
+    assert {:ok, 1} = SpectreMnemonic.forget(signal_selector.id)
+    assert {:ok, 2} = SpectreMnemonic.forget({:stream, :indexed_forget_stream})
+    assert {:ok, 2} = SpectreMnemonic.forget({:task, "indexed-forget"})
+
+    forgotten_ids =
+      [direct, by_signal | stream_results ++ task_results]
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    active_ids =
+      SpectreMnemonic.Active.Focus.moments()
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
+    assert MapSet.disjoint?(forgotten_ids, active_ids)
+    assert direct_signal.id == direct.signal_id
   end
 
   test "empty and punctuation-only cues do not return attention-only matches" do

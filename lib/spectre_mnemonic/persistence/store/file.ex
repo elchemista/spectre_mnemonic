@@ -11,10 +11,11 @@ defmodule SpectreMnemonic.Persistence.Store.File do
 
   @magic "SMEM"
   @version 1
+  @header_bytes byte_size(@magic) + 1 + 8 + 8 + 4 + 4
 
   @impl true
   @spec capabilities(keyword()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
-  def capabilities(_opts), do: [:append, :replay, :event_log]
+  def capabilities(_opts), do: [:append, :replay, :replay_fold, :event_log]
 
   @impl true
   @spec put(SpectreMnemonic.Persistence.Store.Record.t(), keyword()) ::
@@ -41,8 +42,20 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   @impl true
   @spec replay(keyword()) :: {:ok, [tuple()]}
   def replay(opts) do
-    root = data_root(opts)
-    {:ok, replay_path(active_path(root))}
+    with {:ok, frames} <- replay_fold(opts, [], fn frame, acc -> {:cont, [frame | acc]} end) do
+      {:ok, Enum.reverse(frames)}
+    end
+  end
+
+  @impl true
+  @spec replay_fold(keyword(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
+          {:ok, acc} | {:error, term()}
+        when acc: term()
+  def replay_fold(opts, acc, fun) when is_function(fun, 2) do
+    opts
+    |> data_root()
+    |> active_path()
+    |> replay_path_fold(acc, fun)
   end
 
   @doc "Compacts current replayable records into a snapshot file."
@@ -93,36 +106,103 @@ defmodule SpectreMnemonic.Persistence.Store.File do
 
   @spec initial_seq(Path.t()) :: non_neg_integer()
   defp initial_seq(path) do
-    path
-    |> replay_path()
-    |> List.last({0, nil, nil})
-    |> elem(0)
+    {:ok, seq} =
+      replay_path_fold(path, 0, fn {seq, _timestamp, _payload}, _acc -> {:cont, seq} end)
+
+    seq
   end
 
   @spec replay_path(Path.t()) :: [tuple()]
   defp replay_path(path) do
-    case File.read(path) do
-      {:ok, binary} -> read_frames(binary, [])
-      {:error, :enoent} -> []
-      {:error, _reason} -> []
+    {:ok, frames} = replay_path_fold(path, [], fn frame, acc -> {:cont, [frame | acc]} end)
+    Enum.reverse(frames)
+  end
+
+  @spec replay_path_fold(Path.t(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
+          {:ok, acc} | {:error, term()}
+        when acc: term()
+  defp replay_path_fold(path, acc, fun) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, io} ->
+        try do
+          {:ok, read_frames(io, acc, fun)}
+        after
+          File.close(io)
+        end
+
+      {:error, :enoent} ->
+        {:ok, acc}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  @spec read_frames(binary(), [tuple()]) :: [tuple()]
-  defp read_frames(
-         <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32,
-           rest::binary>>,
-         acc
-       )
-       when byte_size(rest) >= len do
-    <<payload::binary-size(len), tail::binary>> = rest
+  @spec read_frames(File.io_device(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) :: acc
+        when acc: term()
+  defp read_frames(io, acc, fun) do
+    case IO.binread(io, @header_bytes) do
+      <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32>> ->
+        read_payload(io, seq, timestamp, len, crc, acc, fun)
 
+      incomplete_or_unknown when is_binary(incomplete_or_unknown) ->
+        acc
+
+      :eof ->
+        acc
+
+      {:error, _reason} ->
+        acc
+    end
+  end
+
+  @spec read_payload(
+          File.io_device(),
+          pos_integer(),
+          integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          acc,
+          (tuple(), acc -> {:cont, acc} | {:halt, acc})
+        ) :: acc
+        when acc: term()
+  defp read_payload(io, seq, timestamp, len, crc, acc, fun) do
+    case IO.binread(io, len) do
+      payload when is_binary(payload) and byte_size(payload) == len ->
+        read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
+
+      _incomplete_or_error ->
+        acc
+    end
+  end
+
+  @spec read_complete_payload(
+          File.io_device(),
+          pos_integer(),
+          integer(),
+          binary(),
+          non_neg_integer(),
+          acc,
+          (tuple(), acc -> {:cont, acc} | {:halt, acc})
+        ) :: acc
+        when acc: term()
+  defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun) do
     if :erlang.crc32(payload) == crc do
-      read_frames(tail, [{seq, timestamp, :erlang.binary_to_term(payload)} | acc])
+      frame = {seq, timestamp, :erlang.binary_to_term(payload)}
+      continue_frame(io, frame, acc, fun)
     else
-      Enum.reverse(acc)
+      acc
     end
   end
 
-  defp read_frames(_incomplete_or_unknown, acc), do: Enum.reverse(acc)
+  @spec continue_frame(File.io_device(), tuple(), acc, (tuple(), acc ->
+                                                          {:cont, acc} | {:halt, acc})) ::
+          acc
+        when acc: term()
+  defp continue_frame(io, frame, acc, fun) do
+    case fun.(frame, acc) do
+      {:cont, acc} -> read_frames(io, acc, fun)
+      {:halt, acc} -> acc
+    end
+  end
 end
