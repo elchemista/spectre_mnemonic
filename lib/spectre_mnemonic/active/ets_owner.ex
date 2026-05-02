@@ -47,7 +47,7 @@ defmodule SpectreMnemonic.Active.ETSOwner do
   @spec create_table({atom(), :set | :bag}) :: :ok | :ets.tid()
   defp create_table({table, type}) do
     if :ets.whereis(table) == :undefined do
-      :ets.new(table, [:named_table, :public, type, read_concurrency: true])
+      :ets.new(table, [:named_table, :public, type, :compressed, read_concurrency: true])
     end
   end
 end

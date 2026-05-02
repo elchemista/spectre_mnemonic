@@ -316,7 +316,7 @@ defmodule SpectreMnemonic.Recall.Index do
   @spec ensure_table(atom()) :: :ok | :ets.tid()
   defp ensure_table(table) do
     case :ets.whereis(table) do
-      :undefined -> :ets.new(table, [:named_table, :public, read_concurrency: true])
+      :undefined -> :ets.new(table, [:named_table, :public, :compressed, read_concurrency: true])
       _tid -> :ok
     end
   end
