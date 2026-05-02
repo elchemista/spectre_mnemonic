@@ -112,6 +112,33 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert Enum.any?(recalled.associations, &(&1.relation in [:contains_chunk, :categorized_as]))
   end
 
+  test "remember links related memories outside the current intake packet" do
+    {:ok, %{moment: prior}} =
+      SpectreMnemonic.signal(
+        "research note database migration rollback protects invoice schema",
+        stream: :research,
+        attention: 1.0
+      )
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(
+               "TODO fix database migration rollback for invoice schema before release",
+               chunk_words: 20,
+               overlap_words: 0
+             )
+
+    assert Enum.any?(packet.associations, fn association ->
+             association.relation == :related_memory and association.target_id == prior.id and
+               association.metadata.scope == :cross_memory
+           end)
+
+    assert {:ok, recalled} = SpectreMnemonic.recall("fix migration rollback invoice", limit: 20)
+    recalled_ids = MapSet.new(Enum.map(recalled.moments, & &1.id))
+
+    assert MapSet.member?(recalled_ids, packet.root.id)
+    assert MapSet.member?(recalled_ids, prior.id)
+  end
+
   test "remember accepts maps lists code and json-looking strings without parsing json" do
     assert {:ok, task_packet} =
              SpectreMnemonic.remember(%{
@@ -940,6 +967,45 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert job.payload.tombstones == 1
     assert job.payload.metadata == %{chain: :test}
     assert job.payload.warnings == [:window_compressed]
+  end
+
+  test "consolidation expands selected memories through graph relationships" do
+    {:ok, %{moment: selected}} =
+      SpectreMnemonic.signal("selected payment retry implementation memory",
+        task_id: "graph-expand",
+        attention: 2.0
+      )
+
+    {:ok, %{moment: context}} =
+      SpectreMnemonic.signal("low attention payment retry research context",
+        task_id: "graph-expand",
+        stream: :research,
+        attention: 0.2
+      )
+
+    assert {:ok, link} = SpectreMnemonic.link(selected.id, :supported_by, context.id)
+
+    test_pid = self()
+
+    inspect_context = fn %Consolidation{} = consolidation ->
+      send(test_pid, {:expanded_consolidation, consolidation.moments, consolidation.windows})
+      {:ok, consolidation}
+    end
+
+    assert {:ok, knowledge} =
+             SpectreMnemonic.consolidate(min_attention: 2.0, consolidate_with: inspect_context)
+
+    assert Enum.any?(knowledge, &(&1.source_id == selected.id))
+    assert Enum.any?(knowledge, &(&1.source_id == context.id))
+
+    assert_received {:expanded_consolidation, moments, windows}
+    moment_ids = MapSet.new(Enum.map(moments, & &1.id))
+    assert MapSet.member?(moment_ids, context.id)
+
+    assert Enum.any?(windows, fn window ->
+             MapSet.equal?(MapSet.new(window.moment_ids), MapSet.new([selected.id, context.id])) and
+               window.association_ids == [link.id]
+           end)
   end
 
   test "consolidation keeps secret plaintext out of durable records" do

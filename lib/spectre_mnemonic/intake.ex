@@ -7,6 +7,7 @@ defmodule SpectreMnemonic.Intake do
   """
 
   alias SpectreMnemonic.Intake.{Memory, Packet, PlugPipeline}
+  alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Memory.{Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Result
 
@@ -14,7 +15,9 @@ defmodule SpectreMnemonic.Intake do
   @default_overlap_words 40
   @default_summary_words 36
   @default_similarity_threshold 0.18
+  @default_cross_memory_similarity_threshold 0.24
   @default_max_related_edges 40
+  @default_max_cross_memory_edges 20
 
   @type envelope :: Memory.t()
 
@@ -328,7 +331,8 @@ defmodule SpectreMnemonic.Intake do
         chunk_summary_edges(chunks, summaries) ++
         sequence_edges(chunks, :next_chunk, :previous_chunk) ++
         category_edges(chunks ++ summaries, category_by_label) ++
-        related_chunk_edges(chunks, opts)
+        related_chunk_edges(chunks, opts) ++
+        cross_memory_edges(root, chunks, summaries, categories, opts)
 
     Result.collect_ok(planned_edges, fn {source, relation, target, edge_opts} ->
       case SpectreMnemonic.link(
@@ -406,6 +410,83 @@ defmodule SpectreMnemonic.Intake do
       -Keyword.fetch!(edge_opts, :weight)
     end)
     |> Enum.take(max_edges)
+  end
+
+  @spec cross_memory_edges(Moment.t(), [Moment.t()], [Moment.t()], [Moment.t()], keyword()) :: [
+          {Moment.t(), atom(), Moment.t(), keyword()}
+        ]
+  defp cross_memory_edges(root, chunks, summaries, categories, opts) do
+    if Keyword.get(opts, :cross_memory?, true) do
+      threshold =
+        Keyword.get(
+          opts,
+          :cross_memory_similarity_threshold,
+          @default_cross_memory_similarity_threshold
+        )
+
+      max_edges = Keyword.get(opts, :max_cross_memory_edges, @default_max_cross_memory_edges)
+      current_ids = MapSet.new(Enum.map([root | chunks ++ summaries ++ categories], & &1.id))
+      existing_edges = existing_cross_memory_edges(current_ids)
+      anchors = [root | chunks] |> Enum.filter(&linkable_memory?/1)
+
+      Focus.moments()
+      |> Enum.reject(&(MapSet.member?(current_ids, &1.id) or not linkable_memory?(&1)))
+      |> cross_memory_candidates(anchors, threshold, existing_edges)
+      |> Enum.sort_by(fn {_source, _target, score} -> -score end)
+      |> Enum.take(max_edges)
+      |> Enum.map(fn {source, target, score} ->
+        metadata = %{similarity: score, scope: :cross_memory}
+        {source, :related_memory, target, [weight: score, metadata: metadata]}
+      end)
+    else
+      []
+    end
+  end
+
+  @spec existing_cross_memory_edges(MapSet.t(binary())) :: MapSet.t()
+  defp existing_cross_memory_edges(current_ids) do
+    current_ids
+    |> Focus.associations_for_ids()
+    |> Enum.filter(&(&1.relation == :related_memory))
+    |> Enum.reduce(MapSet.new(), fn assoc, acc ->
+      acc
+      |> MapSet.put({assoc.source_id, assoc.target_id})
+      |> MapSet.put({assoc.target_id, assoc.source_id})
+    end)
+  end
+
+  @spec cross_memory_candidates([Moment.t()], [Moment.t()], float(), MapSet.t()) :: [
+          {Moment.t(), Moment.t(), float()}
+        ]
+  defp cross_memory_candidates(candidates, anchors, threshold, existing_edges) do
+    for source <- anchors,
+        target <- candidates,
+        not MapSet.member?(existing_edges, {source.id, target.id}),
+        score = relationship_score(source, target),
+        score >= threshold do
+      {source, target, score}
+    end
+  end
+
+  @spec linkable_memory?(Moment.t()) :: boolean()
+  defp linkable_memory?(%{kind: :memory_category}), do: false
+  defp linkable_memory?(_moment), do: true
+
+  @spec relationship_score(Moment.t(), Moment.t()) :: float()
+  defp relationship_score(left, right) do
+    keyword_score = keyword_similarity(left, right)
+    entity_score = set_similarity(left.entities, right.entities)
+    category_score = metadata_category_similarity(left, right)
+    task_bonus = if left.task_id && left.task_id == right.task_id, do: 0.12, else: 0.0
+
+    min(1.0, max(keyword_score, entity_score) + category_score * 0.25 + task_bonus)
+  end
+
+  @spec metadata_category_similarity(Moment.t(), Moment.t()) :: float()
+  defp metadata_category_similarity(left, right) do
+    left_categories = Map.get(left.metadata, :categories, [])
+    right_categories = Map.get(right.metadata, :categories, [])
+    set_similarity(left_categories, right_categories)
   end
 
   @spec text_projection(term()) :: binary()
@@ -572,14 +653,19 @@ defmodule SpectreMnemonic.Intake do
 
   @spec keyword_similarity(Moment.t(), Moment.t()) :: float()
   defp keyword_similarity(left, right) do
-    left_keywords = MapSet.new(left.keywords)
-    right_keywords = MapSet.new(right.keywords)
-    union = MapSet.size(MapSet.union(left_keywords, right_keywords))
+    set_similarity(left.keywords, right.keywords)
+  end
+
+  @spec set_similarity([term()], [term()]) :: float()
+  defp set_similarity(left, right) do
+    left_items = MapSet.new(left)
+    right_items = MapSet.new(right)
+    union = MapSet.size(MapSet.union(left_items, right_items))
 
     if union == 0 do
       0.0
     else
-      MapSet.size(MapSet.intersection(left_keywords, right_keywords)) / union
+      MapSet.size(MapSet.intersection(left_items, right_items)) / union
     end
   end
 

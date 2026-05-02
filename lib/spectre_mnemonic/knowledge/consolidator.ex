@@ -41,11 +41,14 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   def handle_call({:consolidate, opts}, _from, state) do
     min_attention = Keyword.get(opts, :min_attention, 1.0)
     now = DateTime.utc_now()
+    active_moments = Focus.moments()
+    associations = Focus.associations()
 
     consolidation =
-      min_attention
-      |> candidate_moments()
-      |> default_consolidation(Focus.associations(), now, opts)
+      active_moments
+      |> candidate_moments(min_attention)
+      |> graph_expanded_candidates(active_moments, associations, opts)
+      |> default_consolidation(associations, now, opts)
 
     case run_consolidation(consolidation, opts) do
       {:ok, consolidation} ->
@@ -186,13 +189,54 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     end
   end
 
-  @spec candidate_moments(number()) :: [term()]
-  defp candidate_moments(min_attention) do
-    []
-    |> Focus.fold_moments(fn moment, acc ->
-      if moment.attention >= min_attention, do: [moment | acc], else: acc
-    end)
-    |> Enum.reverse()
+  @spec candidate_moments([term()], number()) :: [term()]
+  defp candidate_moments(moments, min_attention) do
+    Enum.filter(moments, &(&1.attention >= min_attention))
+  end
+
+  @spec graph_expanded_candidates([term()], [term()], [term()], keyword()) :: [term()]
+  defp graph_expanded_candidates(candidates, active_moments, associations, opts) do
+    depth = opts |> graph_depth() |> max(0)
+    moment_by_id = Map.new(active_moments, &{&1.id, &1})
+    seed_ids = MapSet.new(Enum.map(candidates, & &1.id))
+    expanded_ids = expand_ids(seed_ids, seed_ids, associations, moment_by_id, depth)
+
+    Enum.filter(active_moments, &MapSet.member?(expanded_ids, &1.id))
+  end
+
+  @spec graph_depth(keyword()) :: non_neg_integer()
+  defp graph_depth(opts) do
+    Keyword.get(opts, :graph_depth, Keyword.get(opts, :consolidation_graph_depth, 1))
+  end
+
+  @spec expand_ids(MapSet.t(binary()), MapSet.t(binary()), [term()], map(), non_neg_integer()) ::
+          MapSet.t(binary())
+  defp expand_ids(seen, _frontier, _associations, _moment_by_id, 0), do: seen
+
+  defp expand_ids(seen, frontier, associations, moment_by_id, depth) do
+    next =
+      associations
+      |> Enum.reduce(MapSet.new(), fn association, acc ->
+        cond do
+          MapSet.member?(frontier, association.source_id) and
+              Map.has_key?(moment_by_id, association.target_id) ->
+            MapSet.put(acc, association.target_id)
+
+          MapSet.member?(frontier, association.target_id) and
+              Map.has_key?(moment_by_id, association.source_id) ->
+            MapSet.put(acc, association.source_id)
+
+          true ->
+            acc
+        end
+      end)
+      |> MapSet.difference(seen)
+
+    if MapSet.size(next) == 0 do
+      seen
+    else
+      expand_ids(MapSet.union(seen, next), next, associations, moment_by_id, depth - 1)
+    end
   end
 
   @spec default_outputs([term()], DateTime.t()) :: map()
@@ -348,9 +392,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     moment_by_id = Map.new(moments, &{&1.id, &1})
     selected_ids = MapSet.new(Map.keys(moment_by_id))
 
-    # Consolidation windows are connected components in the selected active
-    # graph. Associations to memories outside this consolidation run are
-    # intentionally ignored so adapters receive self-contained batches.
+    # Consolidation windows are connected components in the expanded active
+    # graph. The candidate set is expanded through associations before this
+    # step, so linked context can travel into durable consolidation.
     graph_associations =
       Enum.filter(associations, fn association ->
         MapSet.member?(selected_ids, association.source_id) and
