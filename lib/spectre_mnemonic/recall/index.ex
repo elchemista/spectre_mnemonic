@@ -14,6 +14,8 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @index_table :mnemonic_embedding_index
   @label_table :mnemonic_embedding_labels
+  @hnsw_index Module.concat(HNSWLib, Index)
+
   @type state :: %{
           next_label: pos_integer(),
           hnsw: term(),
@@ -149,7 +151,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec query_hnsw_neighbors(state(), map(), pos_integer()) :: [map()] | nil
   defp query_hnsw_neighbors(state, cue, k) do
-    case HNSWLib.Index.knn_query(state.hnsw, cue.vector, k: k) do
+    case hnsw_knn_query(state.hnsw, cue.vector, k) do
       {:ok, labels, _distances} ->
         labels
         |> Nx.to_flat_list()
@@ -217,12 +219,12 @@ defmodule SpectreMnemonic.Recall.Index do
   @spec maybe_add_hnsw(state(), map(), pos_integer()) :: state()
   defp maybe_add_hnsw(state, entry, label) do
     with true <- hnsw_enabled?(),
-         true <- Code.ensure_loaded?(HNSWLib.Index),
+         true <- hnsw_available?(),
          true <- Code.ensure_loaded?(Nx),
          {:ok, state} <- ensure_hnsw(state, entry.dimensions),
          :ok <- ensure_hnsw_capacity(state, label),
          tensor <- Nx.tensor([Vector.to_list(entry.vector)], type: :f32),
-         :ok <- HNSWLib.Index.add_items(state.hnsw, tensor, ids: [label], replace_deleted: true) do
+         :ok <- hnsw_add_items(state.hnsw, tensor, label) do
       state
     else
       _fallback -> state
@@ -242,10 +244,10 @@ defmodule SpectreMnemonic.Recall.Index do
       allow_replace_deleted: true
     ]
 
-    case HNSWLib.Index.new(Map.get(config, :space, :cosine), dimensions, max_elements, opts) do
+    case hnsw_new(Map.get(config, :space, :cosine), dimensions, max_elements, opts) do
       {:ok, index} ->
         if ef = Map.get(config, :ef) do
-          HNSWLib.Index.set_ef(index, ef)
+          hnsw_set_ef(index, ef)
         end
 
         {:ok, %{state | hnsw: index, hnsw_dim: dimensions, hnsw_max: max_elements}}
@@ -263,7 +265,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   defp ensure_hnsw_capacity(%{hnsw: index, hnsw_max: max_elements}, label)
        when is_integer(max_elements) and label >= max_elements do
-    HNSWLib.Index.resize_index(index, max(max_elements * 2, label + 1))
+    hnsw_resize_index(index, max(max_elements * 2, label + 1))
   end
 
   defp ensure_hnsw_capacity(_state, _label), do: :ok
@@ -272,7 +274,7 @@ defmodule SpectreMnemonic.Recall.Index do
   defp maybe_mark_deleted(nil, _label), do: :ok
 
   defp maybe_mark_deleted(index, label) do
-    HNSWLib.Index.mark_deleted(index, label)
+    hnsw_mark_deleted(index, label)
   rescue
     _exception -> :ok
   end
@@ -294,6 +296,41 @@ defmodule SpectreMnemonic.Recall.Index do
   defp hnsw_enabled? do
     config = index_config()
     Map.get(config, :enabled, true) and Map.get(config, :backend, :hnsw) == :hnsw
+  end
+
+  @spec hnsw_available? :: boolean()
+  defp hnsw_available?, do: Code.ensure_loaded?(@hnsw_index)
+
+  @spec hnsw_new(atom(), pos_integer(), pos_integer(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  defp hnsw_new(space, dimensions, max_elements, opts) do
+    apply(@hnsw_index, :new, [space, dimensions, max_elements, opts])
+  end
+
+  @spec hnsw_set_ef(term(), non_neg_integer()) :: :ok | {:error, term()}
+  defp hnsw_set_ef(index, ef) do
+    apply(@hnsw_index, :set_ef, [index, ef])
+  end
+
+  @spec hnsw_knn_query(term(), binary(), pos_integer()) ::
+          {:ok, Nx.Tensor.t(), Nx.Tensor.t()} | {:error, term()}
+  defp hnsw_knn_query(index, vector, k) do
+    apply(@hnsw_index, :knn_query, [index, vector, [k: k]])
+  end
+
+  @spec hnsw_add_items(term(), Nx.Tensor.t(), pos_integer()) :: :ok | {:error, term()}
+  defp hnsw_add_items(index, tensor, label) do
+    apply(@hnsw_index, :add_items, [index, tensor, [ids: [label], replace_deleted: true]])
+  end
+
+  @spec hnsw_resize_index(term(), pos_integer()) :: :ok | {:error, term()}
+  defp hnsw_resize_index(index, max_elements) do
+    apply(@hnsw_index, :resize_index, [index, max_elements])
+  end
+
+  @spec hnsw_mark_deleted(term(), pos_integer()) :: :ok | {:error, term()}
+  defp hnsw_mark_deleted(index, label) do
+    apply(@hnsw_index, :mark_deleted, [index, label])
   end
 
   @spec index_config :: map()
