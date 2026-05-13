@@ -63,37 +63,47 @@ defmodule SpectreMnemonic.Knowledge.Learning do
   @spec skill_from_map(map(), keyword()) :: map()
   defp skill_from_map(input, opts) do
     text = text_value(value(input, :text))
-    name = text_value(Keyword.get(opts, :name)) || text_value(value(input, :name))
-    steps = value(input, :steps, []) |> List.wrap() |> Enum.map(&to_string/1) |> reject_blank()
-    rules = value(input, :rules, []) |> List.wrap() |> Enum.map(&to_string/1) |> reject_blank()
-
-    examples =
-      value(input, :examples, []) |> List.wrap() |> Enum.map(&to_string/1) |> reject_blank()
-
-    text_steps =
-      case text do
-        nil -> []
-        text -> text |> non_empty_lines() |> bullet_steps()
-      end
-
-    steps =
-      cond do
-        steps != [] -> steps
-        text_steps != [] -> text_steps
-        is_binary(text) -> [text]
-        true -> []
-      end
+    steps = map_steps(input, text)
 
     %{
       type: :skill,
-      name: name || name_from_text(text),
+      name: map_name(input, opts) || name_from_text(text),
       text: text || Enum.join(steps, "\n"),
       steps: steps,
-      metadata:
-        opts
-        |> metadata(Map.new(value(input, :metadata, %{})))
-        |> Map.merge(%{rules: rules, examples: examples})
+      metadata: map_metadata(input, opts)
     }
+  end
+
+  @spec map_name(map(), keyword()) :: binary() | nil
+  defp map_name(input, opts) do
+    text_value(Keyword.get(opts, :name)) || text_value(value(input, :name))
+  end
+
+  @spec map_steps(map(), binary() | nil) :: [binary()]
+  defp map_steps(input, text) do
+    explicit_steps = input |> value(:steps, []) |> string_list()
+    text_steps = text_steps(text)
+
+    cond do
+      explicit_steps != [] -> explicit_steps
+      text_steps != [] -> text_steps
+      is_binary(text) -> [text]
+      true -> []
+    end
+  end
+
+  @spec text_steps(binary() | nil) :: [binary()]
+  defp text_steps(nil), do: []
+  defp text_steps(text), do: text |> non_empty_lines() |> bullet_steps()
+
+  @spec map_metadata(map(), keyword()) :: map()
+  defp map_metadata(input, opts) do
+    opts
+    |> metadata(Map.new(value(input, :metadata, %{})))
+    |> Map.merge(%{
+      rules: string_list(value(input, :rules, [])),
+      examples: string_list(value(input, :examples, []))
+    })
   end
 
   @spec validate(map()) :: {:ok, SMEM.event()} | {:error, term()}
@@ -125,6 +135,9 @@ defmodule SpectreMnemonic.Knowledge.Learning do
   @spec value(map(), atom(), term()) :: term()
   defp value(map, key, default \\ nil),
     do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+
+  @spec string_list(term()) :: [binary()]
+  defp string_list(values), do: values |> List.wrap() |> Enum.map(&to_string/1) |> reject_blank()
 
   @spec text_value(term()) :: binary() | nil
   defp text_value(nil), do: nil
