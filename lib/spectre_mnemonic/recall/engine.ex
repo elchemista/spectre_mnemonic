@@ -43,11 +43,14 @@ defmodule SpectreMnemonic.Recall.Engine do
     {:ok, index_results} = Index.query(cue, opts)
     index_scores = Map.new(index_results, &{&1.id, &1})
 
+    seed_limit = max(limit, limit * 2)
+
     ranked =
       cue
-      |> ranked_moments(index_scores, limit)
+      |> ranked_moments(index_scores, seed_limit)
       |> expand_graph()
       |> Enum.uniq_by(& &1.id)
+      |> rerank_moments(cue, index_scores)
       |> Enum.take(limit)
 
     associations = ranked |> Enum.map(& &1.id) |> Focus.associations_for_ids()
@@ -123,8 +126,60 @@ defmodule SpectreMnemonic.Recall.Engine do
     if match_score > 0, do: match_score + moment.attention, else: 0
   end
 
+  @spec rerank_moments([recall_moment()], Cue.t(), map()) :: [recall_moment()]
+  defp rerank_moments(moments, cue, index_scores) do
+    moments
+    |> Enum.map(fn moment ->
+      base_score = score(moment, cue, index_scores)
+      {max(base_score, structured_score(moment, cue)), moment}
+    end)
+    |> Enum.sort_by(&rank_key/1)
+    |> Enum.map(fn {_score, moment} -> moment end)
+  end
+
+  @spec structured_score(recall_moment(), Cue.t()) :: number()
+  defp structured_score(%{kind: :memory_entity, metadata: metadata} = moment, cue) do
+    canonical = Map.get(metadata, :canonical)
+    aliases = Map.get(metadata, :aliases, [])
+    cue_text = String.downcase(cue.text)
+
+    cond do
+      canonical && String.contains?(cue_text, to_string(canonical)) ->
+        7 + moment.attention
+
+      Enum.any?(aliases, &String.contains?(cue_text, String.downcase(to_string(&1)))) ->
+        6 + moment.attention
+
+      true ->
+        0
+    end
+  end
+
+  defp structured_score(%{kind: :memory_event} = moment, cue) do
+    cond do
+      asks_when?(cue) and overlap(moment.keywords, cue.keywords) > 0 -> 5 + moment.attention
+      asks_action?(cue) and overlap(moment.keywords, cue.keywords) > 0 -> 5 + moment.attention
+      true -> 0
+    end
+  end
+
+  defp structured_score(%{kind: :memory_time} = moment, cue) do
+    if asks_when?(cue), do: 3 + moment.attention, else: 0
+  end
+
+  defp structured_score(%{kind: :memory_value} = moment, cue) do
+    if asks_value?(cue), do: 3 + moment.attention, else: 0
+  end
+
+  defp structured_score(_moment, _cue), do: 0
+
   @spec expand_graph([recall_moment()]) :: [recall_moment()]
-  defp expand_graph(moments) do
+  defp expand_graph(moments), do: expand_graph(moments, 2)
+
+  @spec expand_graph([recall_moment()], non_neg_integer()) :: [recall_moment()]
+  defp expand_graph(moments, 0), do: moments
+
+  defp expand_graph(moments, depth) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
     associations = Focus.associations_for_ids(ids)
 
@@ -139,7 +194,16 @@ defmodule SpectreMnemonic.Recall.Engine do
       end)
       |> MapSet.new()
 
-    moments ++ Focus.moments_by_ids(linked_ids)
+    next =
+      linked_ids
+      |> Enum.reject(&MapSet.member?(ids, &1))
+      |> Focus.moments_by_ids()
+
+    if next == [] do
+      moments
+    else
+      expand_graph(moments ++ next, depth - 1)
+    end
   end
 
   @spec active_status([recall_moment()]) :: [map()]
@@ -225,8 +289,45 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   @spec status_match?(recall_moment(), Cue.t()) :: boolean()
   defp status_match?(moment, cue) do
-    String.contains?(cue.text, "how") and String.contains?(cue.text, "going") and
+    cue_text = String.downcase(cue.text)
+
+    String.contains?(cue_text, "how") and String.contains?(cue_text, "going") and
       not is_nil(moment.task_id)
+  end
+
+  @spec asks_when?(Cue.t()) :: boolean()
+  defp asks_when?(cue) do
+    question_contains?(cue, ~w(when quando cuándo quand wann))
+  end
+
+  @spec asks_action?(Cue.t()) :: boolean()
+  defp asks_action?(cue) do
+    question_contains?(cue, ["what", "did", "do", "cosa", "che", "quoi", "que", "qué"])
+  end
+
+  @spec asks_value?(Cue.t()) :: boolean()
+  defp asks_value?(cue) do
+    question_contains?(cue, [
+      "number",
+      "phone",
+      "telephone",
+      "mobile",
+      "age",
+      "numero",
+      "número",
+      "telefono",
+      "teléfono",
+      "età",
+      "eta",
+      "edad",
+      "âge"
+    ])
+  end
+
+  @spec question_contains?(Cue.t(), [binary()]) :: boolean()
+  defp question_contains?(cue, words) do
+    text = String.downcase(cue.text)
+    Enum.any?(words, &String.contains?(text, &1))
   end
 
   @spec overlap([term()], [term()]) :: non_neg_integer()
@@ -273,14 +374,14 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp keywords(text) do
     text
     |> String.downcase()
-    |> String.split(~r/[^a-z0-9_]+/u, trim: true)
+    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
     |> Enum.reject(&(String.length(&1) < 3))
     |> Enum.uniq()
   end
 
   @spec entities(binary()) :: [binary()]
   defp entities(text) do
-    Regex.scan(~r/\b[A-Z][A-Za-z0-9_]+\b/, text)
+    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
     |> List.flatten()
     |> Enum.uniq()
   end
