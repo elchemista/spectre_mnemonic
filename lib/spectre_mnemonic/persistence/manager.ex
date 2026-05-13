@@ -490,6 +490,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
       output
       |> semantic_values(:records)
       |> Enum.map(&semantic_record/1)
+      |> Enum.reject(&is_nil/1)
 
     tombstones =
       output
@@ -543,7 +544,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     |> List.wrap()
   end
 
-  @spec semantic_record(term()) :: Record.t()
+  @spec semantic_record(term()) :: Record.t() | nil
   defp semantic_record(%Record{} = record), do: record
 
   defp semantic_record({family, payload}) when is_atom(family),
@@ -552,8 +553,12 @@ defmodule SpectreMnemonic.Persistence.Manager do
   defp semantic_record(%{family: family, payload: payload}) when is_atom(family),
     do: semantic_record({family, payload})
 
-  defp semantic_record(%{"family" => family, "payload" => payload}) when is_binary(family),
-    do: semantic_record({String.to_atom(family), payload})
+  defp semantic_record(%{"family" => family, "payload" => payload}) when is_binary(family) do
+    case persistent_family(family) do
+      nil -> nil
+      family -> semantic_record({family, payload})
+    end
+  end
 
   @spec semantic_tombstone(term()) :: Record.t() | nil
   defp semantic_tombstone(%Record{} = record), do: record
@@ -568,10 +573,37 @@ defmodule SpectreMnemonic.Persistence.Manager do
     do: semantic_tombstone({family, id})
 
   defp semantic_tombstone(%{"family" => family, "id" => id})
-       when is_binary(family) and is_binary(id),
-       do: semantic_tombstone({String.to_atom(family), id})
+       when is_binary(family) and is_binary(id) do
+    case persistent_family(family) do
+      nil -> nil
+      family -> semantic_tombstone({family, id})
+    end
+  end
 
   defp semantic_tombstone(_other), do: nil
+
+  @spec persistent_family(binary()) :: atom() | nil
+  defp persistent_family(family) do
+    Enum.find(persistent_families(), &(Atom.to_string(&1) == family))
+  end
+
+  @spec persistent_families :: [atom()]
+  defp persistent_families do
+    [
+      :signals,
+      :moments,
+      :summaries,
+      :categories,
+      :embeddings,
+      :associations,
+      :knowledge,
+      :consolidation_jobs,
+      :semantic_compaction_jobs,
+      :artifacts,
+      :action_recipes,
+      :tombstones
+    ]
+  end
 
   @spec replace_id_tombstones(map(), [Record.t()]) :: [term()]
   defp replace_id_tombstones(output, selected) do

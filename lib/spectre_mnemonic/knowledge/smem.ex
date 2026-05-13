@@ -301,13 +301,15 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     |> String.trim()
     |> String.downcase()
     |> String.replace("-", "_")
-    |> String.to_existing_atom()
-    |> normalize_type()
-  rescue
-    ArgumentError -> :fact
+    |> event_type_from_string()
   end
 
   defp normalize_type(_type), do: :fact
+
+  @spec event_type_from_string(binary()) :: event_type()
+  defp event_type_from_string(type) do
+    Enum.find(@event_types, :fact, &(Atom.to_string(&1) == type))
+  end
 
   @spec compact_text(term()) :: binary() | nil
   defp compact_text(nil), do: nil

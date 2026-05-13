@@ -366,20 +366,47 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   defp append_tombstone(%{"family" => family, "id" => id} = tombstone)
        when is_binary(family) and is_binary(id) do
-    payload =
-      tombstone
-      |> Map.new(fn
-        {"family", value} -> {:family, String.to_atom(value)}
-        {"id", value} -> {:id, value}
-        {key, value} when is_binary(key) -> {String.to_atom(key), value}
-        other -> other
-      end)
-      |> Map.put_new(:forgotten_at, DateTime.utc_now())
+    case persistent_family(family) do
+      nil ->
+        {:error, {:invalid_consolidation_tombstone_family, family}}
 
-    Manager.append(:tombstones, payload)
+      family ->
+        payload =
+          %{
+            family: family,
+            id: id,
+            metadata: Map.get(tombstone, "metadata", %{}),
+            forgotten_at: Map.get(tombstone, "forgotten_at", DateTime.utc_now())
+          }
+
+        Manager.append(:tombstones, payload)
+    end
   end
 
   defp append_tombstone(other), do: {:error, {:invalid_consolidation_tombstone, other}}
+
+  @spec persistent_family(binary()) :: atom() | nil
+  defp persistent_family(family) do
+    Enum.find(persistent_families(), &(Atom.to_string(&1) == family))
+  end
+
+  @spec persistent_families :: [atom()]
+  defp persistent_families do
+    [
+      :signals,
+      :moments,
+      :summaries,
+      :categories,
+      :embeddings,
+      :associations,
+      :knowledge,
+      :consolidation_jobs,
+      :semantic_compaction_jobs,
+      :artifacts,
+      :action_recipes,
+      :tombstones
+    ]
+  end
 
   @spec value(map(), atom(), term()) :: term()
   defp value(map, key, default), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
