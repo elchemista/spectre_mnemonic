@@ -6,7 +6,7 @@ defmodule SpectreMnemonic.Intake do
   creates active memory moments, and wires those moments into a graph.
   """
 
-  alias SpectreMnemonic.Intake.{Memory, Packet, PlugPipeline}
+  alias SpectreMnemonic.Intake.{Extraction, Memory, Packet, PlugPipeline}
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Memory.{Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Result
@@ -51,9 +51,19 @@ defmodule SpectreMnemonic.Intake do
            record_summaries(memory, root_result.moment, chunk_results, opts),
          {:ok, category_results} <-
            record_categories(memory, root_result.moment, chunk_results, summary_results, opts),
+         {:ok, extraction_results, extraction_associations} <-
+           record_extraction(memory, root_result.moment, opts),
          {:ok, associations} <-
-           link_graph(root_result.moment, chunk_results, summary_results, category_results, opts) do
-      results = [root_result] ++ chunk_results ++ summary_results ++ category_results
+           link_graph(
+             root_result.moment,
+             chunk_results,
+             summary_results,
+             category_results,
+             opts
+           ) do
+      results =
+        [root_result] ++
+          chunk_results ++ summary_results ++ category_results ++ extraction_results
 
       {:ok,
        %Packet{
@@ -63,7 +73,7 @@ defmodule SpectreMnemonic.Intake do
          chunks: Enum.map(chunk_results, & &1.moment),
          summaries: Enum.map(summary_results, & &1.moment),
          categories: Enum.map(category_results, & &1.moment),
-         associations: associations,
+         associations: associations ++ extraction_associations,
          warnings: memory.warnings,
          errors: memory.errors,
          persistence: persistence_status(opts)
@@ -312,6 +322,253 @@ defmodule SpectreMnemonic.Intake do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, reason}
       end
+    end)
+  end
+
+  @spec record_extraction(envelope(), Moment.t(), keyword()) ::
+          {:ok, [map()], [Association.t()]} | {:error, term()}
+  defp record_extraction(envelope, root, opts) do
+    if Keyword.get(opts, :extract_entities?, true) do
+      with {:ok, graph} <-
+             Extraction.extract(
+               envelope.text,
+               opts
+               |> Keyword.put(:input, envelope.input)
+               |> Keyword.put(:stream, envelope.stream)
+               |> Keyword.put(:task_id, envelope.task_id)
+             ),
+           {:ok, results} <- record_extraction_nodes(graph, root, envelope, opts),
+           {:ok, associations} <- link_extraction_graph(graph, root, results, opts) do
+        {:ok, results, associations}
+      end
+    else
+      {:ok, [], []}
+    end
+  end
+
+  @spec record_extraction_nodes(map(), Moment.t(), envelope(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  defp record_extraction_nodes(graph, root, envelope, opts) do
+    graph
+    |> extraction_items()
+    |> Result.collect_ok(fn {local_id, text, kind, metadata, attention} ->
+      metadata =
+        envelope.metadata
+        |> Map.merge(metadata)
+        |> Map.merge(%{
+          intake_role: :extracted_fact,
+          root_memory_id: root.id,
+          source_task_id: envelope.task_id,
+          extraction_local_id: local_id,
+          extraction_provider: Map.get(graph.metadata, :provider)
+        })
+
+      case SpectreMnemonic.signal(text,
+             stream: envelope.stream,
+             kind: kind,
+             task_id: nil,
+             attention: Keyword.get(opts, :extraction_attention, attention),
+             persist?: Keyword.get(opts, :persist?, false),
+             metadata: metadata
+           ) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
+  @spec extraction_items(map()) :: [{binary(), binary(), atom(), map(), number()}]
+  defp extraction_items(graph) do
+    entity_items(graph.entities) ++
+      event_items(graph.events) ++
+      time_items(graph.times) ++
+      value_items(graph.values)
+  end
+
+  @spec entity_items([map()]) :: [{binary(), binary(), atom(), map(), number()}]
+  defp entity_items(entities) do
+    Enum.map(entities, fn entity ->
+      metadata = %{
+        extraction_role: :entity,
+        canonical: entity.canonical,
+        aliases: entity.aliases,
+        entity_type: entity.type,
+        language: entity.language,
+        confidence: entity.confidence,
+        categories: [:entity]
+      }
+
+      {entity.id, "Entity: #{entity.name}", :memory_entity, metadata, 1.6}
+    end)
+  end
+
+  @spec event_items([map()]) :: [{binary(), binary(), atom(), map(), number()}]
+  defp event_items(events) do
+    Enum.map(events, fn event ->
+      metadata = %{
+        extraction_role: :event,
+        action: event.action,
+        actor: event.actor,
+        acted_on: event.acted_on,
+        time: event.time,
+        values: Map.get(event, :values, []),
+        source_span: event.source_span,
+        language: event.language,
+        confidence: event.confidence,
+        categories: [:event]
+      }
+
+      {event.id, "Event: #{event.text}", :memory_event, metadata, 1.8}
+    end)
+  end
+
+  @spec time_items([map()]) :: [{binary(), binary(), atom(), map(), number()}]
+  defp time_items(times) do
+    Enum.map(times, fn time ->
+      metadata = %{
+        extraction_role: :time,
+        time_kind: time.kind,
+        normalized_value: time.value,
+        confidence: time.confidence,
+        categories: [:time]
+      }
+
+      {time.id, "Time: #{time.value}", :memory_time, metadata, 1.4}
+    end)
+  end
+
+  @spec value_items([map()]) :: [{binary(), binary(), atom(), map(), number()}]
+  defp value_items(values) do
+    Enum.map(values, fn value ->
+      metadata = %{
+        extraction_role: :value,
+        value_kind: value.kind,
+        value: stored_value(value),
+        display: value.display,
+        entity: value.entity,
+        sensitive?: value.sensitive?,
+        raw_value?: value.raw_value?,
+        confidence: value.confidence,
+        categories: [:value]
+      }
+
+      {value.id, "Value: #{value.kind} #{value.display}", :memory_value, metadata, 1.4}
+    end)
+  end
+
+  @spec stored_value(map()) :: binary() | nil
+  defp stored_value(%{sensitive?: true, raw_value?: false}), do: nil
+  defp stored_value(%{value: value}), do: value
+
+  @spec link_extraction_graph(map(), Moment.t(), [map()], keyword()) ::
+          {:ok, [Association.t()]} | {:error, term()}
+  defp link_extraction_graph(graph, root, results, opts) do
+    node_by_local_id = Map.new(results, &{&1.moment.metadata.extraction_local_id, &1.moment})
+
+    planned_edges =
+      observed_edges(root, Map.values(node_by_local_id)) ++
+        mention_edges(root, graph.entities, node_by_local_id) ++
+        relation_edges(graph.relations, node_by_local_id) ++
+        event_field_edges(graph.events, node_by_local_id) ++
+        value_entity_edges(graph.values, node_by_local_id) ++
+        same_entity_edges(graph.entities, node_by_local_id)
+
+    planned_edges
+    |> Enum.uniq_by(fn {source, relation, target, _edge_opts} ->
+      {source.id, relation, target.id}
+    end)
+    |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
+      case SpectreMnemonic.link(
+             source.id,
+             relation,
+             target.id,
+             Keyword.put_new(edge_opts, :persist?, Keyword.get(opts, :persist?, false))
+           ) do
+        {:ok, edge} -> {:ok, edge}
+        {:error, reason} -> {:error, reason}
+      end
+    end)
+  end
+
+  @spec observed_edges(Moment.t(), [Moment.t()]) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp observed_edges(root, moments) do
+    Enum.map(moments, &{&1, :observed_in, root, [weight: 0.6]})
+  end
+
+  @spec mention_edges(Moment.t(), [map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp mention_edges(root, entities, node_by_local_id) do
+    entities
+    |> Enum.flat_map(fn entity ->
+      case Map.get(node_by_local_id, entity.id) do
+        nil -> []
+        moment -> [{root, :mentions_entity, moment, [weight: entity.confidence]}]
+      end
+    end)
+  end
+
+  @spec relation_edges([map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp relation_edges(relations, node_by_local_id) do
+    relations
+    |> Enum.flat_map(fn relation ->
+      with source when not is_nil(source) <- Map.get(node_by_local_id, relation.source),
+           target when not is_nil(target) <- Map.get(node_by_local_id, relation.target) do
+        [
+          {source, relation.relation, target,
+           [weight: relation.weight, metadata: relation.metadata]}
+        ]
+      else
+        _missing -> []
+      end
+    end)
+  end
+
+  @spec event_field_edges([map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp event_field_edges(events, node_by_local_id) do
+    Enum.flat_map(events, fn event ->
+      event_moment = Map.get(node_by_local_id, event.id)
+
+      [
+        {event_moment, :actor, Map.get(node_by_local_id, event.actor), [weight: 1.0]},
+        {event_moment, :acted_on, Map.get(node_by_local_id, event.acted_on), [weight: 0.9]},
+        {event_moment, :happened_at, Map.get(node_by_local_id, event.time), [weight: 0.9]}
+      ]
+      |> Enum.reject(fn {source, _relation, target, _opts} ->
+        is_nil(source) or is_nil(target)
+      end)
+    end)
+  end
+
+  @spec value_entity_edges([map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp value_entity_edges(values, node_by_local_id) do
+    values
+    |> Enum.flat_map(fn value ->
+      with entity when not is_nil(entity) <- Map.get(node_by_local_id, value.entity),
+           value_moment when not is_nil(value_moment) <- Map.get(node_by_local_id, value.id) do
+        [{entity, :has_value, value_moment, [weight: value.confidence]}]
+      else
+        _missing -> []
+      end
+    end)
+  end
+
+  @spec same_entity_edges([map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp same_entity_edges(entities, node_by_local_id) do
+    current_ids = MapSet.new(Enum.map(node_by_local_id, fn {_local_id, moment} -> moment.id end))
+
+    Enum.flat_map(entities, fn entity ->
+      current = Map.get(node_by_local_id, entity.id)
+
+      Focus.moments()
+      |> Enum.filter(&(&1.kind == :memory_entity))
+      |> Enum.reject(&MapSet.member?(current_ids, &1.id))
+      |> Enum.filter(&(Map.get(&1.metadata, :canonical) == entity.canonical))
+      |> Enum.flat_map(fn existing ->
+        if current do
+          [{current, :same_entity, existing, [weight: 1.0]}]
+        else
+          []
+        end
+      end)
     end)
   end
 

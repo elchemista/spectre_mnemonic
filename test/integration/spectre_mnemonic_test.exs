@@ -1090,6 +1090,322 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert recipe.metadata.decoder == :json
   end
 
+  test "remember extracts entity timeline facts and recalls what and when questions" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("Bob called Alice on 2026-05-10",
+               include_knowledge: false
+             )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_entity and &1.metadata.canonical == "bob")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_entity and &1.metadata.canonical == "alice")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_event and String.contains?(&1.text, "Bob called Alice"))
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-05-10")
+           )
+
+    relations = Enum.map(packet.associations, & &1.relation)
+    assert :mentions_entity in relations
+    assert :actor in relations
+    assert :acted_on in relations
+    assert :happened_at in relations
+    assert :observed_in in relations
+
+    assert {:ok, what_packet} =
+             SpectreMnemonic.recall("What did Bob do?",
+               include_knowledge: false,
+               limit: 20
+             )
+
+    assert Enum.any?(
+             what_packet.moments,
+             &(&1.kind == :memory_event and String.contains?(&1.text, "Bob called Alice"))
+           )
+
+    assert {:ok, when_packet} =
+             SpectreMnemonic.recall("When did Bob call Alice?",
+               include_knowledge: false,
+               limit: 20
+             )
+
+    assert Enum.any?(
+             when_packet.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-05-10")
+           )
+  end
+
+  test "remember extracts age and redacted phone values linked to an entity" do
+    phone = "+39 333 123 4567"
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("Bob is 42. Bob phone is #{phone}.",
+               include_knowledge: false
+             )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "age" and
+                 &1.metadata.value == "42")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "phone" and
+                 &1.metadata.display == "[redacted phone]" and is_nil(&1.metadata.value))
+           )
+
+    refute Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and String.contains?(&1.text, phone))
+           )
+
+    assert Enum.any?(packet.associations, &(&1.relation == :has_value))
+
+    assert {:ok, recall_packet} =
+             SpectreMnemonic.recall("Bob phone number",
+               include_knowledge: false,
+               limit: 20
+             )
+
+    assert Enum.any?(
+             recall_packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "phone")
+           )
+  end
+
+  test "entity extraction adapter supplies multilingual event relations" do
+    assert {:ok, spanish_packet} =
+             SpectreMnemonic.remember("Carlos llamó a Diana el 1 junio 2026",
+               entity_extraction_adapter: __MODULE__.MultilingualExtractionAdapter,
+               include_knowledge: false
+             )
+
+    assert Enum.any?(
+             spanish_packet.moments,
+             &(&1.kind == :memory_event and &1.metadata.language == "es")
+           )
+
+    assert {:ok, spanish_recall} =
+             SpectreMnemonic.recall("cuándo Carlos Diana",
+               include_knowledge: false,
+               limit: 20
+             )
+
+    assert Enum.any?(
+             spanish_recall.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-06-01")
+           )
+
+    assert {:ok, _french_packet} =
+             SpectreMnemonic.remember("Jean a appelé Marie le 2 juillet 2026",
+               entity_extraction_adapter: __MODULE__.MultilingualExtractionAdapter,
+               include_knowledge: false
+             )
+
+    assert {:ok, french_recall} =
+             SpectreMnemonic.recall("quand Jean Marie",
+               include_knowledge: false,
+               limit: 20
+             )
+
+    assert Enum.any?(
+             french_recall.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-07-02")
+           )
+  end
+
+  test "secret remember path does not create extracted value nodes" do
+    plaintext = "Bob phone +39 333 123 4567"
+
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(plaintext,
+               plugs: [__MODULE__.AlwaysSecretPlug],
+               secret_key: secret_key()
+             )
+
+    assert %Secret{} = packet.root
+    refute Enum.any?(SpectreMnemonic.Active.Focus.moments(), &(&1.kind == :memory_value))
+
+    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    rendered = inspect(records, limit: :infinity)
+    refute String.contains?(rendered, plaintext)
+    refute String.contains?(rendered, "+39 333 123 4567")
+  end
+
+  test "structured map extraction links entity dates and values without atomizing labels" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(%{
+               "name" => "Marta",
+               "age" => 33,
+               "phone" => "+39 345 111 2222",
+               "date" => "2026-08-03",
+               "metadata" => %{"source" => "crm"}
+             })
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_entity and &1.metadata.canonical == "marta")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-08-03" and
+                 &1.metadata.time_kind == "date")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "age" and
+                 &1.metadata.value == "33")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "phone" and
+                 &1.metadata.display == "[redacted phone]" and is_nil(&1.metadata.value))
+           )
+
+    refute Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and String.contains?(&1.text, "+39 345 111 2222"))
+           )
+  end
+
+  test "sensitive phone extraction supports raw and skip modes" do
+    phone = "+39 388 222 3333"
+
+    assert {:ok, raw_packet} =
+             SpectreMnemonic.remember("Nora phone is #{phone}",
+               sensitive_numbers: :raw,
+               include_knowledge: false
+             )
+
+    assert Enum.any?(
+             raw_packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "phone" and
+                 &1.metadata.value == phone and &1.metadata.display == phone)
+           )
+
+    SpectreMnemonic.MemoryCase.clear_memory()
+
+    assert {:ok, skip_packet} =
+             SpectreMnemonic.remember("Nora phone is #{phone}",
+               sensitive_numbers: :skip,
+               include_knowledge: false
+             )
+
+    refute Enum.any?(
+             skip_packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "phone")
+           )
+
+    refute Enum.any?(
+             skip_packet.moments,
+             &(&1.kind == :memory_value and String.contains?(&1.text, "388"))
+           )
+  end
+
+  test "same entity edges connect repeated entity observations across memories" do
+    assert {:ok, first_packet} =
+             SpectreMnemonic.remember("Bob called Alice on 2026-05-10",
+               include_knowledge: false
+             )
+
+    first_bob =
+      Enum.find(
+        first_packet.moments,
+        &(&1.kind == :memory_entity and &1.metadata.canonical == "bob")
+      )
+
+    assert {:ok, second_packet} =
+             SpectreMnemonic.remember("Bob completed Report on 2026-05-12",
+               include_knowledge: false
+             )
+
+    second_bob =
+      Enum.find(
+        second_packet.moments,
+        &(&1.kind == :memory_entity and &1.metadata.canonical == "bob")
+      )
+
+    assert first_bob
+    assert second_bob
+
+    assert Enum.any?(second_packet.associations, fn association ->
+             association.relation == :same_entity and
+               ((association.source_id == second_bob.id and association.target_id == first_bob.id) or
+                  (association.source_id == first_bob.id and
+                     association.target_id == second_bob.id))
+           end)
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("What did Bob do?",
+               include_knowledge: false,
+               limit: 30
+             )
+
+    event_texts =
+      packet.moments |> Enum.filter(&(&1.kind == :memory_event)) |> Enum.map(& &1.text)
+
+    assert Enum.any?(event_texts, &String.contains?(&1, "Bob called Alice"))
+    assert Enum.any?(event_texts, &String.contains?(&1, "Bob completed Report"))
+  end
+
+  test "adapter labels stay as strings and unknown relations fall back safely" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("Adapter relation probe",
+               entity_extraction_adapter: __MODULE__.ComplexExtractionAdapter,
+               include_knowledge: false
+             )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_entity and &1.metadata.entity_type == "project-person" and
+                 &1.metadata.language == "zz-new")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_value and &1.metadata.value_kind == "loyalty_number" and
+                 &1.metadata.value == "A-123")
+           )
+
+    assert Enum.any?(packet.associations, &(&1.relation == :has_value))
+    assert Enum.any?(packet.associations, &(&1.relation == :related_to))
+  end
+
+  test "invalid extraction adapter output is ignored without failing remember" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("Invalid adapter still remembers Zoe on 2026-09-01",
+               entity_extraction_adapter: __MODULE__.InvalidExtractionAdapter,
+               include_knowledge: false
+             )
+
+    assert packet.root.text =~ "Invalid adapter"
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_entity and &1.metadata.canonical == "zoe")
+           )
+
+    assert Enum.any?(
+             packet.moments,
+             &(&1.kind == :memory_time and &1.metadata.normalized_value == "2026-09-01")
+           )
+  end
+
   test "action runtime is disabled by default and delegates only when explicitly configured" do
     recipe = %ActionRecipe{
       id: "act_test",
@@ -1170,6 +1486,111 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     @impl true
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
+  end
+
+  defmodule MultilingualExtractionAdapter do
+    @behaviour SpectreMnemonic.Intake.Extraction.Adapter
+
+    @impl true
+    def extract(text, _opts) do
+      cond do
+        String.contains?(text, "Carlos") ->
+          {:ok,
+           %{
+             entities: [
+               %{id: "ent:carlos", name: "Carlos", canonical: "carlos", language: :es},
+               %{id: "ent:diana", name: "Diana", canonical: "diana", language: :es}
+             ],
+             times: [%{id: "time:carlos-call", text: "1 junio 2026", value: "2026-06-01"}],
+             events: [
+               %{
+                 id: "event:carlos-call",
+                 text: "Carlos llamó a Diana",
+                 action: "llamó",
+                 actor: "ent:carlos",
+                 acted_on: "ent:diana",
+                 time: "time:carlos-call",
+                 language: :es
+               }
+             ]
+           }}
+
+        String.contains?(text, "Jean") ->
+          {:ok,
+           %{
+             entities: [
+               %{id: "ent:jean", name: "Jean", canonical: "jean", language: :fr},
+               %{id: "ent:marie", name: "Marie", canonical: "marie", language: :fr}
+             ],
+             times: [%{id: "time:jean-call", text: "2 juillet 2026", value: "2026-07-02"}],
+             events: [
+               %{
+                 id: "event:jean-call",
+                 text: "Jean a appelé Marie",
+                 action: "appelé",
+                 actor: "ent:jean",
+                 acted_on: "ent:marie",
+                 time: "time:jean-call",
+                 language: :fr
+               }
+             ]
+           }}
+
+        true ->
+          {:ok, %{}}
+      end
+    end
+  end
+
+  defmodule ComplexExtractionAdapter do
+    @behaviour SpectreMnemonic.Intake.Extraction.Adapter
+
+    @impl true
+    def extract(_text, _opts) do
+      {:ok,
+       %{
+         entities: [
+           %{
+             id: "ent:quinn",
+             name: "Quinn",
+             canonical: "quinn",
+             type: "project-person",
+             language: "zz-new"
+           },
+           %{id: "ent:project", name: "ProjectX", canonical: "projectx"}
+         ],
+         values: [
+           %{
+             id: "value:loyalty",
+             kind: "loyalty_number",
+             value: "A-123",
+             display: "A-123",
+             entity: "ent:quinn"
+           }
+         ],
+         relations: [
+           %{
+             source: "ent:quinn",
+             relation: "has_value",
+             target: "value:loyalty",
+             weight: 0.91
+           },
+           %{
+             source: "ent:quinn",
+             relation: "invented_relation",
+             target: "ent:project",
+             weight: 0.5
+           }
+         ]
+       }}
+    end
+  end
+
+  defmodule InvalidExtractionAdapter do
+    @behaviour SpectreMnemonic.Intake.Extraction.Adapter
+
+    @impl true
+    def extract(_text, _opts), do: "definitely not a graph"
   end
 
   defmodule ConsolidationAdapter do

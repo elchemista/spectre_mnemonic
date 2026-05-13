@@ -162,7 +162,7 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
   defp verify_checksum(file, bytes, opts) do
     checksums = Keyword.get(opts, :checksums, %{})
 
-    case Map.get(checksums, file) || Map.get(checksums, String.to_atom(file)) do
+    case Map.get(checksums, file) || checksum_for_atom_key(checksums, file) do
       nil ->
         :ok
 
@@ -175,6 +175,17 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
           {:error, {:checksum_mismatch, file, expected, actual}}
         end
     end
+  end
+
+  @spec checksum_for_atom_key(map(), binary()) :: binary() | nil
+  defp checksum_for_atom_key(checksums, file) do
+    Enum.find_value(checksums, fn
+      {key, checksum} when is_atom(key) ->
+        if Atom.to_string(key) == file, do: checksum
+
+      _other ->
+        nil
+    end)
   end
 
   @spec checksums_ok?(Path.t(), keyword()) :: boolean()

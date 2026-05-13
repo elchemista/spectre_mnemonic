@@ -676,14 +676,14 @@ defmodule SpectreMnemonic.Active.Focus do
     input
     |> to_text()
     |> String.downcase()
-    |> String.split(~r/[^a-z0-9_]+/u, trim: true)
+    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
     |> Enum.reject(&(String.length(&1) < 3))
     |> Enum.uniq()
   end
 
   @spec entities(term()) :: [binary()]
   defp entities(input) do
-    Regex.scan(~r/\b[A-Z][A-Za-z0-9_]+\b/, to_text(input))
+    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, to_text(input))
     |> List.flatten()
     |> Enum.uniq()
   end
