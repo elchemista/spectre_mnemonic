@@ -10,7 +10,11 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Knowledge.{Consolidation, Record}
+  alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Manager
+
+  @tombstone_keys ~w(family id forgotten_at reason)a
+  @tombstone_key_by_string Map.new(@tombstone_keys, &{Atom.to_string(&1), &1})
 
   @doc "Starts the consolidator process."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -366,46 +370,28 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   defp append_tombstone(%{"family" => family, "id" => id} = tombstone)
        when is_binary(family) and is_binary(id) do
-    case persistent_family(family) do
-      nil ->
-        {:error, {:invalid_consolidation_tombstone_family, family}}
-
-      family ->
-        payload =
-          %{
-            family: family,
-            id: id,
-            metadata: Map.get(tombstone, "metadata", %{}),
-            forgotten_at: Map.get(tombstone, "forgotten_at", DateTime.utc_now())
-          }
-
-        Manager.append(:tombstones, payload)
+    case tombstone_payload(tombstone) do
+      {:ok, payload} -> Manager.append(:tombstones, payload)
+      :error -> {:error, {:invalid_consolidation_tombstone_family, family}}
     end
   end
 
   defp append_tombstone(other), do: {:error, {:invalid_consolidation_tombstone, other}}
 
-  @spec persistent_family(binary()) :: atom() | nil
-  defp persistent_family(family) do
-    Enum.find(persistent_families(), &(Atom.to_string(&1) == family))
-  end
+  @spec tombstone_payload(map()) :: {:ok, map()} | :error
+  defp tombstone_payload(tombstone) do
+    with {:ok, family} <- Family.from_string(Map.fetch!(tombstone, "family")) do
+      payload =
+        tombstone
+        |> Map.new(fn
+          {"family", _value} -> {:family, family}
+          {key, value} when is_binary(key) -> {Map.get(@tombstone_key_by_string, key, key), value}
+          other -> other
+        end)
+        |> Map.put_new(:forgotten_at, DateTime.utc_now())
 
-  @spec persistent_families :: [atom()]
-  defp persistent_families do
-    [
-      :signals,
-      :moments,
-      :summaries,
-      :categories,
-      :embeddings,
-      :associations,
-      :knowledge,
-      :consolidation_jobs,
-      :semantic_compaction_jobs,
-      :artifacts,
-      :action_recipes,
-      :tombstones
-    ]
+      {:ok, payload}
+    end
   end
 
   @spec value(map(), atom(), term()) :: term()

@@ -137,6 +137,20 @@ defmodule SpectreMnemonic do
   end
 
   @doc """
+  Learns a reusable skill directly into compact progressive knowledge.
+
+  Text input is normalized into a `:skill` event using the first non-empty line
+  as the name and bullet or numbered lines as steps. Structured maps or keyword
+  lists may provide `:name`, `:steps`, `:rules`, `:examples`, `:text`, and
+  `:metadata`.
+  """
+  @spec learn(input :: term(), opts :: keyword()) ::
+          {:ok, %{event: map(), seq: pos_integer()}} | {:error, term()}
+  def learn(input, opts \\ []) do
+    SpectreMnemonic.Knowledge.Learning.learn(input, opts)
+  end
+
+  @doc """
   Compacts active memory and existing `knowledge.smem` events.
 
   Applications can configure `:compact_adapter` or pass one in opts to use an

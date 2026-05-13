@@ -140,6 +140,90 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert length(SpectreMnemonic.Active.Focus.moments()) == before_count
   end
 
+  test "learn stores a text skill with bullet steps in compact knowledge" do
+    assert {:ok, %{event: event, seq: seq}} =
+             SpectreMnemonic.learn("""
+             Debug replay
+             - inspect segments
+             - check tombstones
+             """)
+
+    assert seq > 0
+    assert event.type == :skill
+    assert event.name == "Debug replay"
+    assert event.steps == ["inspect segments", "check tombstones"]
+    assert event.text =~ "Debug replay"
+    assert event.metadata.source == :learn
+
+    assert {:ok, knowledge} = SpectreMnemonic.load_knowledge()
+    assert Enum.any?(knowledge.skills, &(&1.name == "Debug replay"))
+  end
+
+  test "learn stores a plain paragraph skill with a single step" do
+    text = "Always inspect replay segments before compaction. Check tombstones after replay."
+
+    assert {:ok, %{event: event}} = SpectreMnemonic.learn(text)
+
+    assert event.name == "Always inspect replay segments before compaction."
+    assert event.steps == [text]
+    assert event.text == text
+  end
+
+  test "learn accepts structured skills with rules examples and metadata" do
+    assert {:ok, %{event: event}} =
+             SpectreMnemonic.learn(%{
+               name: "Review payment retries",
+               steps: ["inspect retry window", "check provider response"],
+               rules: ["never expose secret keys"],
+               examples: ["Stripe retry after timeout"],
+               metadata: %{domain: :payments}
+             })
+
+    assert event.name == "Review payment retries"
+    assert event.steps == ["inspect retry window", "check provider response"]
+    assert event.metadata.rules == ["never expose secret keys"]
+    assert event.metadata.examples == ["Stripe retry after timeout"]
+    assert event.metadata.domain == :payments
+  end
+
+  test "learned skills are searchable and included in recall knowledge" do
+    assert {:ok, _result} =
+             SpectreMnemonic.learn("""
+             Replay triage
+             - inspect segment checksums
+             - verify tombstone suppression
+             """)
+
+    assert {:ok, [result | _rest]} = SpectreMnemonic.search_knowledge("segment tombstone")
+    assert result.type == :skill
+    assert result.event.name == "Replay triage"
+
+    assert {:ok, packet} = SpectreMnemonic.recall("how to debug replay tombstones")
+    assert [%SpectreMnemonic.Knowledge.Record{} = knowledge] = packet.knowledge
+    assert Enum.any?(knowledge.skills, &(&1.name == "Replay triage"))
+  end
+
+  test "learn rejects empty and invalid skills" do
+    assert {:error, :empty_skill} = SpectreMnemonic.learn(" \n\t ")
+
+    assert {:error, {:invalid_skill, :missing_name}} =
+             SpectreMnemonic.learn(%{name: "", steps: ["do one thing"]})
+
+    assert {:error, {:invalid_skill, :missing_content}} =
+             SpectreMnemonic.learn(%{name: "Empty procedure", steps: []})
+
+    assert {:error, {:invalid_skill, :unsupported_input}} = SpectreMnemonic.learn([:not_keyword])
+  end
+
+  test "learn persists skill events in knowledge smem replay" do
+    assert {:ok, %{event: event}} =
+             SpectreMnemonic.learn("Cache diagnosis\n1. inspect cache headers\n2. compare etags")
+
+    assert {:ok, events} = SMEM.replay()
+    assert Enum.any?(events, &(&1.type == :skill and &1.id == event.id))
+    assert Enum.any?(events, &(&1.name == "Cache diagnosis"))
+  end
+
   test "old knowledge structs with text only still work" do
     knowledge = %SpectreMnemonic.Knowledge.Record{
       id: "know_old",

@@ -15,6 +15,9 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   alias SpectreMnemonic.Result
 
   @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
+  @event_type_by_string Map.new(@event_types, &{Atom.to_string(&1), &1})
+  @event_keys ~w(id type text summary name steps value source_id usage metadata inserted_at)a
+  @event_key_by_string Map.new(@event_keys, &{Atom.to_string(&1), &1})
 
   @type event_type ::
           :summary | :skill | :latest_ingestion | :fact | :procedure | :compaction_marker
@@ -279,37 +282,29 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @spec atomize_known_keys(map()) :: map()
   defp atomize_known_keys(map) do
-    known = ~w(id type text summary name steps value source_id usage metadata inserted_at)a
-
     Enum.reduce(map, %{}, fn {key, value}, acc ->
-      key =
-        if is_binary(key) do
-          Enum.find(known, &(Atom.to_string(&1) == key)) || key
-        else
-          key
-        end
-
-      Map.put(acc, key, value)
+      Map.put(acc, known_key(key), value)
     end)
   end
+
+  @spec known_key(term()) :: term()
+  defp known_key(key) when is_binary(key), do: Map.get(@event_key_by_string, key, key)
+  defp known_key(key), do: key
 
   @spec normalize_type(term()) :: event_type()
   defp normalize_type(type) when type in @event_types, do: type
 
   defp normalize_type(type) when is_binary(type) do
-    type
-    |> String.trim()
-    |> String.downcase()
-    |> String.replace("-", "_")
-    |> event_type_from_string()
+    normalized =
+      type
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace("-", "_")
+
+    Map.get(@event_type_by_string, normalized, :fact)
   end
 
   defp normalize_type(_type), do: :fact
-
-  @spec event_type_from_string(binary()) :: event_type()
-  defp event_type_from_string(type) do
-    Enum.find(@event_types, :fact, &(Atom.to_string(&1) == type))
-  end
 
   @spec compact_text(term()) :: binary() | nil
   defp compact_text(nil), do: nil

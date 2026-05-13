@@ -65,7 +65,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
       {:ok, events} = SMEM.replay(cfg)
       limit = Keyword.get(opts, :limit, 10)
       query = cue_text(cue)
-      query_terms = terms(query)
+      query_terms = query |> terms() |> MapSet.new()
 
       results =
         events
@@ -163,24 +163,22 @@ defmodule SpectreMnemonic.Knowledge.Base do
           {[map()], non_neg_integer()}
   defp take_budgeted(events, limit, budget) do
     events
-    |> Enum.reduce_while({[], 0}, fn event, {acc, used} ->
+    |> Enum.reduce_while({[], 0, 0}, fn event, {acc, used, count} ->
       encoded = :erlang.term_to_binary(event)
       size = byte_size(encoded)
 
       cond do
-        length(acc) >= limit ->
-          {:halt, {acc, used}}
-
-        used + size > budget and acc != [] ->
-          {:halt, {acc, used}}
+        count >= limit ->
+          {:halt, {acc, used, count}}
 
         used + size > budget ->
-          {:halt, {acc, used}}
+          {:halt, {acc, used, count}}
 
         true ->
-          {:cont, {acc ++ [event], used + size}}
+          {:cont, {[event | acc], used + size, count + 1}}
       end
     end)
+    |> then(fn {selected, used, _count} -> {Enum.reverse(selected), used} end)
   end
 
   @spec limit_for(atom(), keyword()) :: non_neg_integer()
@@ -226,11 +224,11 @@ defmodule SpectreMnemonic.Knowledge.Base do
     }
   end
 
-  @spec score_event(map(), [binary()], binary()) :: map()
+  @spec score_event(map(), MapSet.t(binary()), binary()) :: map()
   defp score_event(event, query_terms, query) do
     text = event_text(event)
-    event_terms = terms(text)
-    overlap = MapSet.size(MapSet.intersection(MapSet.new(query_terms), MapSet.new(event_terms)))
+    event_terms = text |> terms() |> MapSet.new()
+    overlap = MapSet.size(MapSet.intersection(query_terms, event_terms))
 
     phrase_bonus =
       if query != "" and String.contains?(String.downcase(text), query), do: 4, else: 0

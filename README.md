@@ -818,6 +818,36 @@ SpectreMnemonic.Knowledge.Base.append(%{
 })
 ```
 
+Agents can learn reusable skills directly with `SpectreMnemonic.learn/2`. This
+normalizes text or structured input into a compact `:skill` event and appends it
+to `knowledge.smem`:
+
+```elixir
+{:ok, learned} =
+  SpectreMnemonic.learn("""
+  Debug local replay
+  - inspect the active segment
+  - check tombstones
+  - compare replayed ids
+  """)
+
+learned.event.name
+learned.event.steps
+learned.seq
+```
+
+Structured skill input can include rules, examples, and metadata:
+
+```elixir
+SpectreMnemonic.learn(%{
+  name: "Review payment retries",
+  steps: ["inspect retry window", "check provider response"],
+  rules: ["never expose secret keys"],
+  examples: ["retry after a provider timeout"],
+  metadata: %{domain: :payments}
+})
+```
+
 Search the knowledge log without loading the whole packet:
 
 ```elixir

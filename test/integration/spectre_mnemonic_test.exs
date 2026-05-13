@@ -746,6 +746,32 @@ defmodule SpectreMnemonic.IntegrationTest do
     cleanup_tmp_dirs()
   end
 
+  test "model downloader accepts atom checksum keys without dynamic atom conversion" do
+    source_dir = tmp_dir("spectre-atom-checksum-source")
+    cache_root = tmp_dir("spectre-atom-checksum-cache")
+    write_model2vec_fixture(source_dir)
+
+    expected =
+      source_dir
+      |> Path.join("tokenizer.json")
+      |> File.read!()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    assert {:ok, model_dir} =
+             ModelDownloader.ensure_model(
+               model_id: "fixture/atom-checksum",
+               cache_dir: cache_root,
+               source_dir: source_dir,
+               download: true,
+               checksums: %{:"tokenizer.json" => expected}
+             )
+
+    assert File.regular?(Path.join(model_dir, "tokenizer.json"))
+  after
+    cleanup_tmp_dirs()
+  end
+
   test "model downloader fetches artifacts from an HTTP base url" do
     source_dir = tmp_dir("spectre-http-model-source")
     cache_root = tmp_dir("spectre-http-model-cache")

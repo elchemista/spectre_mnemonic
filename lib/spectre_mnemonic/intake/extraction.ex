@@ -133,10 +133,9 @@ defmodule SpectreMnemonic.Intake.Extraction do
     |> Enum.flat_map(fn {key, value} ->
       key = key_name(key)
 
-      cond do
-        key in ["name", "person", "entity", "actor"] and is_binary(value) -> [entity(value)]
-        true -> []
-      end
+      if key in ["name", "person", "entity", "actor"] and is_binary(value),
+        do: [entity(value)],
+        else: []
     end)
   end
 
@@ -175,13 +174,9 @@ defmodule SpectreMnemonic.Intake.Extraction do
     |> Enum.flat_map(fn {key, value} ->
       key = key_name(key)
 
-      cond do
-        key in ["date", "time", "when", "inserted_at"] and is_binary(value) ->
-          [time(value, value, :date)]
-
-        true ->
-          []
-      end
+      if key in ["date", "time", "when", "inserted_at"] and is_binary(value),
+        do: [time(value, value, :date)],
+        else: []
     end)
   end
 
@@ -265,8 +260,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
     @number_regex
     |> Regex.scan(text)
     |> List.flatten()
-    |> Enum.reject(&MapSet.member?(excluded, &1))
-    |> Enum.reject(&date_part?(text, &1))
+    |> Enum.reject(&(MapSet.member?(excluded, &1) or date_part?(text, &1)))
     |> Enum.map(&value(:number, &1, &1, entity: entity_ref))
   end
 
@@ -287,16 +281,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
           [value(key, to_string(value), to_string(value), entity: entity_ref)]
 
         key in ["phone", "telephone", "mobile"] and sensitive_numbers != :skip ->
-          raw = to_string(value)
-          display = if sensitive_numbers == :raw, do: raw, else: "[redacted phone]"
-
-          [
-            value(:phone, raw, display,
-              sensitive?: true,
-              raw_value?: sensitive_numbers == :raw,
-              entity: entity_ref
-            )
-          ]
+          [structured_phone_value(value, entity_ref, sensitive_numbers)]
 
         key == "email" ->
           [value(:email, to_string(value), to_string(value), entity: entity_ref)]
@@ -308,6 +293,18 @@ defmodule SpectreMnemonic.Intake.Extraction do
   end
 
   defp structured_values(_input, _sensitive_numbers), do: []
+
+  @spec structured_phone_value(term(), binary() | nil, atom()) :: map()
+  defp structured_phone_value(value, entity_ref, sensitive_numbers) do
+    raw = to_string(value)
+    display = if sensitive_numbers == :raw, do: raw, else: "[redacted phone]"
+
+    value(:phone, raw, display,
+      sensitive?: true,
+      raw_value?: sensitive_numbers == :raw,
+      entity: entity_ref
+    )
+  end
 
   @spec text_events(binary(), [map()]) :: [map()]
   defp text_events(text, times) do
@@ -603,15 +600,13 @@ defmodule SpectreMnemonic.Intake.Extraction do
     if String.contains?(text, phrase), do: phrase, else: "#{actor} #{action}"
   end
 
-  @spec flat_pairs(term()) :: [{term(), term()}]
+  @spec flat_pairs(map()) :: [{term(), term()}]
   defp flat_pairs(map) when is_map(map) do
     Enum.flat_map(map, fn
       {_key, nested} when is_map(nested) -> flat_pairs(nested)
       pair -> [pair]
     end)
   end
-
-  defp flat_pairs(_other), do: []
 
   @spec key_name(term()) :: binary()
   defp key_name(key), do: key |> to_string() |> String.downcase()
