@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   require Logger
 
+  alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Store.Record
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
 
@@ -554,9 +555,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
     do: semantic_record({family, payload})
 
   defp semantic_record(%{"family" => family, "payload" => payload}) when is_binary(family) do
-    case persistent_family(family) do
-      nil -> nil
-      family -> semantic_record({family, payload})
+    case Family.from_string(family) do
+      {:ok, family} -> semantic_record({family, payload})
+      :error -> nil
     end
   end
 
@@ -574,36 +575,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   defp semantic_tombstone(%{"family" => family, "id" => id})
        when is_binary(family) and is_binary(id) do
-    case persistent_family(family) do
-      nil -> nil
-      family -> semantic_tombstone({family, id})
+    case Family.from_string(family) do
+      {:ok, family} -> semantic_tombstone({family, id})
+      :error -> nil
     end
   end
 
   defp semantic_tombstone(_other), do: nil
-
-  @spec persistent_family(binary()) :: atom() | nil
-  defp persistent_family(family) do
-    Enum.find(persistent_families(), &(Atom.to_string(&1) == family))
-  end
-
-  @spec persistent_families :: [atom()]
-  defp persistent_families do
-    [
-      :signals,
-      :moments,
-      :summaries,
-      :categories,
-      :embeddings,
-      :associations,
-      :knowledge,
-      :consolidation_jobs,
-      :semantic_compaction_jobs,
-      :artifacts,
-      :action_recipes,
-      :tombstones
-    ]
-  end
 
   @spec replace_id_tombstones(map(), [Record.t()]) :: [term()]
   defp replace_id_tombstones(output, selected) do

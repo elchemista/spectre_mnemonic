@@ -246,6 +246,34 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert_receive {:fake_put, :semantic_replay, %Record{family: :tombstones}}
   end
 
+  test "semantic compaction skips unknown string families without creating atoms" do
+    source = record(:moments, %{id: "mom_source", attention: 4.0})
+
+    configure_stores([
+      [
+        id: :semantic_replay,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :semantic_replay,
+          capabilities: [:append, :replay],
+          frames: [source]
+        ]
+      ]
+    ])
+
+    assert {:ok, %{results: [{:semantic_replay, result}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: __MODULE__.UnknownFamilyAdapter
+             )
+
+    assert result.strategy == :custom
+    assert result.written == 0
+  end
+
   test "semantic compaction builds adapter input from replay_fold when available" do
     source = record(:moments, %{id: "mom_fold_source", attention: 5.0})
 
@@ -523,9 +551,23 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       {:ok,
        %{
          strategy: :adapter,
-         records: [{:knowledge, %{id: "know_compact", text: "compact #{source.payload.id}"}}],
+         records: [
+           %{
+             "family" => "knowledge",
+             "payload" => %{id: "know_compact", text: "compact #{source.payload.id}"}
+           }
+         ],
          replace_ids: [source.id]
        }}
+    end
+  end
+
+  defmodule UnknownFamilyAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+
+    @impl true
+    def compact(_input, _opts) do
+      {:ok, %{records: [%{"family" => "not_a_known_family", "payload" => %{id: "unsafe"}}]}}
     end
   end
 
