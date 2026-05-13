@@ -32,8 +32,13 @@ defmodule SpectreMnemonic do
 
   `remember/2` accepts text, prompts, chat, tasks, code strings, maps, lists, and
   JSON-looking strings as plain text. It builds active memory, summaries,
-  categories, and graph links. Durable promotion is handled by consolidation
-  unless `persist?: true` is passed.
+  categories, entity timeline nodes, and graph links. Durable promotion is
+  handled by consolidation unless `persist?: true` is passed.
+
+  Entity timeline extraction is on by default for public memory. Pass
+  `extract_entities?: false` to skip it, `entity_extraction_adapter: MyAdapter`
+  to add model-backed extraction, or `sensitive_numbers: :raw | :skip` to
+  change the default classified/redacted handling for phone-like numbers.
   """
   @spec remember(input :: term(), opts :: keyword()) ::
           {:ok, SpectreMnemonic.Intake.Packet.t()} | {:error, term()}
