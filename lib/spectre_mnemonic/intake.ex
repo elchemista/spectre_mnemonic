@@ -556,20 +556,21 @@ defmodule SpectreMnemonic.Intake do
     current_ids = MapSet.new(Enum.map(node_by_local_id, fn {_local_id, moment} -> moment.id end))
 
     Enum.flat_map(entities, fn entity ->
-      current = Map.get(node_by_local_id, entity.id)
-
-      Focus.moments()
-      |> Enum.filter(&(&1.kind == :memory_entity))
-      |> Enum.reject(&MapSet.member?(current_ids, &1.id))
-      |> Enum.filter(&(Map.get(&1.metadata, :canonical) == entity.canonical))
-      |> Enum.flat_map(fn existing ->
-        if current do
-          [{current, :same_entity, existing, [weight: 1.0]}]
-        else
-          []
-        end
-      end)
+      case Map.get(node_by_local_id, entity.id) do
+        nil -> []
+        current -> same_entity_edges_for(current, entity, current_ids)
+      end
     end)
+  end
+
+  @spec same_entity_edges_for(Moment.t(), map(), MapSet.t(binary())) ::
+          [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp same_entity_edges_for(current, entity, current_ids) do
+    Focus.moments()
+    |> Enum.filter(&(&1.kind == :memory_entity))
+    |> Enum.reject(&MapSet.member?(current_ids, &1.id))
+    |> Enum.filter(&(Map.get(&1.metadata, :canonical) == entity.canonical))
+    |> Enum.map(&{current, :same_entity, &1, [weight: 1.0]})
   end
 
   @spec link_graph(Moment.t(), [map()], [map()], [map()], keyword()) ::
