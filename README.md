@@ -92,6 +92,88 @@ memory.persistence
 edges immediately, but durable promotion is handled by
 `SpectreMnemonic.consolidate/1` unless you pass `persist?: true`.
 
+`remember/2` also extracts a lightweight entity timeline graph by default. It
+stores entity, event, time, and value nodes as normal moments, then links them
+with typed associations such as `:actor`, `:acted_on`, `:happened_at`,
+`:has_value`, `:mentions_entity`, `:observed_in`, and `:same_entity`:
+
+```elixir
+{:ok, packet} =
+  SpectreMnemonic.remember("Bob called Alice on 2026-05-10")
+
+Enum.filter(packet.moments, &(&1.kind in [:memory_entity, :memory_event, :memory_time]))
+```
+
+The deterministic extractor handles names, ISO/month dates, simple
+English/Italian actor-action-object events, emails, ages, numbers, and
+phone-like values. Phone-like values are classified and redacted by default.
+Pass `sensitive_numbers: :raw` to store raw values or `sensitive_numbers: :skip`
+to avoid extracting them. Pass `extract_entities?: false` to disable this graph.
+
+For richer multilingual extraction, configure or pass an adapter:
+
+```elixir
+config :spectre_mnemonic,
+  entity_extraction_adapter: MyApp.MemoryExtractor
+```
+
+An LLM-backed adapter can ask a model to return a small JSON graph and then
+normalize that JSON into the adapter contract:
+
+```elixir
+defmodule MyApp.LLMEntityExtractor do
+  @behaviour SpectreMnemonic.Intake.Extraction.Adapter
+
+  @impl true
+  def extract(text, _opts) do
+    prompt = """
+    Extract memory graph facts from the text.
+    Return JSON with entities, events, times, values, and relations.
+    Keep ids stable inside this response.
+
+    Text:
+    #{text}
+    """
+
+    with {:ok, json} <- MyApp.LLM.complete_json(prompt),
+         {:ok, graph} <- Jason.decode(json) do
+      {:ok, graph}
+    end
+  end
+end
+```
+
+A local classifier can also enrich deterministic extraction. For example, a
+ModernBERT-style classifier can tag entity types or relation confidence without
+owning the whole extraction process:
+
+```elixir
+defmodule MyApp.MemoryExtractor do
+  @behaviour SpectreMnemonic.Intake.Extraction.Adapter
+
+  @impl true
+  def extract(text, _opts) do
+    entity_type = MyApp.ModernBERT.classify(text, labels: ["person", "organization", "place"])
+
+    {:ok,
+     %{
+       entities: [
+         %{
+           id: "ent:bob",
+           name: "Bob",
+           type: entity_type.label,
+           confidence: entity_type.score
+         }
+       ],
+       times: [%{id: "time:call", value: "2026-05-10"}],
+       events: [
+         %{id: "event:call", text: "Bob called Alice", actor: "ent:bob", time: "time:call"}
+       ]
+     }}
+  end
+end
+```
+
 JSON-looking strings are treated as text. If another library parses JSON, PDF,
 DOCX, HTML, or code into maps/lists/text first, pass that parsed result to
 `remember/2`.
