@@ -1,7 +1,11 @@
 Code.require_file("models.ex", __DIR__)
 
 alias ParallelMemoryExample.Parser
+alias SpectreMnemonic.ConsolidationScheduler
+alias SpectreMnemonic.Durable.Index, as: DurableIndex
 alias SpectreMnemonic.Embedding.Vector
+alias SpectreMnemonic.Evaluation
+alias SpectreMnemonic.Governance
 alias SpectreMnemonic.Knowledge.Base
 alias SpectreMnemonic.Persistence.Manager
 alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
@@ -24,10 +28,10 @@ write_tiny_model = fn model_dir ->
 
   vocab_words =
     ~w(
-      active adapter alerts apis append application artifact assistant chat compact config database
+      active adapter alerts apis append application artifact assistant chat compact config contradicted database
       decisions demo durable embedding error ets event events example file focus hot ingestion
-      code examples library local memory metadata model moments parallel parser planning public query
-      recall records replay research root save search signal signatures snapshots spectremnemonic storage
+      code examples governance hybrid library local memory metadata model moments parallel parser pinned planning promoted public query
+      recall records replay research root save search signal signatures snapshots spectremnemonic stale states storage
       store streams task tasks test tokenizer tool untouched user vectors working
     )
 
@@ -114,6 +118,13 @@ Application.put_env(:spectre_mnemonic, :embedding,
     dimensions: 4,
     signature_bits: 8
   ]
+)
+
+Application.put_env(:spectre_mnemonic, :consolidation_scheduler,
+  enabled: false,
+  interval_ms: 300_000,
+  mode: :all,
+  min_attention: 1.0
 )
 
 demo_embedding = SpectreMnemonic.Embedding.Service.embed("parallel durable replay task", [])
@@ -242,6 +253,52 @@ remembered_moments
 |> Enum.each(fn {kind, items} ->
   log.("summary", "#{kind}: #{length(items)}")
 end)
+
+log.("governance", "Recording governed facts and lifecycle states")
+
+{:ok, %{moment: old_email}} =
+  SpectreMnemonic.signal("Alice email is alice.old@example.com",
+    stream: :chat,
+    kind: :personal_fact,
+    persist?: true
+  )
+
+{:ok, %{moment: new_email}} =
+  SpectreMnemonic.signal("Alice email is alice.new@example.com",
+    stream: :chat,
+    kind: :personal_fact,
+    persist?: true
+  )
+
+{:ok, %{moment: pinned}} =
+  SpectreMnemonic.signal("PinnedAtlas status is stable for durable hybrid ranking",
+    stream: :research,
+    kind: :status_fact,
+    persist?: true,
+    memory_state: :pinned
+  )
+
+{:ok, %{moment: stale}} =
+  SpectreMnemonic.signal("StaleAtlas status is waiting for re-verification",
+    stream: :research,
+    kind: :status_fact,
+    persist?: true
+  )
+
+Governance.append_state(stale.id, :stale, :example)
+DurableIndex.rebuild()
+
+log.(
+  "governance",
+  "old=#{old_email.id}/#{Governance.state_for(old_email.id)} new=#{new_email.id}/#{Governance.state_for(new_email.id)} pinned=#{pinned.id}/#{Governance.state_for(pinned.id)} stale=#{stale.id}/#{Governance.state_for(stale.id)}"
+)
+
+{:ok, governed_results} = SpectreMnemonic.search("Alice email alice.old@example.com", limit: 6)
+
+log.(
+  "governance",
+  "search hides contradicted old fact? old_visible=#{Enum.any?(governed_results, &(&1.id == old_email.id))} new_visible=#{Enum.any?(governed_results, &(&1.id == new_email.id))}"
+)
 
 artifact_path = Path.join([data_root, "artifacts", "parallel-memory-session-report.txt"])
 
@@ -458,6 +515,18 @@ end)
 
 log.("done", "Search returned #{length(search_results)} active/durable result entries")
 
+log.("hybrid", "Running durable hybrid search with lifecycle ranking")
+{:ok, hybrid_results} = SpectreMnemonic.search("PinnedAtlas stable durable ranking", limit: 5)
+
+Enum.each(hybrid_results, fn result ->
+  log.(
+    "hybrid",
+    "source=#{Map.get(result, :source, "-")} family=#{Map.get(result, :family, "-")} state=#{Map.get(result, :state, "-")} score=#{Float.round(Map.get(result, :score, 0.0) * 1.0, 3)} #{preview.(Map.get(result, :text, inspect(result)))}"
+  )
+end)
+
+log.("scheduler", "Scheduler is opt-in; current status #{inspect(ConsolidationScheduler.status())}")
+
 log.("compact", "Running semantic persistent memory compaction")
 {:ok, semantic_compact_results} = Manager.compact(mode: :semantic)
 
@@ -501,3 +570,11 @@ log.("files", "Persistent memory files now on disk")
 
   log.("files", "#{relative_path} size=#{size}")
 end)
+
+log.("eval", "Running small built-in evaluation harness")
+eval = Evaluation.run(size: 6)
+
+log.(
+  "eval",
+  "size=#{eval.size} recall_accuracy=#{Float.round(eval.recall_accuracy, 3)} exact_fact_recall=#{Float.round(eval.exact_fact_recall, 3)} latency_ms=#{eval.latency_ms}"
+)
