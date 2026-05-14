@@ -9,6 +9,7 @@ defmodule SpectreMnemonic.Persistence.Family do
     :embeddings,
     :associations,
     :knowledge,
+    :memory_states,
     :consolidation_jobs,
     :semantic_compaction_jobs,
     :artifacts,

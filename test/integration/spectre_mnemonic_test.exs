@@ -2,10 +2,20 @@ defmodule SpectreMnemonic.IntegrationTest do
   use SpectreMnemonic.MemoryCase
 
   alias SpectreMnemonic.Actions.Runtime
+  alias SpectreMnemonic.Active.Focus
+
+  alias SpectreMnemonic.Embedding.{
+    BinaryQuantizer,
+    Model2VecStatic,
+    ModelDownloader,
+    Service,
+    Vector
+  }
+
   alias SpectreMnemonic.Intake.Packet
-  alias SpectreMnemonic.Knowledge.Consolidation
+  alias SpectreMnemonic.Knowledge.{Consolidation, Record}
   alias SpectreMnemonic.Memory.{ActionRecipe, Moment, Secret, Signal}
-  alias SpectreMnemonic.Embedding.{BinaryQuantizer, Model2VecStatic, ModelDownloader, Vector}
+  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Secrets.Crypto.AESGCM
 
@@ -200,7 +210,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert is_binary(secret.ciphertext)
     refute secret.ciphertext == plaintext
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     rendered = inspect(records, limit: :infinity)
     refute String.contains?(rendered, plaintext)
     assert String.contains?(rendered, "secret: github token")
@@ -344,7 +354,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert secret.metadata.secret? == true
     refute secret.ciphertext == plaintext
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     rendered = inspect(records, limit: :infinity)
 
     refute String.contains?(rendered, plaintext)
@@ -662,7 +672,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     {:ok, %{moment: match}} = SpectreMnemonic.signal("vector apple memory")
     {:ok, %{moment: miss}} = SpectreMnemonic.signal("vector orange memory")
 
-    embedding = SpectreMnemonic.Embedding.Service.embed("apple query", [])
+    embedding = Service.embed("apple query", [])
     cue = %{vector: embedding.vector, binary_signature: embedding.binary_signature}
 
     assert {:ok, [first | rest]} = Index.query(cue, overfetch: 2)
@@ -858,7 +868,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert {:ok, knowledge} = SpectreMnemonic.consolidate(min_attention: 1.0)
     assert Enum.any?(knowledge, &(&1.source_id == packet.root.id))
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     assert Enum.any?(records, &(&1.family == :summaries))
     assert Enum.any?(records, &(&1.family == :categories))
 
@@ -882,7 +892,7 @@ defmodule SpectreMnemonic.IntegrationTest do
         context.moments
         |> Enum.filter(&(&1.id == packet.root.id))
         |> Enum.map(fn moment ->
-          %SpectreMnemonic.Knowledge.Record{
+          %Record{
             id: "runtime_#{moment.id}",
             source_id: moment.id,
             text: "runtime #{moment.text}",
@@ -940,7 +950,7 @@ defmodule SpectreMnemonic.IntegrationTest do
 
       knowledge =
         Enum.map(consolidation.windows, fn window ->
-          %SpectreMnemonic.Knowledge.Record{
+          %Record{
             id: "window_knowledge_#{window.id}",
             source_id: hd(window.moment_ids),
             text: "window #{window.id} #{Enum.join(window.moment_ids, ",")}",
@@ -979,7 +989,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert connected.task_ids == ["window-a"]
     assert singleton.task_ids == ["window-b"]
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     assert Enum.any?(records, &(&1.family == :custom_consolidation))
     assert Enum.any?(records, &(&1.family == :tombstones and &1.payload.id == solo.id))
 
@@ -1050,7 +1060,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert Enum.any?(knowledge, &(&1.source_id == secret.id))
     assert Enum.all?(knowledge, &(not String.contains?(&1.text, plaintext)))
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     rendered = inspect(records, limit: :infinity)
     refute String.contains?(rendered, plaintext)
     assert String.contains?(rendered, "secret: consolidation token")
@@ -1095,7 +1105,7 @@ defmodule SpectreMnemonic.IntegrationTest do
                }
              )
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     assert Enum.any?(records, &(&1.family == :action_recipes and &1.payload.id == recipe.id))
     assert Enum.any?(records, &(&1.family == :associations and &1.payload.target_id == recipe.id))
   end
@@ -1262,9 +1272,9 @@ defmodule SpectreMnemonic.IntegrationTest do
              )
 
     assert %Secret{} = packet.root
-    refute Enum.any?(SpectreMnemonic.Active.Focus.moments(), &(&1.kind == :memory_value))
+    refute Enum.any?(Focus.moments(), &(&1.kind == :memory_value))
 
-    assert {:ok, records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, records} = Manager.replay()
     rendered = inspect(records, limit: :infinity)
     refute String.contains?(rendered, plaintext)
     refute String.contains?(rendered, "+39 333 123 4567")
@@ -1466,7 +1476,7 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert {:ok, packet} = SpectreMnemonic.recall("calendar json")
     assert Enum.any?(packet.action_recipes, &(&1.id == recipe.id))
-    assert {:ok, _records} = SpectreMnemonic.Persistence.Manager.replay()
+    assert {:ok, _records} = Manager.replay()
     assert {:ok, _results} = SpectreMnemonic.search("calendar json")
   after
     Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
@@ -1632,7 +1642,7 @@ defmodule SpectreMnemonic.IntegrationTest do
 
       knowledge =
         Enum.map(context.moments, fn moment ->
-          %SpectreMnemonic.Knowledge.Record{
+          %Record{
             id: "adapter_#{moment.id}",
             source_id: moment.id,
             text: "adapter #{moment.text}",

@@ -1,7 +1,8 @@
 defmodule SpectreMnemonic.Knowledge.SMEMTest do
   use SpectreMnemonic.MemoryCase
 
-  alias SpectreMnemonic.Knowledge.SMEM
+  alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Knowledge.{Record, SMEM}
 
   test "knowledge smem appends and replays compact events" do
     assert {:ok, first_seq} =
@@ -76,7 +77,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     {:ok, _} =
       SMEM.append(%{type: :skill, name: "sqlite-debug", steps: ["inspect jobs"]})
 
-    before_count = length(SpectreMnemonic.Active.Focus.moments())
+    before_count = length(Focus.moments())
 
     assert {:ok, [result | rest]} = SpectreMnemonic.search_knowledge("postgres vector", limit: 2)
 
@@ -84,7 +85,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert result.event.text =~ "Postgres"
     assert result.score > 0
     assert length(rest) <= 1
-    assert length(SpectreMnemonic.Active.Focus.moments()) == before_count
+    assert length(Focus.moments()) == before_count
   end
 
   test "default compaction writes compact replacement events without markdown files" do
@@ -128,16 +129,16 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     {:ok, _} = SMEM.append(%{type: :fact, text: "durable compact fact"})
     {:ok, %{moment: moment}} = SpectreMnemonic.signal("active recall anchor")
 
-    before_count = length(SpectreMnemonic.Active.Focus.moments())
+    before_count = length(Focus.moments())
 
     assert {:ok, packet} = SpectreMnemonic.recall("active recall anchor")
 
     assert Enum.any?(packet.moments, &(&1.id == moment.id))
 
-    assert [%SpectreMnemonic.Knowledge.Record{summary: "Recall should attach this"}] =
+    assert [%Record{summary: "Recall should attach this"}] =
              packet.knowledge
 
-    assert length(SpectreMnemonic.Active.Focus.moments()) == before_count
+    assert length(Focus.moments()) == before_count
   end
 
   test "learn stores a text skill with bullet steps in compact knowledge" do
@@ -199,7 +200,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert result.event.name == "Replay triage"
 
     assert {:ok, packet} = SpectreMnemonic.recall("how to debug replay tombstones")
-    assert [%SpectreMnemonic.Knowledge.Record{} = knowledge] = packet.knowledge
+    assert [%Record{} = knowledge] = packet.knowledge
     assert Enum.any?(knowledge.skills, &(&1.name == "Replay triage"))
   end
 
@@ -225,7 +226,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
   end
 
   test "old knowledge structs with text only still work" do
-    knowledge = %SpectreMnemonic.Knowledge.Record{
+    knowledge = %Record{
       id: "know_old",
       source_id: "mom_1",
       text: "old durable knowledge"

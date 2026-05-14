@@ -9,6 +9,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Knowledge.{Consolidation, Record}
   alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Manager
@@ -32,7 +33,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   """
   @spec consolidate(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
-    GenServer.call(__MODULE__, {:consolidate, opts})
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
   end
 
   @impl true
@@ -189,6 +191,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
          :ok <- persist_adapter_records(consolidation.records),
          :ok <- persist_tombstones(consolidation.tombstones),
          {:ok, _result} <- Manager.append(:consolidation_jobs, consolidation_job(consolidation)) do
+      Governance.promote_moments(consolidation.moments)
       :ok
     end
   end
@@ -282,7 +285,15 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       vector: moment.vector,
       binary_signature: moment.binary_signature,
       embedding: moment.embedding,
-      metadata: %{stream: moment.stream, task_id: moment.task_id, kind: moment.kind},
+      metadata:
+        Governance.with_provenance(
+          %{stream: moment.stream, task_id: moment.task_id, kind: moment.kind},
+          source_ids: [moment.id],
+          provider: :consolidator,
+          confidence: Map.get(moment.metadata, :confidence, 1.0),
+          observed_at: now,
+          last_verified_at: now
+        ),
       inserted_at: now
     }
   end

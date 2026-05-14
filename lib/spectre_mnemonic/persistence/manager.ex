@@ -11,9 +11,10 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   require Logger
 
+  alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Persistence.Family
-  alias SpectreMnemonic.Persistence.Store.Record
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
+  alias SpectreMnemonic.Persistence.Store.Record
 
   @default_store_id :local_file
   @type store :: %{
@@ -131,13 +132,14 @@ defmodule SpectreMnemonic.Persistence.Manager do
   end
 
   def handle_call({:search, cue, opts}, _from, state) do
-    results =
+    adapter_results =
       opts
       |> effective_config()
       |> searchable_stores()
       |> Enum.flat_map(&search_store(&1, cue))
 
-    {:reply, {:ok, results}, state}
+    {:reply, {:ok, merge_search_results(durable_index_results(cue, opts), adapter_results)},
+     state}
   end
 
   def handle_call({:compact, opts}, _from, state) do
@@ -171,8 +173,12 @@ defmodule SpectreMnemonic.Persistence.Manager do
     results = Enum.map(stores, &write_store(&1, record))
 
     case evaluate_results(cfg, stores, results) do
-      :ok -> {:ok, %{record: record, stores: results}}
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        DurableIndex.upsert(record)
+        {:ok, %{record: record, stores: results}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -215,7 +221,14 @@ defmodule SpectreMnemonic.Persistence.Manager do
       read_mode: :smart,
       failure_mode: :best_effort,
       compact_mode: :physical,
-      semantic_compact_families: [:moments, :knowledge, :summaries, :categories, :associations],
+      semantic_compact_families: [
+        :moments,
+        :knowledge,
+        :summaries,
+        :categories,
+        :associations,
+        :memory_states
+      ],
       semantic_compact_limit: 1_000,
       stores: [
         [
@@ -835,6 +848,23 @@ defmodule SpectreMnemonic.Persistence.Manager do
     else
       []
     end
+  end
+
+  @spec durable_index_results(term(), keyword()) :: [map()]
+  defp durable_index_results(cue, opts) do
+    {:ok, results} = DurableIndex.search(cue, opts)
+    results
+  end
+
+  @spec merge_search_results([map()], [map()]) :: [map()]
+  defp merge_search_results(index_results, adapter_results) do
+    (index_results ++ adapter_results)
+    |> Enum.uniq_by(fn result ->
+      {Map.get(result, :source), Map.get(result, :family), Map.get(result, :id)}
+    end)
+    |> Enum.sort_by(fn result ->
+      {-Map.get(result, :score, 0), Map.get(result, :id, "")}
+    end)
   end
 
   @spec tag_search_result(term(), term()) :: map()
