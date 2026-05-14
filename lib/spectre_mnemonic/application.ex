@@ -15,13 +15,15 @@ defmodule SpectreMnemonic.Application do
     children = [
       SpectreMnemonic.Active.ETSOwner,
       SpectreMnemonic.Persistence.Manager,
+      SpectreMnemonic.Durable.Index,
       {Registry, keys: :unique, name: SpectreMnemonic.Active.StreamRegistry},
       SpectreMnemonic.Active.StreamSupervisor,
       SpectreMnemonic.Active.Router,
       SpectreMnemonic.Recall.Index,
       SpectreMnemonic.Active.Focus,
       SpectreMnemonic.Recall.Engine,
-      SpectreMnemonic.Knowledge.Consolidator
+      SpectreMnemonic.Knowledge.Consolidator,
+      SpectreMnemonic.ConsolidationScheduler
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: SpectreMnemonic.Supervisor)

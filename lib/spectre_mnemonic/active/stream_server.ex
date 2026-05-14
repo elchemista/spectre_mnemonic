@@ -9,6 +9,8 @@ defmodule SpectreMnemonic.Active.StreamServer do
 
   use GenServer
 
+  alias SpectreMnemonic.Active.{Focus, StreamRegistry}
+
   @type state :: %{stream: term()}
 
   @doc "Starts a stream server registered by stream name."
@@ -40,11 +42,11 @@ defmodule SpectreMnemonic.Active.StreamServer do
           {:reply, {:ok, map()} | {:error, term()}, state()}
   def handle_call({:signal, input, opts}, _from, %{stream: stream} = state) do
     opts = Keyword.put(opts, :stream, stream)
-    {:reply, SpectreMnemonic.Active.Focus.record_signal(input, opts), state}
+    {:reply, Focus.record_signal(input, opts), state}
   end
 
-  @spec via(stream :: term()) :: {:via, Registry, {SpectreMnemonic.Active.StreamRegistry, term()}}
+  @spec via(stream :: term()) :: {:via, Registry, {StreamRegistry, term()}}
   defp via(stream) do
-    {:via, Registry, {SpectreMnemonic.Active.StreamRegistry, stream}}
+    {:via, Registry, {StreamRegistry, stream}}
   end
 end

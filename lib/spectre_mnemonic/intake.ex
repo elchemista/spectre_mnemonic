@@ -6,8 +6,8 @@ defmodule SpectreMnemonic.Intake do
   creates active memory moments, and wires those moments into a graph.
   """
 
-  alias SpectreMnemonic.Intake.{Extraction, Memory, Packet, PlugPipeline}
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Intake.{Extraction, Memory, Packet, PlugPipeline}
   alias SpectreMnemonic.Memory.{Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Result
 
@@ -143,7 +143,7 @@ defmodule SpectreMnemonic.Intake do
 
   @spec attach_recent_moments(Memory.t()) :: Memory.t()
   defp attach_recent_moments(%Memory{} = memory) do
-    recent = SpectreMnemonic.Active.Focus.recent_moments(memory.stream, memory.task_id, 12)
+    recent = Focus.recent_moments(memory.stream, memory.task_id, 12)
     %{memory | recent_moments: recent}
   end
 

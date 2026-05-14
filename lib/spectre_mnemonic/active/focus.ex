@@ -10,8 +10,11 @@ defmodule SpectreMnemonic.Active.Focus do
   use GenServer
 
   alias SpectreMnemonic.Active.ETSOwner
+  alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret, Signal}
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Secrets
 
@@ -221,6 +224,7 @@ defmodule SpectreMnemonic.Active.Focus do
     with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
          {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
          {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
+      maybe_observe_moment(moment, opts)
       Index.upsert(moment)
       {:ok, record_signal_result(signal, moment, action_recipe)}
     else
@@ -259,6 +263,7 @@ defmodule SpectreMnemonic.Active.Focus do
       with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
            {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
            {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
+        maybe_observe_moment(moment, opts)
         Index.upsert(moment)
         {:ok, record_signal_result(signal, moment, action_recipe)}
       end
@@ -299,7 +304,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec build_moment(Signal.t(), keyword(), DateTime.t()) :: Moment.t()
   defp build_moment(signal, opts, now) do
-    embedding = SpectreMnemonic.Embedding.Service.embed(signal.input, opts)
+    embedding = Service.embed(signal.input, opts)
 
     %Moment{
       id: id("mom"),
@@ -316,7 +321,13 @@ defmodule SpectreMnemonic.Active.Focus do
       entities: entities(signal.input),
       fingerprint: fingerprint(signal.input),
       attention: Keyword.get(opts, :attention, @default_attention),
-      metadata: signal.metadata,
+      metadata:
+        Governance.with_provenance(signal.metadata,
+          source_ids: [signal.id],
+          provider: :active_focus,
+          confidence: Keyword.get(opts, :confidence, 1.0),
+          observed_at: now
+        ),
       inserted_at: now
     }
   end
@@ -336,7 +347,7 @@ defmodule SpectreMnemonic.Active.Focus do
     }
 
     with {:ok, encrypted} <- Secrets.encrypt(plaintext, context, opts) do
-      embedding = SpectreMnemonic.Embedding.Service.embed(redacted, secret_embedding_opts(opts))
+      embedding = Service.embed(redacted, secret_embedding_opts(opts))
 
       {:ok,
        %Secret{
@@ -364,7 +375,13 @@ defmodule SpectreMnemonic.Active.Focus do
          tag: Map.fetch!(encrypted, :tag),
          aad: Map.fetch!(encrypted, :aad),
          reveal: Secrets.reveal_instruction(),
-         metadata: signal.metadata,
+         metadata:
+           Governance.with_provenance(signal.metadata,
+             source_ids: [signal.id],
+             provider: :active_focus,
+             confidence: Keyword.get(opts, :confidence, 1.0),
+             observed_at: now
+           ),
          inserted_at: now
        }}
     end
@@ -532,6 +549,15 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
+  @spec maybe_observe_moment(Moment.t() | Secret.t(), keyword()) :: :ok
+  defp maybe_observe_moment(moment, opts) do
+    if Keyword.get(opts, :persist?, true) do
+      Governance.observe_moment(moment, opts)
+    end
+
+    :ok
+  end
+
   @spec insert_moment(Moment.t() | Secret.t()) :: true
   defp insert_moment(moment) do
     :ets.insert(:mnemonic_moments, {moment.id, moment})
@@ -568,6 +594,8 @@ defmodule SpectreMnemonic.Active.Focus do
       id: id,
       forgotten_at: DateTime.utc_now()
     })
+
+    Governance.forget(id)
 
     :ok
   end
@@ -690,7 +718,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec fingerprint(term()) :: non_neg_integer()
   defp fingerprint(input) do
-    SpectreMnemonic.Recall.Fingerprint.build(input)
+    Fingerprint.build(input)
   end
 
   @spec id(binary()) :: binary()

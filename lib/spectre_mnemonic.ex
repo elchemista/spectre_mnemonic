@@ -9,6 +9,15 @@ defmodule SpectreMnemonic do
   Spectre Mnemonic is a living focus that slowly becomes organized memory.
   """
 
+  alias SpectreMnemonic.Active.{Focus, Router}
+  alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Intake
+  alias SpectreMnemonic.Knowledge.{Base, Compact, Consolidator, Learning, Record}
+  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Secret}
+  alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Recall.{Engine, Packet}
+  alias SpectreMnemonic.Secrets
+
   @doc """
   Records a new signal and routes it into a stream.
 
@@ -21,10 +30,10 @@ defmodule SpectreMnemonic do
     * `:action_recipe` - English-like Action Language text or map stored as data
   """
   @spec signal(input :: term(), opts :: keyword()) ::
-          {:ok, SpectreMnemonic.Active.Focus.record_result()}
+          {:ok, Focus.record_result()}
           | {:error, term()}
   def signal(input, opts \\ []) do
-    SpectreMnemonic.Active.Router.signal(input, opts)
+    Router.signal(input, opts)
   end
 
   @doc """
@@ -41,9 +50,9 @@ defmodule SpectreMnemonic do
   change the default classified/redacted handling for phone-like numbers.
   """
   @spec remember(input :: term(), opts :: keyword()) ::
-          {:ok, SpectreMnemonic.Intake.Packet.t()} | {:error, term()}
+          {:ok, Intake.Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
-    SpectreMnemonic.Intake.remember(input, opts)
+    Intake.remember(input, opts)
   end
 
   @doc """
@@ -53,9 +62,9 @@ defmodule SpectreMnemonic do
   hamming, vector, and graph hints when available.
   """
   @spec recall(cue :: term(), opts :: keyword()) ::
-          {:ok, SpectreMnemonic.Recall.Packet.t()} | {:error, term()}
+          {:ok, Packet.t()} | {:error, term()}
   def recall(cue, opts \\ []) do
-    SpectreMnemonic.Recall.Engine.recall(cue, opts)
+    Engine.recall(cue, opts)
   end
 
   @doc """
@@ -66,10 +75,9 @@ defmodule SpectreMnemonic do
   `:secret_key_fun`, or custom crypto adapter used for storage must be available
   to decrypt the secret.
   """
-  @spec reveal(SpectreMnemonic.Memory.Secret.t(), keyword()) ::
-          {:ok, SpectreMnemonic.Memory.Secret.t()} | {:error, term()}
+  @spec reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
   def reveal(secret, opts \\ []) do
-    SpectreMnemonic.Secrets.reveal(secret, opts)
+    Secrets.reveal(secret, opts)
   end
 
   @doc """
@@ -81,9 +89,10 @@ defmodule SpectreMnemonic do
   @spec search(cue :: term(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
   def search(cue, opts \\ []) do
     with {:ok, packet} <- recall(cue, opts),
-         {:ok, durable_results} <- SpectreMnemonic.Persistence.Manager.search(cue, opts) do
+         {:ok, durable_results} <- Manager.search(cue, opts) do
       active_results =
         packet.moments
+        |> Enum.filter(&Governance.search_visible?(&1.id, opts))
         |> Enum.with_index()
         |> Enum.map(fn {moment, index} ->
           %{
@@ -112,15 +121,15 @@ defmodule SpectreMnemonic do
   The loader is budgeted: it returns a compact `%SpectreMnemonic.Knowledge.Record{}`
   packet instead of hydrating the whole event log into active ETS memory.
   """
-  @spec knowledge(keyword()) :: {:ok, SpectreMnemonic.Knowledge.Record.t()}
+  @spec knowledge(keyword()) :: {:ok, Record.t()}
   def knowledge(opts \\ []) do
-    SpectreMnemonic.Knowledge.Base.load(opts)
+    Base.load(opts)
   end
 
   @doc """
   Alias for `knowledge/1`.
   """
-  @spec load_knowledge(keyword()) :: {:ok, SpectreMnemonic.Knowledge.Record.t()}
+  @spec load_knowledge(keyword()) :: {:ok, Record.t()}
   def load_knowledge(opts \\ []) do
     knowledge(opts)
   end
@@ -133,7 +142,7 @@ defmodule SpectreMnemonic do
   """
   @spec search_knowledge(cue :: term(), opts :: keyword()) :: {:ok, [map()]}
   def search_knowledge(cue, opts \\ []) do
-    SpectreMnemonic.Knowledge.Base.search(cue, opts)
+    Base.search(cue, opts)
   end
 
   @doc """
@@ -147,7 +156,7 @@ defmodule SpectreMnemonic do
   @spec learn(input :: term(), opts :: keyword()) ::
           {:ok, %{event: map(), seq: pos_integer()}} | {:error, term()}
   def learn(input, opts \\ []) do
-    SpectreMnemonic.Knowledge.Learning.learn(input, opts)
+    Learning.learn(input, opts)
   end
 
   @doc """
@@ -160,7 +169,7 @@ defmodule SpectreMnemonic do
   @spec compact_knowledge(keyword()) ::
           {:ok, %{events: [map()], count: non_neg_integer()}} | {:error, term()}
   def compact_knowledge(opts \\ []) do
-    SpectreMnemonic.Knowledge.Compact.compact_knowledge(opts)
+    Compact.compact_knowledge(opts)
   end
 
   @doc """
@@ -168,7 +177,7 @@ defmodule SpectreMnemonic do
   """
   @spec status(stream_or_task_id :: term()) :: {:ok, map()} | {:error, :not_found}
   def status(stream_or_task_id) do
-    SpectreMnemonic.Active.Focus.status(stream_or_task_id)
+    Focus.status(stream_or_task_id)
   end
 
   @doc """
@@ -178,18 +187,17 @@ defmodule SpectreMnemonic do
   `:knowledge` records, and a consolidation job record marks the run.
   """
   @spec consolidate(opts :: keyword()) ::
-          {:ok, [SpectreMnemonic.Knowledge.Record.t()]} | {:error, term()}
+          {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
-    SpectreMnemonic.Knowledge.Consolidator.consolidate(opts)
+    Consolidator.consolidate(opts)
   end
 
   @doc """
   Creates an association between two memory ids.
   """
-  @spec link(binary(), atom(), binary(), keyword()) ::
-          {:ok, SpectreMnemonic.Memory.Association.t()} | {:error, term()}
+  @spec link(binary(), atom(), binary(), keyword()) :: {:ok, Association.t()} | {:error, term()}
   def link(source_id, relation, target_id, opts \\ []) do
-    SpectreMnemonic.Active.Focus.link(source_id, relation, target_id, opts)
+    Focus.link(source_id, relation, target_id, opts)
   end
 
   @doc """
@@ -199,14 +207,14 @@ defmodule SpectreMnemonic do
   """
   @spec artifact(path_or_binary :: term(), opts :: keyword()) ::
           {:ok,
-           SpectreMnemonic.Memory.Artifact.t()
+           Artifact.t()
            | %{
-               artifact: SpectreMnemonic.Memory.Artifact.t(),
-               action_recipe: SpectreMnemonic.Memory.ActionRecipe.t()
+               artifact: Artifact.t(),
+               action_recipe: ActionRecipe.t()
              }}
           | {:error, term()}
   def artifact(path_or_binary, opts \\ []) do
-    SpectreMnemonic.Active.Focus.artifact(path_or_binary, opts)
+    Focus.artifact(path_or_binary, opts)
   end
 
   @doc """
@@ -215,8 +223,8 @@ defmodule SpectreMnemonic do
   Supported selectors are ids, `{:stream, stream}`, `{:task, task_id}`, and
   predicate functions that receive a moment.
   """
-  @spec forget(SpectreMnemonic.Active.Focus.selector(), keyword()) :: {:ok, non_neg_integer()}
+  @spec forget(Focus.selector(), keyword()) :: {:ok, non_neg_integer()}
   def forget(selector, opts \\ []) do
-    SpectreMnemonic.Active.Focus.forget(selector, opts)
+    Focus.forget(selector, opts)
   end
 end

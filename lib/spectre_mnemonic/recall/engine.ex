@@ -10,9 +10,10 @@ defmodule SpectreMnemonic.Recall.Engine do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
-  alias SpectreMnemonic.Embedding.Vector
-  alias SpectreMnemonic.Memory.{Moment, Secret}
-  alias SpectreMnemonic.Recall.{Cue, Index, Packet}
+  alias SpectreMnemonic.Embedding.{Service, Vector}
+  alias SpectreMnemonic.Knowledge
+  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret}
+  alias SpectreMnemonic.Recall.{Cue, Fingerprint, Index, Packet}
   alias SpectreMnemonic.Secrets
 
   @hamming_threshold 0.62
@@ -99,7 +100,7 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec build_cue(term(), keyword()) :: Cue.t()
   defp build_cue(input, opts) do
     text = if is_binary(input), do: input, else: inspect(input)
-    embedding = SpectreMnemonic.Embedding.Service.embed(input, opts)
+    embedding = Service.embed(input, opts)
 
     %Cue{
       input: input,
@@ -109,7 +110,7 @@ defmodule SpectreMnemonic.Recall.Engine do
       vector: embedding.vector,
       binary_signature: Map.get(embedding, :binary_signature),
       embedding: embedding,
-      fingerprint: SpectreMnemonic.Recall.Fingerprint.build(text),
+      fingerprint: Fingerprint.build(text),
       opts: opts
     }
   end
@@ -221,8 +222,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Enum.uniq_by(fn status -> {status.stream, status.task_id} end)
   end
 
-  @spec artifacts_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
-          [SpectreMnemonic.Memory.Artifact.t()]
+  @spec artifacts_for([recall_moment()], [Association.t()]) :: [Artifact.t()]
   defp artifacts_for(moments, associations) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
@@ -237,8 +237,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Focus.artifacts()
   end
 
-  @spec action_recipes_for([recall_moment()], [SpectreMnemonic.Memory.Association.t()]) ::
-          [SpectreMnemonic.Memory.ActionRecipe.t()]
+  @spec action_recipes_for([recall_moment()], [Association.t()]) :: [ActionRecipe.t()]
   defp action_recipes_for(moments, associations) do
     moment_ids = MapSet.new(Enum.map(moments, & &1.id))
     related_ids = related_memory_ids(moment_ids, associations)
@@ -255,7 +254,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Focus.action_recipes()
   end
 
-  @spec related_memory_ids(MapSet.t(), [SpectreMnemonic.Memory.Association.t()]) :: MapSet.t()
+  @spec related_memory_ids(MapSet.t(), [Association.t()]) :: MapSet.t()
   defp related_memory_ids(moment_ids, associations) do
     associations
     |> Enum.reduce(moment_ids, fn assoc, acc ->
@@ -271,14 +270,14 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp confidence([]), do: 0.0
   defp confidence(moments), do: min(1.0, length(moments) / 5)
 
-  @spec compact_knowledge(keyword()) :: [SpectreMnemonic.Knowledge.Record.t()]
+  @spec compact_knowledge(keyword()) :: [Knowledge.Record.t()]
   defp compact_knowledge(opts) do
     include? =
       opts
       |> Keyword.get(:include_knowledge, true)
 
     if include? do
-      case SpectreMnemonic.Knowledge.Base.load(opts) do
+      case Knowledge.Base.load(opts) do
         {:ok, %{summary: nil, skills: [], latest_ingestions: [], facts: [], procedures: []}} -> []
         {:ok, knowledge} -> [knowledge]
       end
@@ -354,7 +353,7 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp semantic_score(moment, cue, _index_scores) do
     similarity =
-      SpectreMnemonic.Recall.Fingerprint.hamming_similarity(moment.fingerprint, cue.fingerprint)
+      Fingerprint.hamming_similarity(moment.fingerprint, cue.fingerprint)
 
     if similarity >= @hamming_threshold do
       similarity * 4
