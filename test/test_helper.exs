@@ -10,6 +10,7 @@ defmodule SpectreMnemonic.MemoryCase do
 
   use ExUnit.CaseTemplate
 
+  alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Recall.Index
 
   @tables [
@@ -43,6 +44,7 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
     Application.delete_env(:spectre_mnemonic, :compact_adapter)
     Application.delete_env(:spectre_mnemonic, :knowledge)
+    Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
     Application.delete_env(:spectre_mnemonic, :secret_key)
     Application.delete_env(:spectre_mnemonic, :secret_key_fun)
     Application.delete_env(:spectre_mnemonic, :secret_authorization_adapter)
@@ -59,6 +61,7 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
       Application.delete_env(:spectre_mnemonic, :compact_adapter)
       Application.delete_env(:spectre_mnemonic, :knowledge)
+      Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
       Application.delete_env(:spectre_mnemonic, :secret_key)
       Application.delete_env(:spectre_mnemonic, :secret_key_fun)
       Application.delete_env(:spectre_mnemonic, :secret_authorization_adapter)
@@ -83,6 +86,10 @@ defmodule SpectreMnemonic.MemoryCase do
 
     if Process.whereis(Index) do
       Index.reset()
+    end
+
+    if Process.whereis(DurableIndex) do
+      DurableIndex.reset()
     end
   end
 

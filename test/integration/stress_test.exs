@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Integration.StressTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Persistence.Store.Disk
 
@@ -292,7 +293,7 @@ defmodule SpectreMnemonic.Integration.StressTest do
       |> MapSet.new()
 
     active_ids =
-      SpectreMnemonic.Active.Focus.moments()
+      Focus.moments()
       |> Enum.map(& &1.id)
       |> MapSet.new()
 
