@@ -9,11 +9,20 @@ defmodule SpectreMnemonic.Durable.Index do
   use GenServer
 
   alias SpectreMnemonic.Embedding.{Service, Vector}
+  alias SpectreMnemonic.Memory.{Scope, Temporal}
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
 
-  @indexed_families [:moments, :knowledge, :summaries, :categories, :embeddings]
+  @indexed_families [
+    :moments,
+    :knowledge,
+    :summaries,
+    :categories,
+    :embeddings,
+    :observations,
+    :mental_models
+  ]
   @hidden_states [:forgotten, :contradicted]
   @k1 1.4
   @b 0.75
@@ -223,6 +232,8 @@ defmodule SpectreMnemonic.Durable.Index do
 
     docs
     |> Map.values()
+    |> Enum.filter(&Scope.match?(&1.record.payload, opts))
+    |> Enum.filter(&Temporal.match?(&1.record.payload, opts))
     |> Enum.map(fn doc ->
       score_doc(doc, query, query_terms, query_entities, embedding, state)
     end)
@@ -339,6 +350,11 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec payload_text(term()) :: binary()
   defp payload_text(%{text: text}) when is_binary(text), do: text
   defp payload_text(%{summary: summary}) when is_binary(summary), do: summary
+  defp payload_text(%{statement: statement}) when is_binary(statement), do: statement
+
+  defp payload_text(%{query: query, answer: answer}) when is_binary(query) and is_binary(answer),
+    do: query <> "\n" <> answer
+
   defp payload_text(%{name: name}) when is_binary(name), do: name
 
   defp payload_text(payload) when is_map(payload),

@@ -1,55 +1,51 @@
-defmodule SpectreMnemonic.Memory.Moment do
+defmodule SpectreMnemonic.Memory.MentalModel do
   @moduledoc """
-  Active memory item derived from a signal and kept in focus.
+  Curated stable knowledge or saved answer for recurring memory queries.
   """
 
   @type t :: %__MODULE__{
           id: binary(),
-          signal_id: binary(),
-          stream: term(),
-          task_id: term(),
+          title: binary() | nil,
+          query: binary(),
+          answer: binary(),
           scope: term(),
-          kind: atom(),
-          text: binary(),
-          input: term(),
+          source_ids: [binary()],
+          citations: [map()],
+          state: SpectreMnemonic.Governance.state(),
           vector: binary() | nil,
           binary_signature: binary() | nil,
           embedding: map() | nil,
-          fingerprint: non_neg_integer(),
-          inserted_at: DateTime.t(),
           keywords: [binary()],
           entities: [binary()],
-          attention: number(),
           occurred_at: DateTime.t() | nil,
           observed_at: DateTime.t() | nil,
           last_verified_at: DateTime.t() | nil,
           valid_from: DateTime.t() | nil,
           valid_until: DateTime.t() | nil,
-          metadata: map()
+          metadata: map(),
+          inserted_at: DateTime.t() | nil
         }
 
   defstruct [
     :id,
-    :signal_id,
-    :stream,
-    :task_id,
+    :title,
+    :query,
+    :answer,
     :scope,
-    :kind,
-    :text,
-    :input,
     :vector,
     :binary_signature,
     :embedding,
-    :fingerprint,
-    :inserted_at,
     :occurred_at,
     :observed_at,
     :last_verified_at,
     :valid_from,
     :valid_until,
+    :inserted_at,
+    source_ids: [],
+    citations: [],
+    state: :promoted,
     keywords: [],
     entities: [],
-    attention: 1.0,
     metadata: %{}
   ]
 end

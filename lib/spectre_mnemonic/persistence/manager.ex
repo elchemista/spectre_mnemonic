@@ -224,6 +224,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
       semantic_compact_families: [
         :moments,
         :knowledge,
+        :observations,
+        :mental_models,
         :summaries,
         :categories,
         :associations,

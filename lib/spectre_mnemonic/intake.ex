@@ -8,7 +8,7 @@ defmodule SpectreMnemonic.Intake do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Intake.{Extraction, Memory, Packet, PlugPipeline}
-  alias SpectreMnemonic.Memory.{Association, Moment, Secret, Signal}
+  alias SpectreMnemonic.Memory.{Association, Moment, Scope, Secret, Signal, Temporal}
   alias SpectreMnemonic.Result
 
   @default_chunk_words 180
@@ -92,6 +92,12 @@ defmodule SpectreMnemonic.Intake do
              |> Keyword.put(:metadata, memory.metadata)
              |> Keyword.put(:stream, memory.stream)
              |> Keyword.put(:task_id, memory.task_id)
+             |> Keyword.put(:scope, memory.scope)
+             |> Keyword.put(:occurred_at, memory.occurred_at)
+             |> Keyword.put(:observed_at, memory.observed_at)
+             |> Keyword.put(:last_verified_at, memory.last_verified_at)
+             |> Keyword.put(:valid_from, memory.valid_from)
+             |> Keyword.put(:valid_until, memory.valid_until)
              |> Keyword.put_new(:kind, :secret)
              |> Keyword.put_new(:persist?, true)
            ) do
@@ -119,7 +125,18 @@ defmodule SpectreMnemonic.Intake do
       {:error, :empty_memory}
     else
       kind = Keyword.get(opts, :kind) || input_kind(input) || infer_kind(input, text)
-      metadata = input_metadata(input) |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
+      now = DateTime.utc_now()
+      temporal = Temporal.from_opts(opts, now)
+      mission = Keyword.get(opts, :mission)
+      extraction_mode = Keyword.get(opts, :extraction_mode)
+
+      metadata =
+        input_metadata(input)
+        |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
+        |> Map.put_new(:scope, Keyword.get(opts, :scope))
+        |> maybe_put(:mission, mission)
+        |> maybe_put(:extraction_mode, extraction_mode)
+        |> Temporal.put_metadata(temporal)
 
       {:ok,
        %Memory{
@@ -128,6 +145,14 @@ defmodule SpectreMnemonic.Intake do
          kind: kind,
          stream: Keyword.get(opts, :stream) || infer_stream(kind),
          task_id: Keyword.get(opts, :task_id) || metadata_value(input, :task_id),
+         scope: Keyword.get(opts, :scope),
+         mission: mission,
+         extraction_mode: extraction_mode,
+         occurred_at: temporal.occurred_at,
+         observed_at: temporal.observed_at,
+         last_verified_at: temporal.last_verified_at,
+         valid_from: temporal.valid_from,
+         valid_until: temporal.valid_until,
          metadata: metadata,
          tags: List.wrap(Keyword.get(opts, :tags) || metadata_value(input, :tags) || []),
          title: Keyword.get(opts, :title) || title_for(input, text, kind),
@@ -188,22 +213,26 @@ defmodule SpectreMnemonic.Intake do
   @spec record_root(envelope(), keyword()) ::
           {:ok, %{signal: Signal.t(), moment: Moment.t() | Secret.t()}} | {:error, term()}
   defp record_root(envelope, opts) do
-    SpectreMnemonic.signal(root_text(envelope),
-      stream: envelope.stream,
-      kind: envelope.kind,
-      task_id: envelope.task_id,
-      attention: Keyword.get(opts, :root_attention, 2.0),
-      persist?: Keyword.get(opts, :persist?, false),
-      metadata:
-        envelope.metadata
-        |> Map.merge(%{
-          intake_role: :root,
-          title: envelope.title,
-          original_kind: envelope.kind,
-          source: Keyword.get(opts, :source) || Map.get(envelope.metadata, :source),
-          tags: envelope.tags,
-          text_bytes: byte_size(envelope.text)
-        })
+    SpectreMnemonic.signal(
+      root_text(envelope),
+      memory_context_opts(envelope, opts)
+      |> Keyword.merge(
+        stream: envelope.stream,
+        kind: envelope.kind,
+        task_id: envelope.task_id,
+        attention: Keyword.get(opts, :root_attention, 2.0),
+        persist?: Keyword.get(opts, :persist?, false),
+        metadata:
+          envelope.metadata
+          |> Map.merge(%{
+            intake_role: :root,
+            title: envelope.title,
+            original_kind: envelope.kind,
+            source: Keyword.get(opts, :source) || Map.get(envelope.metadata, :source),
+            tags: envelope.tags,
+            text_bytes: byte_size(envelope.text)
+          })
+      )
     )
   end
 
@@ -224,14 +253,18 @@ defmodule SpectreMnemonic.Intake do
           categories: categories_for(chunk)
         })
 
-      case SpectreMnemonic.signal(chunk,
-             stream: envelope.stream,
-             kind: :memory_chunk,
-             task_id: nil,
-             attention: Keyword.get(opts, :chunk_attention, 1.0),
-             persist?: Keyword.get(opts, :persist?, false),
-             metadata: metadata
-           ) do
+      signal_opts =
+        memory_context_opts(envelope, opts)
+        |> Keyword.merge(
+          stream: envelope.stream,
+          kind: :memory_chunk,
+          task_id: nil,
+          attention: Keyword.get(opts, :chunk_attention, 1.0),
+          persist?: Keyword.get(opts, :persist?, false),
+          metadata: metadata
+        )
+
+      case SpectreMnemonic.signal(chunk, signal_opts) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, reason}
       end
@@ -272,24 +305,28 @@ defmodule SpectreMnemonic.Intake do
 
     summary = summarize(scope, text, opts)
 
-    SpectreMnemonic.signal(summary.text,
-      stream: envelope.stream,
-      kind: :memory_summary,
-      task_id: nil,
-      attention: Keyword.get(opts, :summary_attention, 1.5),
-      persist?: Keyword.get(opts, :persist?, false),
-      metadata:
-        envelope.metadata
-        |> Map.merge(metadata)
-        |> Map.merge(Map.new(metadata_opts))
-        |> Map.merge(%{
-          key_points: summary.key_points,
-          entities: summary.entities,
-          categories: summary.categories,
-          relations: summary.relations,
-          confidence: summary.confidence,
-          summary_provider: summary.metadata
-        })
+    SpectreMnemonic.signal(
+      summary.text,
+      memory_context_opts(envelope, opts)
+      |> Keyword.merge(
+        stream: envelope.stream,
+        kind: :memory_summary,
+        task_id: nil,
+        attention: Keyword.get(opts, :summary_attention, 1.5),
+        persist?: Keyword.get(opts, :persist?, false),
+        metadata:
+          envelope.metadata
+          |> Map.merge(metadata)
+          |> Map.merge(Map.new(metadata_opts))
+          |> Map.merge(%{
+            key_points: summary.key_points,
+            entities: summary.entities,
+            categories: summary.categories,
+            relations: summary.relations,
+            confidence: summary.confidence,
+            summary_provider: summary.metadata
+          })
+      )
     )
   end
 
@@ -304,21 +341,25 @@ defmodule SpectreMnemonic.Intake do
       |> Enum.uniq()
 
     Result.collect_ok(labels, fn label ->
-      case SpectreMnemonic.signal("Category: #{label}",
-             stream: envelope.stream,
-             kind: :memory_category,
-             task_id: nil,
-             attention: Keyword.get(opts, :category_attention, 1.1),
-             persist?: Keyword.get(opts, :persist?, false),
-             metadata:
-               envelope.metadata
-               |> Map.merge(%{
-                 intake_role: :category,
-                 root_memory_id: root.id,
-                 source_task_id: envelope.task_id,
-                 category: label
-               })
-           ) do
+      signal_opts =
+        memory_context_opts(envelope, opts)
+        |> Keyword.merge(
+          stream: envelope.stream,
+          kind: :memory_category,
+          task_id: nil,
+          attention: Keyword.get(opts, :category_attention, 1.1),
+          persist?: Keyword.get(opts, :persist?, false),
+          metadata:
+            envelope.metadata
+            |> Map.merge(%{
+              intake_role: :category,
+              root_memory_id: root.id,
+              source_task_id: envelope.task_id,
+              category: label
+            })
+        )
+
+      case SpectreMnemonic.signal("Category: #{label}", signal_opts) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, reason}
       end
@@ -336,6 +377,9 @@ defmodule SpectreMnemonic.Intake do
                |> Keyword.put(:input, envelope.input)
                |> Keyword.put(:stream, envelope.stream)
                |> Keyword.put(:task_id, envelope.task_id)
+               |> Keyword.put(:scope, envelope.scope)
+               |> Keyword.put(:mission, envelope.mission)
+               |> Keyword.put(:extraction_mode, envelope.extraction_mode)
              ),
            {:ok, results} <- record_extraction_nodes(graph, root, envelope, opts),
            {:ok, associations} <- link_extraction_graph(graph, root, results, opts) do
@@ -363,14 +407,18 @@ defmodule SpectreMnemonic.Intake do
           extraction_provider: Map.get(graph.metadata, :provider)
         })
 
-      case SpectreMnemonic.signal(text,
-             stream: envelope.stream,
-             kind: kind,
-             task_id: nil,
-             attention: Keyword.get(opts, :extraction_attention, attention),
-             persist?: Keyword.get(opts, :persist?, false),
-             metadata: metadata
-           ) do
+      signal_opts =
+        memory_context_opts(envelope, opts)
+        |> Keyword.merge(
+          stream: envelope.stream,
+          kind: kind,
+          task_id: nil,
+          attention: Keyword.get(opts, :extraction_attention, attention),
+          persist?: Keyword.get(opts, :persist?, false),
+          metadata: metadata
+        )
+
+      case SpectreMnemonic.signal(text, signal_opts) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, reason}
       end
@@ -689,6 +737,7 @@ defmodule SpectreMnemonic.Intake do
 
       Focus.moments()
       |> Enum.reject(&(MapSet.member?(current_ids, &1.id) or not linkable_memory?(&1)))
+      |> Enum.filter(&same_scope?(root, &1, opts))
       |> cross_memory_candidates(anchors, threshold, existing_edges)
       |> Enum.sort_by(fn {_source, _target, score} -> -score end)
       |> Enum.take(max_edges)
@@ -730,6 +779,15 @@ defmodule SpectreMnemonic.Intake do
   defp linkable_memory?(%{kind: :memory_category}), do: false
   defp linkable_memory?(_moment), do: true
 
+  @spec same_scope?(Moment.t(), Moment.t(), keyword()) :: boolean()
+  defp same_scope?(left, right, opts) do
+    cond do
+      Keyword.has_key?(opts, :scopes) -> Scope.match?(right, opts)
+      is_nil(Scope.scope(left)) -> is_nil(Scope.scope(right))
+      true -> Scope.scope(left) == Scope.scope(right)
+    end
+  end
+
   @spec relationship_score(Moment.t(), Moment.t()) :: float()
   defp relationship_score(left, right) do
     keyword_score = keyword_similarity(left, right)
@@ -739,6 +797,23 @@ defmodule SpectreMnemonic.Intake do
 
     min(1.0, max(keyword_score, entity_score) + category_score * 0.25 + task_bonus)
   end
+
+  @spec memory_context_opts(Memory.t(), keyword()) :: keyword()
+  defp memory_context_opts(envelope, _opts) do
+    [
+      scope: envelope.scope,
+      occurred_at: envelope.occurred_at,
+      observed_at: envelope.observed_at,
+      last_verified_at: envelope.last_verified_at,
+      valid_from: envelope.valid_from,
+      valid_until: envelope.valid_until
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  @spec maybe_put(map(), atom(), term()) :: map()
+  defp maybe_put(metadata, _key, nil), do: metadata
+  defp maybe_put(metadata, key, value), do: Map.put_new(metadata, key, value)
 
   @spec metadata_category_similarity(Moment.t(), Moment.t()) :: float()
   defp metadata_category_similarity(left, right) do

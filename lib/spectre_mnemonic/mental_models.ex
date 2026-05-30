@@ -1,0 +1,186 @@
+defmodule SpectreMnemonic.MentalModels do
+  @moduledoc """
+  Curated mental models stored beside existing durable memory.
+  """
+
+  alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Memory.{MentalModel, Scope, Temporal}
+  alias SpectreMnemonic.Persistence.Manager
+
+  @mental_model_table :mnemonic_mental_models
+
+  @doc "Stores or replaces a curated mental model."
+  @spec put(term(), keyword()) :: {:ok, MentalModel.t()} | {:error, term()}
+  def put(input, opts \\ []) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    model = build(input, opts, now)
+    :ets.insert(@mental_model_table, {model.id, model})
+
+    result =
+      if Keyword.get(opts, :persist?, true) do
+        with {:ok, _result} <-
+               Manager.append(:mental_models, model, Keyword.put(opts, :record_id, model.id)) do
+          Governance.append_state(model.id, model.state, :mental_model_stored, opts)
+          {:ok, model}
+        end
+      else
+        {:ok, model}
+      end
+
+    result
+  end
+
+  @doc "Searches active and durable mental models."
+  @spec search(term(), keyword()) :: {:ok, [MentalModel.t() | map()]}
+  def search(cue, opts \\ []) do
+    active =
+      @mental_model_table
+      |> safe_tab2list()
+      |> Enum.map(fn {_id, model} -> model end)
+      |> Enum.filter(&Scope.match?(&1, opts))
+      |> Enum.filter(&Temporal.match?(&1, opts))
+      |> score_models(cue)
+
+    durable =
+      case Manager.search(cue, opts) do
+        {:ok, results} ->
+          results
+          |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
+          |> Enum.map(&Map.get(&1, :record, &1))
+          |> Enum.filter(&Scope.match?(&1, opts))
+          |> Enum.filter(&Temporal.match?(&1, opts))
+
+        {:error, _reason} ->
+          []
+      end
+
+    limit = Keyword.get(opts, :limit, 10)
+    {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+  end
+
+  @spec build(term(), keyword(), DateTime.t()) :: MentalModel.t()
+  defp build(input, opts, now) do
+    map = input_map(input)
+    query = value(map, :query, Keyword.get(opts, :query) || value(map, :title, ""))
+
+    answer =
+      value(map, :answer, Keyword.get(opts, :answer) || value(map, :text, inspect(input)))
+
+    title = value(map, :title, Keyword.get(opts, :title))
+    text = Enum.join(Enum.reject([title, query, answer], &is_nil/1), "\n")
+    embedding = Service.embed(text, opts)
+    temporal = Temporal.from_opts(temporal_opts(map, opts), now)
+    scope = Keyword.get(opts, :scope, value(map, :scope, nil))
+    id = value(map, :id, Keyword.get(opts, :id) || stable_model_id(scope, query, answer))
+
+    %MentalModel{
+      id: id,
+      title: title,
+      query: query,
+      answer: answer,
+      scope: scope,
+      source_ids: List.wrap(value(map, :source_ids, Keyword.get(opts, :source_ids, []))),
+      citations: List.wrap(value(map, :citations, Keyword.get(opts, :citations, []))),
+      state: value(map, :state, Keyword.get(opts, :state, :promoted)),
+      vector: embedding.vector,
+      binary_signature: Map.get(embedding, :binary_signature),
+      embedding: embedding,
+      keywords: keywords(text),
+      entities: entities(text),
+      occurred_at: temporal.occurred_at,
+      observed_at: temporal.observed_at,
+      last_verified_at: temporal.last_verified_at,
+      valid_from: temporal.valid_from,
+      valid_until: temporal.valid_until,
+      metadata:
+        metadata_value(opts, map)
+        |> Map.new()
+        |> Map.put(:scope, scope)
+        |> Governance.with_provenance(
+          source_ids: List.wrap(value(map, :source_ids, Keyword.get(opts, :source_ids, []))),
+          provider: :mental_models,
+          confidence: Keyword.get(opts, :confidence, 1.0),
+          observed_at: temporal.observed_at || now,
+          last_verified_at: temporal.last_verified_at || now
+        )
+        |> Temporal.put_metadata(temporal),
+      inserted_at: now
+    }
+  end
+
+  @spec score_models([MentalModel.t()], term()) :: [MentalModel.t()]
+  defp score_models(models, cue) do
+    query_terms = cue |> to_string() |> keywords() |> MapSet.new()
+
+    models
+    |> Enum.map(fn model ->
+      overlap =
+        model.keywords
+        |> MapSet.new()
+        |> MapSet.intersection(query_terms)
+        |> MapSet.size()
+
+      {overlap, model}
+    end)
+    |> Enum.filter(fn {score, _model} -> score > 0 end)
+    |> Enum.sort_by(fn {score, model} -> {-score, model.id} end)
+    |> Enum.map(fn {_score, model} -> model end)
+  end
+
+  @spec input_map(term()) :: map()
+  defp input_map(input) when is_map(input), do: input
+  defp input_map(input) when is_list(input), do: Map.new(input)
+  defp input_map(_input), do: %{}
+
+  @spec value(map(), atom(), term()) :: term()
+  defp value(map, key, default), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+
+  @spec metadata_value(keyword(), map()) :: map()
+  defp metadata_value(opts, map) do
+    Keyword.get(opts, :metadata, value(map, :metadata, %{})) || %{}
+  end
+
+  @spec temporal_opts(map(), keyword()) :: keyword()
+  defp temporal_opts(map, opts) do
+    Enum.reduce(Temporal.fields(), opts, fn field, acc ->
+      if Keyword.has_key?(acc, field) do
+        acc
+      else
+        case value(map, field, nil) do
+          nil -> acc
+          value -> Keyword.put(acc, field, value)
+        end
+      end
+    end)
+  end
+
+  @spec stable_model_id(term(), binary(), binary()) :: binary()
+  defp stable_model_id(scope, query, answer) do
+    hash = :crypto.hash(:sha256, :erlang.term_to_binary({scope, query, answer}))
+    "mm_#{Base.encode16(hash, case: :lower) |> binary_part(0, 24)}"
+  end
+
+  @spec safe_tab2list(atom()) :: list()
+  defp safe_tab2list(table) do
+    :ets.tab2list(table)
+  rescue
+    ArgumentError -> []
+  end
+
+  @spec keywords(binary()) :: [binary()]
+  defp keywords(text) do
+    text
+    |> String.downcase()
+    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
+    |> Enum.reject(&(String.length(&1) < 2))
+    |> Enum.uniq()
+  end
+
+  @spec entities(binary()) :: [binary()]
+  defp entities(text) do
+    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
+    |> List.flatten()
+    |> Enum.uniq()
+  end
+end

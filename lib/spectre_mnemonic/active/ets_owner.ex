@@ -14,13 +14,16 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:mnemonic_moments, :set},
     {:mnemonic_moments_by_stream, :bag},
     {:mnemonic_moments_by_task, :bag},
+    {:mnemonic_moments_by_scope, :bag},
     {:mnemonic_moments_by_signal, :set},
     {:mnemonic_status, :set},
     {:mnemonic_associations, :set},
     {:mnemonic_associations_by_memory, :bag},
     {:mnemonic_attention, :set},
     {:mnemonic_artifacts, :set},
-    {:mnemonic_action_recipes, :set}
+    {:mnemonic_action_recipes, :set},
+    {:mnemonic_observations, :set},
+    {:mnemonic_mental_models, :set}
   ]
 
   @doc "Starts the ETS owner process."

@@ -13,8 +13,11 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Intake
   alias SpectreMnemonic.Knowledge.{Base, Compact, Consolidator, Learning, Record}
+  alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Secret}
+  alias SpectreMnemonic.Observations
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Reflection
   alias SpectreMnemonic.Recall.{Engine, Packet}
   alias SpectreMnemonic.Secrets
 
@@ -113,6 +116,60 @@ defmodule SpectreMnemonic do
 
       {:ok, active_results ++ durable_results}
     end
+  end
+
+  @doc """
+  Consolidates evidence-grounded observations from existing memory.
+
+  Observations are derived beliefs with source evidence, confidence, trend, and
+  lifecycle state. They are stored through the same append-only persistence
+  manager used by the rest of the library.
+  """
+  @spec consolidate_observations(keyword()) ::
+          {:ok, [SpectreMnemonic.Memory.Observation.t()]} | {:error, term()}
+  def consolidate_observations(opts \\ []) do
+    Observations.consolidate(opts)
+  end
+
+  @doc "Searches consolidated observations."
+  @spec search_observations(term(), keyword()) ::
+          {:ok, [SpectreMnemonic.Memory.Observation.t() | map()]}
+  def search_observations(cue, opts \\ []) do
+    Observations.search(cue, opts)
+  end
+
+  @doc "Verifies an observation with optional supporting or weakening evidence."
+  @spec verify_observation(binary() | SpectreMnemonic.Memory.Observation.t(), keyword()) ::
+          {:ok, SpectreMnemonic.Memory.Observation.t()} | {:error, term()}
+  def verify_observation(observation_or_id, opts \\ []) do
+    Observations.verify(observation_or_id, opts)
+  end
+
+  @doc "Stores a curated mental model for stable recurring memory queries."
+  @spec put_mental_model(term(), keyword()) ::
+          {:ok, SpectreMnemonic.Memory.MentalModel.t()} | {:error, term()}
+  def put_mental_model(input, opts \\ []) do
+    MentalModels.put(input, opts)
+  end
+
+  @doc "Searches curated mental models."
+  @spec search_mental_models(term(), keyword()) ::
+          {:ok, [SpectreMnemonic.Memory.MentalModel.t() | map()]}
+  def search_mental_models(cue, opts \\ []) do
+    MentalModels.search(cue, opts)
+  end
+
+  @doc """
+  Reflects over memory without requiring an LLM.
+
+  The default returns a structured evidence packet ordered as mental models,
+  observations, then raw recall. Pass `:adapter` or configure
+  `:reflection_adapter` to turn that packet into a final response.
+  """
+  @spec reflect(term(), keyword()) ::
+          {:ok, SpectreMnemonic.Reflection.Packet.t()} | {:error, term()}
+  def reflect(query, opts \\ []) do
+    Reflection.reflect(query, opts)
   end
 
   @doc """

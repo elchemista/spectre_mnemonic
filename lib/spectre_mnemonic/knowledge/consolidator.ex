@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Knowledge.{Consolidation, Record}
+  alias SpectreMnemonic.Memory.{Scope, Temporal}
   alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Manager
 
@@ -287,12 +288,21 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       embedding: moment.embedding,
       metadata:
         Governance.with_provenance(
-          %{stream: moment.stream, task_id: moment.task_id, kind: moment.kind},
+          %{
+            stream: moment.stream,
+            task_id: moment.task_id,
+            kind: moment.kind,
+            scope: Scope.scope(moment)
+          }
+          |> Temporal.put_metadata(Temporal.temporal_map(moment)),
           source_ids: [moment.id],
           provider: :consolidator,
           confidence: Map.get(moment.metadata, :confidence, 1.0),
-          observed_at: now,
-          last_verified_at: now
+          occurred_at: Map.get(Temporal.temporal_map(moment), :occurred_at),
+          observed_at: Map.get(Temporal.temporal_map(moment), :observed_at) || now,
+          last_verified_at: Map.get(Temporal.temporal_map(moment), :last_verified_at) || now,
+          valid_from: Map.get(Temporal.temporal_map(moment), :valid_from),
+          valid_until: Map.get(Temporal.temporal_map(moment), :valid_until)
         ),
       inserted_at: now
     }
