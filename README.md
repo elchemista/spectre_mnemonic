@@ -56,7 +56,7 @@ Add the dependency:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, "~> 0.1.0"}
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic"}
   ]
 end
 ```
