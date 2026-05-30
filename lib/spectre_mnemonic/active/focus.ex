@@ -12,7 +12,18 @@ defmodule SpectreMnemonic.Active.Focus do
   alias SpectreMnemonic.Active.ETSOwner
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
-  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret, Signal}
+
+  alias SpectreMnemonic.Memory.{
+    ActionRecipe,
+    Artifact,
+    Association,
+    Moment,
+    Scope,
+    Secret,
+    Signal,
+    Temporal
+  }
+
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Index
@@ -305,12 +316,20 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec build_moment(Signal.t(), keyword(), DateTime.t()) :: Moment.t()
   defp build_moment(signal, opts, now) do
     embedding = Service.embed(signal.input, opts)
+    temporal = Temporal.from_opts(opts, now)
+    scope = Keyword.get(opts, :scope)
+
+    metadata =
+      signal.metadata
+      |> Map.put_new(:scope, scope)
+      |> Temporal.put_metadata(temporal)
 
     %Moment{
       id: id("mom"),
       signal_id: signal.id,
       stream: signal.stream,
       task_id: signal.task_id,
+      scope: scope,
       kind: signal.kind,
       text: to_text(signal.input),
       input: signal.input,
@@ -321,12 +340,21 @@ defmodule SpectreMnemonic.Active.Focus do
       entities: entities(signal.input),
       fingerprint: fingerprint(signal.input),
       attention: Keyword.get(opts, :attention, @default_attention),
+      occurred_at: temporal.occurred_at,
+      observed_at: temporal.observed_at,
+      last_verified_at: temporal.last_verified_at,
+      valid_from: temporal.valid_from,
+      valid_until: temporal.valid_until,
       metadata:
-        Governance.with_provenance(signal.metadata,
+        Governance.with_provenance(metadata,
           source_ids: [signal.id],
           provider: :active_focus,
           confidence: Keyword.get(opts, :confidence, 1.0),
-          observed_at: now
+          occurred_at: temporal.occurred_at,
+          observed_at: temporal.observed_at || now,
+          last_verified_at: temporal.last_verified_at || now,
+          valid_from: temporal.valid_from,
+          valid_until: temporal.valid_until
         ),
       inserted_at: now
     }
@@ -348,6 +376,13 @@ defmodule SpectreMnemonic.Active.Focus do
 
     with {:ok, encrypted} <- Secrets.encrypt(plaintext, context, opts) do
       embedding = Service.embed(redacted, secret_embedding_opts(opts))
+      temporal = Temporal.from_opts(opts, now)
+      scope = Keyword.get(opts, :scope)
+
+      metadata =
+        signal.metadata
+        |> Map.put_new(:scope, scope)
+        |> Temporal.put_metadata(temporal)
 
       {:ok,
        %Secret{
@@ -357,6 +392,7 @@ defmodule SpectreMnemonic.Active.Focus do
          label: label,
          stream: signal.stream,
          task_id: signal.task_id,
+         scope: scope,
          kind: signal.kind,
          text: redacted,
          input: redacted,
@@ -367,6 +403,11 @@ defmodule SpectreMnemonic.Active.Focus do
          entities: entities(redacted),
          fingerprint: fingerprint(redacted),
          attention: Keyword.get(opts, :attention, @default_attention),
+         occurred_at: temporal.occurred_at,
+         observed_at: temporal.observed_at,
+         last_verified_at: temporal.last_verified_at,
+         valid_from: temporal.valid_from,
+         valid_until: temporal.valid_until,
          locked?: true,
          revealed?: false,
          algorithm: Map.fetch!(encrypted, :algorithm),
@@ -376,11 +417,15 @@ defmodule SpectreMnemonic.Active.Focus do
          aad: Map.fetch!(encrypted, :aad),
          reveal: Secrets.reveal_instruction(),
          metadata:
-           Governance.with_provenance(signal.metadata,
+           Governance.with_provenance(metadata,
              source_ids: [signal.id],
              provider: :active_focus,
              confidence: Keyword.get(opts, :confidence, 1.0),
-             observed_at: now
+             occurred_at: temporal.occurred_at,
+             observed_at: temporal.observed_at || now,
+             last_verified_at: temporal.last_verified_at || now,
+             valid_from: temporal.valid_from,
+             valid_until: temporal.valid_until
            ),
          inserted_at: now
        }}
@@ -567,6 +612,10 @@ defmodule SpectreMnemonic.Active.Focus do
       :ets.insert(:mnemonic_moments_by_task, {moment.task_id, moment.id})
     end
 
+    if Scope.scope(moment) do
+      :ets.insert(:mnemonic_moments_by_scope, {Scope.scope(moment), moment.id})
+    end
+
     :ets.insert(:mnemonic_moments_by_signal, {moment.signal_id, moment.id})
   end
 
@@ -606,6 +655,10 @@ defmodule SpectreMnemonic.Active.Focus do
 
     if moment.task_id do
       :ets.delete_object(:mnemonic_moments_by_task, {moment.task_id, moment.id})
+    end
+
+    if scope = Scope.scope(moment) do
+      :ets.delete_object(:mnemonic_moments_by_scope, {scope, moment.id})
     end
 
     :ets.delete(:mnemonic_moments_by_signal, moment.signal_id)

@@ -343,8 +343,11 @@ defmodule SpectreMnemonic.Governance do
       source_span: Keyword.get(opts, :source_span),
       provider: Keyword.get(opts, :provider, :spectre_mnemonic),
       confidence: Keyword.get(opts, :confidence),
+      occurred_at: Keyword.get(opts, :occurred_at),
       observed_at: now,
-      last_verified_at: Keyword.get(opts, :last_verified_at, now)
+      last_verified_at: Keyword.get(opts, :last_verified_at, now),
+      valid_from: Keyword.get(opts, :valid_from),
+      valid_until: Keyword.get(opts, :valid_until)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) or value == [] end)
     |> Map.new()

@@ -12,8 +12,18 @@ defmodule SpectreMnemonic.Recall.Engine do
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.{Service, Vector}
   alias SpectreMnemonic.Knowledge
-  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Moment, Secret}
-  alias SpectreMnemonic.Recall.{Cue, Fingerprint, Index, Packet}
+
+  alias SpectreMnemonic.Memory.{
+    ActionRecipe,
+    Artifact,
+    Association,
+    Moment,
+    Scope,
+    Secret,
+    Temporal
+  }
+
+  alias SpectreMnemonic.Recall.{Cue, Fingerprint, Fusion, Index, Packet}
   alias SpectreMnemonic.Secrets
 
   @hamming_threshold 0.62
@@ -41,45 +51,62 @@ defmodule SpectreMnemonic.Recall.Engine do
   def handle_call({:recall, cue_input, opts}, _from, state) do
     cue = build_cue(cue_input, opts)
     limit = Keyword.get(opts, :limit, 10)
+    budget = budget(opts)
     {:ok, index_results} = Index.query(cue, opts)
     index_scores = Map.new(index_results, &{&1.id, &1})
 
-    seed_limit = max(limit, limit * 2)
+    seed_limit = max(limit, limit * budget.seed_multiplier)
+
+    base_ranked = ranked_moments(cue, index_scores, seed_limit, opts)
+    graph_ranked = expand_graph(base_ranked, budget.graph_depth, opts)
+
+    index_ranked =
+      index_results |> Enum.map(& &1.id) |> Focus.moments_by_ids() |> filter_moments(opts)
 
     ranked =
-      cue
-      |> ranked_moments(index_scores, seed_limit)
-      |> expand_graph()
+      [base_ranked, graph_ranked, index_ranked]
+      |> Fusion.rrf()
+      |> Enum.map(fn {_score, moment} -> moment end)
       |> Enum.uniq_by(& &1.id)
       |> rerank_moments(cue, index_scores)
-      |> Enum.take(limit)
+      |> filter_moments(opts)
+      |> apply_memory_budget(opts, limit)
 
     associations = ranked |> Enum.map(& &1.id) |> Focus.associations_for_ids()
     revealed = Enum.map(ranked, &Secrets.maybe_reveal(&1, opts))
+    observations = recall_observations(cue_input, opts)
+    mental_models = recall_mental_models(cue_input, opts)
 
     packet = %Packet{
       cue: cue,
       active_status: active_status(ranked),
       moments: revealed,
+      observations: observations,
+      mental_models: mental_models,
       knowledge: compact_knowledge(opts),
       artifacts: artifacts_for(ranked, associations),
       associations: associations,
       action_recipes: action_recipes_for(ranked, associations),
-      confidence: confidence(ranked)
+      confidence: confidence(ranked),
+      usage: usage(revealed, observations, mental_models, opts)
     }
 
     {:reply, {:ok, packet}, state}
   end
 
-  @spec ranked_moments(Cue.t(), map(), integer()) :: [recall_moment()]
-  defp ranked_moments(_cue, _index_scores, limit) when limit <= 0, do: []
+  @spec ranked_moments(Cue.t(), map(), integer(), keyword()) :: [recall_moment()]
+  defp ranked_moments(_cue, _index_scores, limit, _opts) when limit <= 0, do: []
 
-  defp ranked_moments(cue, index_scores, limit) do
+  defp ranked_moments(cue, index_scores, limit, opts) do
     []
     |> Focus.fold_moments(fn moment, ranked ->
-      case score(moment, cue, index_scores) do
-        score when score > 0 -> insert_ranked({score, moment}, ranked, limit)
-        _score -> ranked
+      if memory_visible?(moment, opts) do
+        case score(moment, cue, index_scores) do
+          score when score > 0 -> insert_ranked({score, moment}, ranked, limit)
+          _score -> ranked
+        end
+      else
+        ranked
       end
     end)
     |> Enum.sort_by(&rank_key/1)
@@ -174,13 +201,14 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp structured_score(_moment, _cue), do: 0
 
-  @spec expand_graph([recall_moment()]) :: [recall_moment()]
-  defp expand_graph(moments), do: expand_graph(moments, 2)
+  @spec expand_graph([recall_moment()], non_neg_integer(), keyword()) :: [recall_moment()]
+  defp expand_graph(moments, depth, opts), do: expand_graph(moments, depth, opts, MapSet.new())
 
-  @spec expand_graph([recall_moment()], non_neg_integer()) :: [recall_moment()]
-  defp expand_graph(moments, 0), do: moments
+  @spec expand_graph([recall_moment()], non_neg_integer(), keyword(), MapSet.t()) ::
+          [recall_moment()]
+  defp expand_graph(moments, 0, _opts, _seen), do: moments
 
-  defp expand_graph(moments, depth) do
+  defp expand_graph(moments, depth, opts, _seen) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
     associations = Focus.associations_for_ids(ids)
 
@@ -199,11 +227,12 @@ defmodule SpectreMnemonic.Recall.Engine do
       linked_ids
       |> Enum.reject(&MapSet.member?(ids, &1))
       |> Focus.moments_by_ids()
+      |> filter_moments(opts)
 
     if next == [] do
       moments
     else
-      expand_graph(moments ++ next, depth - 1)
+      expand_graph(moments ++ next, depth - 1, opts, ids)
     end
   end
 
@@ -264,6 +293,110 @@ defmodule SpectreMnemonic.Recall.Engine do
         true -> acc
       end
     end)
+  end
+
+  @spec filter_moments([recall_moment()], keyword()) :: [recall_moment()]
+  defp filter_moments(moments, opts) do
+    Enum.filter(moments, &memory_visible?(&1, opts))
+  end
+
+  @spec memory_visible?(recall_moment(), keyword()) :: boolean()
+  defp memory_visible?(moment, opts) do
+    Scope.match?(moment, opts) and Temporal.match?(moment, opts)
+  end
+
+  @spec budget(keyword()) :: map()
+  defp budget(opts) do
+    case Keyword.get(opts, :budget, :mid) do
+      :low -> %{seed_multiplier: 1, graph_depth: 1}
+      :high -> %{seed_multiplier: 4, graph_depth: 3}
+      _mid -> %{seed_multiplier: 2, graph_depth: 2}
+    end
+  end
+
+  @spec apply_memory_budget([recall_moment()], keyword(), non_neg_integer()) :: [recall_moment()]
+  defp apply_memory_budget(moments, opts, limit) do
+    case Keyword.get(opts, :max_tokens) do
+      max_tokens when is_integer(max_tokens) and max_tokens > 0 ->
+        moments
+        |> Enum.reduce_while({[], 0}, fn moment, {selected, used} ->
+          cost = estimate_tokens(Map.get(moment, :text, ""))
+
+          cond do
+            selected == [] and cost > max_tokens ->
+              {:halt, {[moment], cost}}
+
+            used + cost <= max_tokens ->
+              {:cont, {[moment | selected], used + cost}}
+
+            true ->
+              {:halt, {selected, used}}
+          end
+        end)
+        |> elem(0)
+        |> Enum.reverse()
+
+      _missing ->
+        Enum.take(moments, limit)
+    end
+  end
+
+  @spec recall_observations(term(), keyword()) :: [term()]
+  defp recall_observations(cue, opts) do
+    if Keyword.get(opts, :include_observations, true) do
+      opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :observation_limit, 5))
+
+      case SpectreMnemonic.search_observations(cue, opts) do
+        {:ok, observations} -> observations
+        {:error, _reason} -> []
+      end
+    else
+      []
+    end
+  end
+
+  @spec recall_mental_models(term(), keyword()) :: [term()]
+  defp recall_mental_models(cue, opts) do
+    if Keyword.get(opts, :include_mental_models, true) do
+      opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :mental_model_limit, 5))
+
+      case SpectreMnemonic.search_mental_models(cue, opts) do
+        {:ok, mental_models} -> mental_models
+        {:error, _reason} -> []
+      end
+    else
+      []
+    end
+  end
+
+  @spec usage([term()], [term()], [term()], keyword()) :: map()
+  defp usage(moments, observations, mental_models, opts) do
+    estimated =
+      (moments ++ observations ++ mental_models)
+      |> Enum.map(&estimate_tokens(memory_text(&1)))
+      |> Enum.sum()
+
+    %{
+      estimated_tokens: estimated,
+      max_tokens: Keyword.get(opts, :max_tokens),
+      budget: Keyword.get(opts, :budget, :mid)
+    }
+  end
+
+  @spec memory_text(term()) :: binary()
+  defp memory_text(%{text: text}) when is_binary(text), do: text
+  defp memory_text(%{statement: statement}) when is_binary(statement), do: statement
+  defp memory_text(%{answer: answer}) when is_binary(answer), do: answer
+  defp memory_text(_memory), do: ""
+
+  @spec estimate_tokens(binary()) :: non_neg_integer()
+  defp estimate_tokens(text) do
+    text
+    |> String.split(~r/\s+/u, trim: true)
+    |> length()
+    |> Kernel.*(4)
+    |> div(3)
+    |> max(1)
   end
 
   @spec confidence([recall_moment()]) :: float()
