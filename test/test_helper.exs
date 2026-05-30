@@ -19,6 +19,7 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_moments,
     :mnemonic_moments_by_stream,
     :mnemonic_moments_by_task,
+    :mnemonic_moments_by_scope,
     :mnemonic_moments_by_signal,
     :mnemonic_status,
     :mnemonic_associations,
@@ -26,6 +27,8 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_attention,
     :mnemonic_artifacts,
     :mnemonic_action_recipes,
+    :mnemonic_observations,
+    :mnemonic_mental_models,
     :mnemonic_embedding_index,
     :mnemonic_embedding_labels
   ]
@@ -43,6 +46,7 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
     Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
     Application.delete_env(:spectre_mnemonic, :compact_adapter)
+    Application.delete_env(:spectre_mnemonic, :reflection_adapter)
     Application.delete_env(:spectre_mnemonic, :knowledge)
     Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
     Application.delete_env(:spectre_mnemonic, :secret_key)
@@ -60,6 +64,7 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :action_runtime_adapter)
       Application.delete_env(:spectre_mnemonic, :consolidation_adapter)
       Application.delete_env(:spectre_mnemonic, :compact_adapter)
+      Application.delete_env(:spectre_mnemonic, :reflection_adapter)
       Application.delete_env(:spectre_mnemonic, :knowledge)
       Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
       Application.delete_env(:spectre_mnemonic, :secret_key)
