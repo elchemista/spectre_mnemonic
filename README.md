@@ -37,6 +37,10 @@ available without hydrating every old event.
 - Optional embedding recall through an adapter or local Model2Vec provider.
 - Built-in durable hybrid search over persisted records using BM25-style text
   scoring plus vector/signature reranking when embeddings exist.
+- Scoped memory with optional `scope`, temporal validity fields, token-budget
+  recall, and budgeted retrieval depth.
+- Evidence-grounded observations and curated mental models for recall and
+  reflection over memory.
 - Governance state records: `:candidate`, `:short_term`, `:promoted`,
   `:pinned`, `:stale`, `:contradicted`, and `:forgotten`.
 - Structured fact freshness and contradiction tracking for facts such as email,
@@ -71,6 +75,8 @@ Use `remember/2` for normal application memory:
     title: "Planner note",
     stream: :planning,
     task_id: "alpha",
+    scope: {:project, "alpha"},
+    occurred_at: ~U[2026-05-30 10:00:00Z],
     metadata: %{source: :agent},
     persist?: true
   )
@@ -85,9 +91,16 @@ packet.associations
 Use `recall/2` for active context:
 
 ```elixir
-{:ok, packet} = SpectreMnemonic.recall("how is alpha going?", limit: 5)
+{:ok, packet} =
+  SpectreMnemonic.recall("how is alpha going?",
+    scope: {:project, "alpha"},
+    max_tokens: 2_000,
+    budget: :mid
+  )
 
 packet.moments
+packet.observations
+packet.mental_models
 packet.active_status
 packet.associations
 packet.knowledge
@@ -259,6 +272,36 @@ SpectreMnemonic.remember(text, sensitive_numbers: :skip)
 SpectreMnemonic.remember(text, extract_entities?: false)
 ```
 
+Memory can be scoped without changing the existing stream/task model. A scope is
+caller-owned data, such as a user, agent, tenant, or project tuple. Scoped recall
+only searches matching memory; unscoped recall stays broad for backward
+compatibility.
+
+```elixir
+SpectreMnemonic.remember("Payment retry policy is stable",
+  scope: {:tenant, "acme"},
+  mission: :code_agent,
+  extraction_mode: :concise,
+  occurred_at: ~U[2026-05-01 12:00:00Z],
+  valid_from: ~U[2026-05-01 00:00:00Z],
+  persist?: true
+)
+
+SpectreMnemonic.recall("payment retry",
+  scope: {:tenant, "acme"},
+  valid_at: ~U[2026-05-30 00:00:00Z]
+)
+```
+
+Temporal fields separate when something happened from when SpectreMnemonic
+learned it:
+
+- `:occurred_at` - when the event or fact happened.
+- `:observed_at` - when memory observed or learned it.
+- `:last_verified_at` - when evidence was last verified.
+- `:valid_from` and `:valid_until` - when a fact/model should be treated as
+  true.
+
 For richer extraction, configure an adapter:
 
 ```elixir
@@ -312,6 +355,8 @@ Persistent records are backend-neutral envelopes in families such as:
 - `:embeddings`
 - `:associations`
 - `:knowledge`
+- `:observations`
+- `:mental_models`
 - `:memory_states`
 - `:consolidation_jobs`
 - `:semantic_compaction_jobs`
@@ -352,6 +397,65 @@ Rebuild the derived durable index if you manually changed durable storage:
 
 ```elixir
 SpectreMnemonic.Durable.Index.rebuild()
+```
+
+### Observations, Mental Models, And Reflection
+
+Observations are consolidated beliefs built from existing moments and governance
+facts. They keep their evidence, source ids, proof count, contradiction count,
+confidence, trend, lifecycle state, scope, and temporal fields.
+
+```elixir
+{:ok, observations} =
+  SpectreMnemonic.consolidate_observations(scope: {:project, "alpha"})
+
+{:ok, matches} =
+  SpectreMnemonic.search_observations("payment retry",
+    scope: {:project, "alpha"}
+  )
+
+{:ok, verified} =
+  SpectreMnemonic.verify_observation(hd(observations),
+    source_id: "mom_123",
+    relation: :supports
+  )
+```
+
+Mental models are curated stable answers for recurring queries. They are stored
+through the same persistence and durable search machinery as other memory.
+
+```elixir
+{:ok, model} =
+  SpectreMnemonic.put_mental_model(%{
+    title: "Payment Retry Policy",
+    query: "payment retry",
+    answer: "Use bounded retries with idempotency keys.",
+    scope: {:project, "alpha"},
+    source_ids: ["mom_123"]
+  })
+
+{:ok, models} =
+  SpectreMnemonic.search_mental_models("payment retry",
+    scope: {:project, "alpha"}
+  )
+```
+
+`reflect/2` gathers mental models first, observations second, then raw recall
+evidence. Without an adapter it returns a structured packet. With an adapter it
+normalizes the adapter output into `packet.response`.
+
+```elixir
+{:ok, packet} =
+  SpectreMnemonic.reflect("What is the payment retry policy?",
+    scope: {:project, "alpha"},
+    max_tokens: 4_096
+  )
+
+packet.mental_models
+packet.observations
+packet.raw_memories
+packet.citations
+packet.response
 ```
 
 ### Compaction
@@ -457,8 +561,11 @@ Generated and persisted records carry provenance in `metadata.provenance`:
   source_span: nil,
   provider: :consolidator,
   confidence: 1.0,
+  occurred_at: ~U[...],
   observed_at: ~U[...],
-  last_verified_at: ~U[...]
+  last_verified_at: ~U[...],
+  valid_from: ~U[...],
+  valid_until: ~U[...]
 }
 ```
 
@@ -693,6 +800,11 @@ mix test
 - `lib/spectre_mnemonic/durable/*` owns derived durable search indexes.
 - `lib/spectre_mnemonic/governance.ex` owns lifecycle states, provenance, and
   structured fact contradiction logic.
+- `lib/spectre_mnemonic/observations.ex` and
+  `lib/spectre_mnemonic/mental_models.ex` own evidence-grounded observations
+  and curated mental models.
+- `lib/spectre_mnemonic/reflection*` builds reflection packets and delegates to
+  optional reflection adapters.
 - `lib/spectre_mnemonic/consolidation_scheduler.ex` owns opt-in background
   consolidation and freshness decay.
 - `lib/spectre_mnemonic/intake*` powers `remember/2`, plugs, extraction, and
