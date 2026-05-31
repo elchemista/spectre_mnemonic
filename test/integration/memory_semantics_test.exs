@@ -116,6 +116,28 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert Enum.all?(Map.values(by_type), &(&1.proof_count == 1))
   end
 
+  test "observation evidence falls back when source confidence is missing" do
+    assert SpectreMnemonic.Observations.__evidence_confidence_for_test__(%{confidence: nil}) ==
+             0.5
+
+    {:ok, _} =
+      SpectreMnemonic.signal("Ranktopic owner is Zoe.",
+        metadata: %{
+          extraction_role: :value,
+          entity: "ranktopic",
+          value_kind: :owner,
+          value: "Zoe",
+          confidence: nil
+        },
+        scope: {:project, "evidence-confidence"}
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(scope: {:project, "evidence-confidence"})
+
+    assert [%{confidence: 0.5}] = observation.evidence
+  end
+
   test "typed observations accumulate support without fact-style contradictions" do
     {:ok, %{moment: first}} =
       SpectreMnemonic.signal("The user prefers simple Elixir-native architecture.",
@@ -339,6 +361,80 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
              SpectreMnemonic.reflect("billing retry", adapter: __MODULE__.ReflectionAdapter)
 
     assert adapted.response == {:reflected, "billing retry", [model.id]}
+  end
+
+  test "reflect ranks observations by evidence priority" do
+    scope = {:project, "reflection-ranking"}
+
+    assert {:ok, model} =
+             SpectreMnemonic.put_mental_model(
+               %{
+                 title: "Ranktopic Model",
+                 query: "ranktopic",
+                 answer: "Use the ranked packet.",
+                 scope: scope
+               },
+               persist?: false
+             )
+
+    texts = [
+      "Ranktopic owner is Zoe.",
+      "This agent often fails because ranktopic searches too broadly.",
+      "Project direction is ranktopic moving away from external services.",
+      "The user prefers ranktopic simple architecture.",
+      "We decided to use ranktopic append-only persistence."
+    ]
+
+    Enum.each(texts, fn text ->
+      assert {:ok, _} = SpectreMnemonic.signal(text, scope: scope, persist?: false)
+    end)
+
+    assert {:ok, observations} =
+             SpectreMnemonic.consolidate_observations(scope: scope, persist?: false)
+
+    assert Enum.sort(Enum.map(observations, & &1.metadata.observation_type)) ==
+             [:decision, :fact, :pattern, :preference, :project_state]
+
+    assert {:ok, %Packet{} = packet} = SpectreMnemonic.reflect("ranktopic", scope: scope)
+
+    assert [^model] = packet.mental_models
+
+    assert Enum.map(packet.observations, & &1.metadata.observation_type) ==
+             [:decision, :preference, :project_state, :pattern, :fact]
+
+    observation_ids = Enum.map(packet.observations, & &1.id)
+
+    assert packet.citations |> hd() |> Map.fetch!(:source) == :mental_model
+
+    assert packet.citations
+           |> Enum.filter(&(&1.source == :observation))
+           |> Enum.map(& &1.id) == observation_ids
+
+    assert packet.citations
+           |> Enum.drop_while(&(&1.source != :moment))
+           |> Enum.all?(&(&1.source == :moment))
+
+    assert {:ok, %Packet{} = adapted} =
+             SpectreMnemonic.reflect("ranktopic",
+               scope: scope,
+               adapter: __MODULE__.RankingReflectionAdapter
+             )
+
+    assert adapted.response ==
+             {:ranked, [:decision, :preference, :project_state, :pattern, :fact],
+              [
+                :mental_model,
+                :observation,
+                :observation,
+                :observation,
+                :observation,
+                :observation,
+                :moment,
+                :moment,
+                :moment,
+                :moment,
+                :moment
+              ]}
   end
 
   test "plain text mental models use first line as title and query" do
@@ -735,6 +831,17 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     def reflect(packet, _opts) do
       ids = Enum.map(packet.mental_models, & &1.id)
       {:ok, {:reflected, packet.query, ids}}
+    end
+  end
+
+  defmodule RankingReflectionAdapter do
+    @behaviour SpectreMnemonic.Reflection.Adapter
+
+    @impl SpectreMnemonic.Reflection.Adapter
+    def reflect(packet, _opts) do
+      observation_types = Enum.map(packet.observations, & &1.metadata.observation_type)
+      citation_sources = Enum.map(packet.citations, & &1.source)
+      {:ok, {:ranked, observation_types, citation_sources}}
     end
   end
 

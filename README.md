@@ -459,9 +459,13 @@ through the same persistence and durable search machinery as other memory.
   )
 ```
 
-`reflect/2` gathers mental models first, observations second, then raw recall
-evidence. Without an adapter it returns a structured packet. With an adapter it
-normalizes the adapter output into `packet.response`.
+`reflect/2` gathers mental models first, ranked observations second, then raw
+recall evidence. Observation evidence is ranked as decisions, preferences,
+project state, patterns, then facts. Without an adapter it returns a structured
+packet. With an adapter it normalizes the adapter output into `packet.response`.
+`max_tokens` is forwarded to recall as a best-effort packet budget and may
+include one oversized primary evidence item when excluding it would make the
+packet empty.
 
 ```elixir
 {:ok, packet} =

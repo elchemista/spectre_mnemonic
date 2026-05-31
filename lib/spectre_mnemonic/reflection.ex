@@ -3,6 +3,14 @@ defmodule SpectreMnemonic.Reflection do
 
   alias SpectreMnemonic.Reflection.Packet
 
+  @observation_rank %{
+    decision: 0,
+    preference: 1,
+    project_state: 2,
+    pattern: 3,
+    fact: 4
+  }
+
   @doc "Builds an evidence packet and optionally lets an adapter respond."
   @spec reflect(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def reflect(query, opts \\ []) do
@@ -17,6 +25,8 @@ defmodule SpectreMnemonic.Reflection do
              Keyword.put(opts, :limit, observation_limit)
            ),
          {:ok, recall} <- SpectreMnemonic.recall(query, opts) do
+      observations = rank_observations(observations)
+
       packet =
         %Packet{
           query: query,
@@ -96,6 +106,25 @@ defmodule SpectreMnemonic.Reflection do
       end)
 
     model_citations ++ observation_citations ++ raw_citations
+  end
+
+  @spec rank_observations([term()]) :: [term()]
+  defp rank_observations(observations) do
+    observations
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {observation, index} -> {observation_rank(observation), index} end)
+    |> Enum.map(fn {observation, _index} -> observation end)
+  end
+
+  @spec observation_rank(term()) :: non_neg_integer()
+  defp observation_rank(observation) do
+    type =
+      case Map.get(observation, :metadata, %{}) do
+        metadata when is_map(metadata) -> Map.get(metadata, :observation_type, :fact)
+        _metadata -> :fact
+      end
+
+    Map.get(@observation_rank, type, map_size(@observation_rank))
   end
 
   @spec confidence([term()], [term()], [term()]) :: float()
