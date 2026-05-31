@@ -443,7 +443,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
   defmodule ReflectionAdapter do
     @behaviour SpectreMnemonic.Reflection.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Reflection.Adapter
     def reflect(packet, _opts) do
       ids = Enum.map(packet.mental_models, & &1.id)
       {:ok, {:reflected, packet.query, ids}}

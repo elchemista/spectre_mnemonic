@@ -7,7 +7,8 @@ defmodule SpectreMnemonic.Embedding.Service do
   Legacy `:embedding_adapter` remains a compatibility override.
   """
 
-  alias SpectreMnemonic.Embedding.{BinaryQuantizer, Vector}
+  alias SpectreMnemonic.Embedding.BinaryQuantizer
+  alias SpectreMnemonic.Embedding.Vector
 
   @doc "Embeds input when an adapter is configured, otherwise returns an empty embedding."
   @spec embed(input :: term(), opts :: keyword()) :: map()

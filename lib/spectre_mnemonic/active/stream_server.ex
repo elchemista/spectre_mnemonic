@@ -9,7 +9,8 @@ defmodule SpectreMnemonic.Active.StreamServer do
 
   use GenServer
 
-  alias SpectreMnemonic.Active.{Focus, StreamRegistry}
+  alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Active.StreamRegistry
 
   @type state :: %{stream: term()}
 
@@ -26,7 +27,7 @@ defmodule SpectreMnemonic.Active.StreamServer do
     GenServer.call(via(stream), {:signal, input, opts})
   end
 
-  @impl true
+  @impl GenServer
   @spec init(stream :: term()) :: {:ok, state()}
   def init(stream) do
     :ets.insert(
@@ -37,7 +38,7 @@ defmodule SpectreMnemonic.Active.StreamServer do
     {:ok, %{stream: stream}}
   end
 
-  @impl true
+  @impl GenServer
   @spec handle_call({:signal, term(), keyword()}, GenServer.from(), state()) ::
           {:reply, {:ok, map()} | {:error, term()}, state()}
   def handle_call({:signal, input, opts}, _from, %{stream: stream} = state) do

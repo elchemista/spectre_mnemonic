@@ -9,7 +9,7 @@ defmodule SpectreMnemonic.Application do
 
   use Application
 
-  @impl true
+  @impl Application
   @spec start(Application.start_type(), term()) :: Supervisor.on_start()
   def start(_type, _args) do
     children = [

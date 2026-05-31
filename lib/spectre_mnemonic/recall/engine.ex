@@ -10,20 +10,21 @@ defmodule SpectreMnemonic.Recall.Engine do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
-  alias SpectreMnemonic.Embedding.{Service, Vector}
+  alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Knowledge
-
-  alias SpectreMnemonic.Memory.{
-    ActionRecipe,
-    Artifact,
-    Association,
-    Moment,
-    Scope,
-    Secret,
-    Temporal
-  }
-
-  alias SpectreMnemonic.Recall.{Cue, Fingerprint, Fusion, Index, Packet}
+  alias SpectreMnemonic.Memory.ActionRecipe
+  alias SpectreMnemonic.Memory.Artifact
+  alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Secret
+  alias SpectreMnemonic.Memory.Temporal
+  alias SpectreMnemonic.Recall.Cue
+  alias SpectreMnemonic.Recall.Fingerprint
+  alias SpectreMnemonic.Recall.Fusion
+  alias SpectreMnemonic.Recall.Index
+  alias SpectreMnemonic.Recall.Packet
   alias SpectreMnemonic.Secrets
 
   @hamming_threshold 0.62
@@ -41,11 +42,11 @@ defmodule SpectreMnemonic.Recall.Engine do
     GenServer.call(__MODULE__, {:recall, cue, opts})
   end
 
-  @impl true
+  @impl GenServer
   @spec init(map()) :: {:ok, map()}
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   @spec handle_call({:recall, term(), keyword()}, GenServer.from(), map()) ::
           {:reply, {:ok, Packet.t()}, map()}
   def handle_call({:recall, cue_input, opts}, _from, state) do

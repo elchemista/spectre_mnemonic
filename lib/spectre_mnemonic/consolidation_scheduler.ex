@@ -35,7 +35,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
     :exit, _reason -> %{running?: false, enabled?: false}
   end
 
-  @impl true
+  @impl GenServer
   def init(_opts) do
     cfg = config()
     state = %{config: cfg, runs: 0, last_run_at: nil, last_result: nil}
@@ -43,7 +43,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
     {:ok, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call(:status, _from, state) do
     {:reply,
      %{
@@ -56,7 +56,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
      }, state}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:tick, state) do
     cfg = config()
     result = run_once(cfg)

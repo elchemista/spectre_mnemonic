@@ -40,7 +40,7 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     ArgumentError -> false
   end
 
-  @impl true
+  @impl GenServer
   @spec init(map()) :: {:ok, map()}
   def init(state) do
     Enum.each(@tables, &create_table/1)

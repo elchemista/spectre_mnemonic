@@ -12,18 +12,14 @@ defmodule SpectreMnemonic.Active.Focus do
   alias SpectreMnemonic.Active.ETSOwner
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
-
-  alias SpectreMnemonic.Memory.{
-    ActionRecipe,
-    Artifact,
-    Association,
-    Moment,
-    Scope,
-    Secret,
-    Signal,
-    Temporal
-  }
-
+  alias SpectreMnemonic.Memory.ActionRecipe
+  alias SpectreMnemonic.Memory.Artifact
+  alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Secret
+  alias SpectreMnemonic.Memory.Signal
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Index
@@ -160,11 +156,11 @@ defmodule SpectreMnemonic.Active.Focus do
     |> Enum.flat_map(&lookup_action_recipe/1)
   end
 
-  @impl true
+  @impl GenServer
   @spec init(state()) :: {:ok, state()}
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   @spec handle_call(term(), GenServer.from(), state()) ::
           {:reply, term(), state()}
   def handle_call({:record_signal, input, opts}, _from, state) do

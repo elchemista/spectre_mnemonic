@@ -5,7 +5,9 @@ defmodule SpectreMnemonic.MentalModels do
 
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
-  alias SpectreMnemonic.Memory.{MentalModel, Scope, Temporal}
+  alias SpectreMnemonic.Memory.MentalModel
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
 
   @mental_model_table :mnemonic_mental_models

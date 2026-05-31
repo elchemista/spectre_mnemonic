@@ -8,7 +8,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidation do
   """
 
   alias SpectreMnemonic.Knowledge.Record
-  alias SpectreMnemonic.Memory.{Association, Moment, Secret}
+  alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Secret
 
   @typedoc "Plain map describing one graph-connected chunk of candidate memories."
   @type window :: %{

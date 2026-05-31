@@ -96,11 +96,11 @@ defmodule SpectreMnemonic.Persistence.Manager do
     |> ensure_stores()
   end
 
-  @impl true
+  @impl GenServer
   @spec init(keyword()) :: {:ok, map()}
   def init(_opts), do: {:ok, %{}}
 
-  @impl true
+  @impl GenServer
   @spec handle_call(term(), GenServer.from(), map()) :: {:reply, term(), map()}
   def handle_call({:append, family, payload, opts}, _from, state) do
     record = build_record(family, :put, payload, opts)

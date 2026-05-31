@@ -8,8 +8,10 @@ defmodule SpectreMnemonic.Durable.Index do
 
   use GenServer
 
-  alias SpectreMnemonic.Embedding.{Service, Vector}
-  alias SpectreMnemonic.Memory.{Scope, Temporal}
+  alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
@@ -52,19 +54,19 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec reset :: :ok
   def reset, do: call_if_running(:reset)
 
-  @impl true
+  @impl GenServer
   @spec init(keyword()) :: {:ok, map()}
   def init(_opts) do
     send(self(), :rebuild)
     {:ok, empty_state()}
   end
 
-  @impl true
+  @impl GenServer
   def handle_info(:rebuild, state) do
     {:noreply, rebuild_state(state, [])}
   end
 
-  @impl true
+  @impl GenServer
   def handle_call({:rebuild, opts}, _from, state) do
     {:reply, :ok, rebuild_state(state, opts)}
   end

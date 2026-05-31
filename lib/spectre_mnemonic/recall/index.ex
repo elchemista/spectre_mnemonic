@@ -53,7 +53,7 @@ defmodule SpectreMnemonic.Recall.Index do
     call_if_running(:reset)
   end
 
-  @impl true
+  @impl GenServer
   @spec init(keyword()) :: {:ok, state()}
   def init(_opts) do
     ensure_table(@index_table)
@@ -62,7 +62,7 @@ defmodule SpectreMnemonic.Recall.Index do
     {:ok, %{next_label: 1, hnsw: nil, hnsw_dim: nil, hnsw_max: nil}}
   end
 
-  @impl true
+  @impl GenServer
   @spec handle_call(term(), GenServer.from(), state()) :: {:reply, term(), state()}
   def handle_call({:upsert, moment}, _from, state) do
     case indexable(moment) do

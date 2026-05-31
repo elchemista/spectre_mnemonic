@@ -6,7 +6,9 @@ defmodule SpectreMnemonic.Observations do
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
-  alias SpectreMnemonic.Memory.{Observation, Scope, Temporal}
+  alias SpectreMnemonic.Memory.Observation
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
 
   @observation_table :mnemonic_observations

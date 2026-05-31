@@ -8,7 +8,8 @@ defmodule SpectreMnemonic.Active.Router do
 
   use GenServer
 
-  alias SpectreMnemonic.Active.{StreamServer, StreamSupervisor}
+  alias SpectreMnemonic.Active.StreamServer
+  alias SpectreMnemonic.Active.StreamSupervisor
 
   @doc "Starts the router process."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -25,11 +26,11 @@ defmodule SpectreMnemonic.Active.Router do
     GenServer.call(__MODULE__, {:signal, input, opts})
   end
 
-  @impl true
+  @impl GenServer
   @spec init(map()) :: {:ok, map()}
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   @spec handle_call({:signal, term(), keyword()}, GenServer.from(), map()) ::
           {:reply, term(), map()}
   def handle_call({:signal, input, opts}, _from, state) do

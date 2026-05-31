@@ -10,8 +10,10 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Governance
-  alias SpectreMnemonic.Knowledge.{Consolidation, Record}
-  alias SpectreMnemonic.Memory.{Scope, Temporal}
+  alias SpectreMnemonic.Knowledge.Consolidation
+  alias SpectreMnemonic.Knowledge.Record
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Manager
 
@@ -38,11 +40,11 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
   end
 
-  @impl true
+  @impl GenServer
   @spec init(map()) :: {:ok, map()}
   def init(state), do: {:ok, state}
 
-  @impl true
+  @impl GenServer
   @spec handle_call({:consolidate, keyword()}, GenServer.from(), map()) ::
           {:reply, {:ok, [Record.t()]} | {:error, term()}, map()}
   def handle_call({:consolidate, opts}, _from, state) do

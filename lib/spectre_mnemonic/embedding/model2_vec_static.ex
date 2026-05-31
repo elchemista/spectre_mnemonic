@@ -8,7 +8,9 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   shape.
   """
 
-  alias SpectreMnemonic.Embedding.{BinaryQuantizer, ModelDownloader, Vector}
+  alias SpectreMnemonic.Embedding.BinaryQuantizer
+  alias SpectreMnemonic.Embedding.ModelDownloader
+  alias SpectreMnemonic.Embedding.Vector
 
   @doc "Embeds input using local Model2Vec artifacts."
   @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}

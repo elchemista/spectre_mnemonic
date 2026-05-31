@@ -2,7 +2,8 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
   use SpectreMnemonic.MemoryCase
 
   alias SpectreMnemonic.Active.Focus
-  alias SpectreMnemonic.Knowledge.{Record, SMEM}
+  alias SpectreMnemonic.Knowledge.Record
+  alias SpectreMnemonic.Knowledge.SMEM
 
   test "knowledge smem appends and replays compact events" do
     assert {:ok, first_seq} =
@@ -243,7 +244,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
   defmodule CustomCompactAdapter do
     @behaviour SpectreMnemonic.Knowledge.Compact.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Knowledge.Compact.Adapter
     def compact(input, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:compact_called, input})
 

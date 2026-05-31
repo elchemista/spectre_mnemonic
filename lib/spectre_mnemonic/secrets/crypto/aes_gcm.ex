@@ -15,7 +15,7 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   @iv_bytes 12
   @key_bytes 32
 
-  @impl true
+  @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def encrypt(plaintext, context, opts) when is_binary(plaintext) do
     with {:ok, key} <- key(context, opts) do
       iv = :crypto.strong_rand_bytes(@iv_bytes)
@@ -37,7 +37,7 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
 
   def encrypt(plaintext, context, opts), do: encrypt(inspect(plaintext), context, opts)
 
-  @impl true
+  @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def decrypt(%Secret{} = secret, context, opts) do
     with {:ok, key} <- key(context, opts),
          :ok <- supported_algorithm(secret.algorithm) do

@@ -3,8 +3,12 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
-  alias SpectreMnemonic.Persistence.Store.{Codec, Mongo, Postgres, Record, S3}
+  alias SpectreMnemonic.Persistence.Store.Codec
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
+  alias SpectreMnemonic.Persistence.Store.Mongo
+  alias SpectreMnemonic.Persistence.Store.Postgres
+  alias SpectreMnemonic.Persistence.Store.Record
+  alias SpectreMnemonic.Persistence.Store.S3
 
   test "writes to primary and duplicate stores but skips duplicate false stores" do
     configure_stores([
@@ -497,10 +501,10 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   defmodule FakeAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def capabilities(opts), do: Keyword.get(opts, :capabilities, [:append, :replay, :event_log])
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(record, opts) do
       send(Keyword.fetch!(opts, :send_to), {:fake_put, Keyword.fetch!(opts, :id), record})
 
@@ -510,10 +514,10 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       end
     end
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def replay(opts), do: {:ok, Keyword.get(opts, :frames, [])}
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def replay_fold(opts, acc, fun) do
       send(Keyword.fetch!(opts, :send_to), {:fake_replay_fold, Keyword.fetch!(opts, :id)})
 
@@ -528,7 +532,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       |> then(&{:ok, &1})
     end
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def get(family, id, opts) do
       case Map.fetch(Keyword.get(opts, :lookup, %{}), {family, id}) do
         {:ok, result} -> {:ok, result}
@@ -536,14 +540,14 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       end
     end
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
   end
 
   defmodule SemanticCompactAdapter do
     @behaviour SpectreMnemonic.Persistence.Compact.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Compact.Adapter
     def compact(input, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:semantic_adapter_called, input})
       [source] = input.records
@@ -565,7 +569,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   defmodule UnknownFamilyAdapter do
     @behaviour SpectreMnemonic.Persistence.Compact.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Compact.Adapter
     def compact(_input, _opts) do
       {:ok, %{records: [%{"family" => "not_a_known_family", "payload" => %{id: "unsafe"}}]}}
     end
@@ -574,13 +578,13 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   defmodule NativeSemanticAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def capabilities(_opts), do: [:append, :semantic_compact]
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(_record, _opts), do: :ok
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def semantic_compact(input, opts) do
       send(Keyword.fetch!(opts, :send_to), {:native_semantic_compact, input})
       {:ok, %{strategy: :native_test, written: 3, tombstones: 1}}

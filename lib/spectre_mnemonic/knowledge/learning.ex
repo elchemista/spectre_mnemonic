@@ -3,7 +3,8 @@ defmodule SpectreMnemonic.Knowledge.Learning do
   Normalizes agent-authored skills and stores them in compact knowledge.
   """
 
-  alias SpectreMnemonic.Knowledge.{Base, SMEM}
+  alias SpectreMnemonic.Knowledge.Base
+  alias SpectreMnemonic.Knowledge.SMEM
 
   @type result :: %{event: SMEM.event(), seq: pos_integer()}
 

@@ -13,8 +13,12 @@ defmodule SpectreMnemonic.IntegrationTest do
   }
 
   alias SpectreMnemonic.Intake.Packet
-  alias SpectreMnemonic.Knowledge.{Consolidation, Record}
-  alias SpectreMnemonic.Memory.{ActionRecipe, Moment, Secret, Signal}
+  alias SpectreMnemonic.Knowledge.Consolidation
+  alias SpectreMnemonic.Knowledge.Record
+  alias SpectreMnemonic.Memory.ActionRecipe
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Secret
+  alias SpectreMnemonic.Memory.Signal
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Secrets.Crypto.AESGCM
@@ -1485,18 +1489,21 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule VectorAdapter do
     @behaviour SpectreMnemonic.Embedding.Adapter
 
+    @impl SpectreMnemonic.Embedding.Adapter
     def embed(_input, _opts), do: {:ok, [1.0, 0.0, 0.0]}
   end
 
   defmodule FailingAdapter do
     @behaviour SpectreMnemonic.Embedding.Adapter
 
+    @impl SpectreMnemonic.Embedding.Adapter
     def embed(_input, _opts), do: {:error, :boom}
   end
 
   defmodule TwoVectorAdapter do
     @behaviour SpectreMnemonic.Embedding.Adapter
 
+    @impl SpectreMnemonic.Embedding.Adapter
     def embed(input, _opts) do
       text = if is_binary(input), do: input, else: inspect(input)
 
@@ -1511,23 +1518,23 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule SearchAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def capabilities(_opts), do: [:append, :search]
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(record, opts) do
       send(Keyword.fetch!(opts, :send_to), {:search_adapter_put, record})
       :ok
     end
 
-    @impl true
+    @impl SpectreMnemonic.Persistence.Store.Adapter
     def search(_cue, opts), do: {:ok, Keyword.get(opts, :search_results, [])}
   end
 
   defmodule MultilingualExtractionAdapter do
     @behaviour SpectreMnemonic.Intake.Extraction.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Extraction.Adapter
     def extract(text, _opts) do
       cond do
         String.contains?(text, "Carlos") ->
@@ -1581,7 +1588,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule ComplexExtractionAdapter do
     @behaviour SpectreMnemonic.Intake.Extraction.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Extraction.Adapter
     def extract(_text, _opts) do
       {:ok,
        %{
@@ -1625,14 +1632,14 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule InvalidExtractionAdapter do
     @behaviour SpectreMnemonic.Intake.Extraction.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Extraction.Adapter
     def extract(_text, _opts), do: "definitely not a graph"
   end
 
   defmodule ConsolidationAdapter do
     @behaviour SpectreMnemonic.Knowledge.Consolidator.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Knowledge.Consolidator.Adapter
     def consolidate(context, opts) do
       %Consolidation{} = context
 
@@ -1658,13 +1665,13 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule RuntimeAdapter do
     @behaviour SpectreMnemonic.Actions.Runtime.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Actions.Runtime.Adapter
     def analyze(recipe, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:runtime_called, :analyze, recipe})
       {:ok, %{safe?: true}}
     end
 
-    @impl true
+    @impl SpectreMnemonic.Actions.Runtime.Adapter
     def run(recipe, context, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:runtime_called, :run, recipe, context})
       {:ok, %{refreshed?: true}}
@@ -1674,7 +1681,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule ApprovingSecretAuth do
     @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Secrets.Authorization.Adapter
     def authorize(request, opts) do
       if pid = Keyword.get(opts, :test_pid) do
         send(pid, {:secret_authorize, request})
@@ -1687,14 +1694,14 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule DenyingSecretAuth do
     @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
 
-    @impl true
+    @impl SpectreMnemonic.Secrets.Authorization.Adapter
     def authorize(_request, _opts), do: {:error, :denied}
   end
 
   defmodule GlobalMemoryPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       if pid = Keyword.get(opts, :test_pid) do
         send(pid, {:plug_called, :global, memory.text})
@@ -1712,7 +1719,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule PerCallMemoryPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       order = Map.get(memory.metadata, :plug_order, [])
 
@@ -1732,7 +1739,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule TupleOptionPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       route = Keyword.fetch!(opts, :route)
       confidence = Keyword.fetch!(opts, :confidence)
@@ -1753,7 +1760,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule MemoryMutatorPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, _opts) do
       metadata = Map.put(memory.metadata, :intent, :implementation)
 
@@ -1771,7 +1778,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule HaltMemoryPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, _opts) do
       metadata = Map.put(memory.metadata, :halted_by_plug?, true)
 
@@ -1788,7 +1795,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule ShouldNotRunPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       if pid = Keyword.get(opts, :test_pid) do
         send(pid, {:should_not_run_plug, memory.text})
@@ -1801,7 +1808,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule StripeSecretRouterPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       recent_text = Enum.map(memory.recent_moments, & &1.text)
       stripe_context = Enum.find(memory.recent_moments, &String.contains?(&1.text, "Stripe"))
@@ -1832,7 +1839,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule RecentProbePlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, opts) do
       if pid = Keyword.get(opts, :test_pid) do
         send(pid, {:recent_probe, Enum.map(memory.recent_moments, & &1.text)})
@@ -1845,7 +1852,7 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule AlwaysSecretPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(memory, _opts) do
       metadata = Map.put(memory.metadata, :source, :always_secret_plug)
 
@@ -1861,28 +1868,28 @@ defmodule SpectreMnemonic.IntegrationTest do
   defmodule HaltPacketPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(_memory, _opts), do: {:ok, %Packet{warnings: [:halted_packet]}}
   end
 
   defmodule HaltMomentPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(_memory, _opts), do: %Moment{id: "plug_moment", text: "plug moment"}
   end
 
   defmodule HaltSecretPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(_memory, _opts), do: %Secret{id: "plug_secret", text: "secret: plug"}
   end
 
   defmodule HaltSignalPlug do
     @behaviour SpectreMnemonic.Intake.Plug
 
-    @impl true
+    @impl SpectreMnemonic.Intake.Plug
     def call(_memory, _opts), do: %Signal{id: "plug_signal", input: "plug signal"}
   end
 

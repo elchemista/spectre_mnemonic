@@ -9,15 +9,24 @@ defmodule SpectreMnemonic do
   Spectre Mnemonic is a living focus that slowly becomes organized memory.
   """
 
-  alias SpectreMnemonic.Active.{Focus, Router}
+  alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Active.Router
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Intake
-  alias SpectreMnemonic.Knowledge.{Base, Compact, Consolidator, Learning, Record}
-  alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Secret}
+  alias SpectreMnemonic.Knowledge.Base
+  alias SpectreMnemonic.Knowledge.Compact
+  alias SpectreMnemonic.Knowledge.Consolidator
+  alias SpectreMnemonic.Knowledge.Learning
+  alias SpectreMnemonic.Knowledge.Record
+  alias SpectreMnemonic.Memory.ActionRecipe
+  alias SpectreMnemonic.Memory.Artifact
+  alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Observations
   alias SpectreMnemonic.Persistence.Manager
-  alias SpectreMnemonic.Recall.{Engine, Packet}
+  alias SpectreMnemonic.Recall.Engine
+  alias SpectreMnemonic.Recall.Packet
   alias SpectreMnemonic.Reflection
   alias SpectreMnemonic.Secrets
 

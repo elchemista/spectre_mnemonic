@@ -21,7 +21,7 @@ defmodule SpectreMnemonic.Active.StreamSupervisor do
     end
   end
 
-  @impl true
+  @impl DynamicSupervisor
   @spec init(:ok) ::
           {:ok,
            %{

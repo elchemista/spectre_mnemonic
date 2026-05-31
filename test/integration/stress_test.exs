@@ -406,6 +406,7 @@ defmodule SpectreMnemonic.Integration.StressTest do
   defmodule TwoVectorAdapter do
     @behaviour SpectreMnemonic.Embedding.Adapter
 
+    @impl SpectreMnemonic.Embedding.Adapter
     def embed(input, _opts) do
       text = if is_binary(input), do: input, else: inspect(input)
 
@@ -420,6 +421,7 @@ defmodule SpectreMnemonic.Integration.StressTest do
   defmodule RichAdapter do
     @behaviour SpectreMnemonic.Embedding.Adapter
 
+    @impl SpectreMnemonic.Embedding.Adapter
     def embed(_input, _opts) do
       {:ok, %{vector: [0.2, 0.8], provider: :test, dimensions: 2, model: "fake"}}
     end

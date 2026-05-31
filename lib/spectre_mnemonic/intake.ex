@@ -7,8 +7,16 @@ defmodule SpectreMnemonic.Intake do
   """
 
   alias SpectreMnemonic.Active.Focus
-  alias SpectreMnemonic.Intake.{Extraction, Memory, Packet, PlugPipeline}
-  alias SpectreMnemonic.Memory.{Association, Moment, Scope, Secret, Signal, Temporal}
+  alias SpectreMnemonic.Intake.Extraction
+  alias SpectreMnemonic.Intake.Memory
+  alias SpectreMnemonic.Intake.Packet
+  alias SpectreMnemonic.Intake.PlugPipeline
+  alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.Secret
+  alias SpectreMnemonic.Memory.Signal
+  alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Result
 
   @default_chunk_words 180
