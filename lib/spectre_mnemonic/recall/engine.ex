@@ -5,6 +5,20 @@ defmodule SpectreMnemonic.Recall.Engine do
   The search is intentionally brute-force in V1: keyword/entity overlap,
   optional vector cosine similarity, fingerprint hamming distance, and graph
   expansion through associations.
+
+  Recall is an evidence-gathering layer, not an answer generator. It returns a
+  packet containing ranked moments plus related observations, mental models,
+  compact knowledge, artifacts, associations, and action recipes. A caller can
+  then render that packet, pass it to a reflection adapter, or feed it to an LLM.
+
+  Ranking happens in three passes:
+
+    1. Score visible active moments by text, metadata, status, vector, and
+       fingerprint signals.
+    2. Expand through memory associations so nearby graph context can join the
+       result set.
+    3. Apply a token budget that keeps primary evidence first and dependent
+       records second.
   """
 
   use GenServer
@@ -36,7 +50,23 @@ defmodule SpectreMnemonic.Recall.Engine do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
-  @doc "Returns a neighborhood packet for a cue."
+  @doc """
+  Returns a neighborhood packet for a cue.
+
+  Common options:
+
+    * `:limit` - maximum primary memory candidates.
+    * `:budget` - `:low`, `:mid`, or `:high` preset.
+    * `:max_tokens` - hard packet budget.
+    * `:include_observations` - include derived observations.
+    * `:include_mental_models` - include curated models.
+    * `:include_knowledge` - include compact progressive knowledge.
+
+  ## Example
+
+      iex> SpectreMnemonic.Recall.Engine.recall("what blocks deploy?", limit: 5)
+      {:ok, %SpectreMnemonic.Recall.Packet{}}
+  """
   @spec recall(term(), keyword()) :: {:ok, Packet.t()}
   def recall(cue, opts \\ []) do
     GenServer.call(__MODULE__, {:recall, cue, opts})
@@ -61,6 +91,9 @@ defmodule SpectreMnemonic.Recall.Engine do
     base_ranked = ranked_moments(cue, index_scores, seed_limit, opts)
     graph_ranked = expand_graph(base_ranked, budget.graph_depth, opts)
 
+    # The dedicated embedding index can find candidates that text scoring misses.
+    # Reciprocal-rank fusion lets those candidates compete without requiring all
+    # scoring systems to share the same numeric scale.
     index_ranked =
       index_results |> Enum.map(& &1.id) |> Focus.moments_by_ids() |> filter_moments(opts)
 
@@ -76,6 +109,9 @@ defmodule SpectreMnemonic.Recall.Engine do
     mental_model_candidates = recall_mental_models(cue_input, opts)
     knowledge_candidates = compact_knowledge(opts)
 
+    # Budgeting is split in two passes: first reserve room for primary evidence,
+    # then spend the remaining room on records that only make sense with that
+    # evidence, such as associations and action recipes.
     {components, used_tokens} =
       apply_primary_budget(
         ranked_candidates,

@@ -1,6 +1,11 @@
 defmodule SpectreMnemonic.MentalModels do
   @moduledoc """
   Curated mental models stored beside existing durable memory.
+
+  Mental models are stable guidance records: strategies, preferences,
+  procedures, or domain principles that should be easy to recall without
+  depending on raw moment recency. They can be searched alongside recall and
+  reflection packets.
   """
 
   alias SpectreMnemonic.Embedding.Service
@@ -12,7 +17,22 @@ defmodule SpectreMnemonic.MentalModels do
 
   @mental_model_table :mnemonic_mental_models
 
-  @doc "Stores or replaces a curated mental model."
+  @doc """
+  Stores or replaces a curated mental model.
+
+  Accepted input can be a map, keyword list, or text. Maps may include `:id`,
+  `:title`, `:query`, `:answer`, `:scope`, `:source_ids`, `:citations`,
+  `:metadata`, and temporal fields. Text input uses the first non-empty line as
+  title/query and the full text as the answer.
+
+  ## Examples
+
+      iex> SpectreMnemonic.MentalModels.put("Debugging\\nPrefer the smallest reproducible case.")
+      {:ok, %SpectreMnemonic.Memory.MentalModel{}}
+
+      iex> SpectreMnemonic.MentalModels.put(%{query: "How to review PRs?", answer: "Find risks first."})
+      {:ok, %SpectreMnemonic.Memory.MentalModel{}}
+  """
   @spec put(term(), keyword()) :: {:ok, MentalModel.t()} | {:error, term()}
   def put(input, opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
@@ -33,7 +53,17 @@ defmodule SpectreMnemonic.MentalModels do
     result
   end
 
-  @doc "Searches active and durable mental models."
+  @doc """
+  Searches active and durable mental models.
+
+  Search filters by scope and temporal options, then returns matching active
+  models plus durable model records found by persistent search.
+
+  ## Example
+
+      iex> SpectreMnemonic.MentalModels.search("review PR risks", limit: 3)
+      {:ok, _models}
+  """
   @spec search(term(), keyword()) :: {:ok, [MentalModel.t() | map()]}
   def search(cue, opts \\ []) do
     active =

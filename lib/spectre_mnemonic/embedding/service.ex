@@ -5,12 +5,45 @@ defmodule SpectreMnemonic.Embedding.Service do
   No provider is required. When none is configured, or when it fails, signals
   are still ingested and recall falls back to text, hamming, and graph matching.
   Legacy `:embedding_adapter` remains a compatibility override.
+
+  The service normalizes provider output into one internal shape:
+
+      %{
+        vector: <<_::binary>> | nil,
+        binary_signature: <<_::binary>> | nil,
+        metadata: map(),
+        error: term() | nil
+      }
+
+  Providers may return a raw list vector or a map with vector metadata. This
+  module converts vectors to normalized `:f32` binaries and builds a compact
+  binary signature for hamming-based recall.
   """
 
   alias SpectreMnemonic.Embedding.BinaryQuantizer
   alias SpectreMnemonic.Embedding.Vector
 
-  @doc "Embeds input when an adapter is configured, otherwise returns an empty embedding."
+  @doc """
+  Embeds input when an adapter is configured, otherwise returns an empty embedding.
+
+  `embed/2` never raises provider errors to callers. A failed or unavailable
+  provider returns an embedding map with `vector: nil` and an `:error` value so
+  ingestion can continue.
+
+  Resolution order:
+
+    1. `:embedding_adapter` application config.
+    2. Fast local provider config under `:embedding`.
+    3. Empty embedding fallback.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Embedding.Service.embed("hello", [])
+      %{vector: nil, binary_signature: nil, metadata: %{}, error: nil}
+
+      iex> SpectreMnemonic.Embedding.Service.embed("hello", signature_bits: 16)
+      %{vector: _vector_or_nil, binary_signature: _signature_or_nil, metadata: _metadata, error: _error}
+  """
   @spec embed(input :: term(), opts :: keyword()) :: map()
   def embed(input, opts) do
     adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
@@ -46,6 +79,8 @@ defmodule SpectreMnemonic.Embedding.Service do
         %{vector: nil, binary_signature: nil, metadata: %{}, error: :provider_not_available}
 
       function_exported?(provider, :embed, 2) ->
+        # Providers are allowed to fail without breaking ingestion. The recall
+        # engine still has text, metadata, fingerprint, and graph signals.
         case provider.embed(input, provider_opts) do
           {:ok, result} ->
             normalize_result(result, provider_opts)

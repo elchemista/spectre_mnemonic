@@ -4,6 +4,17 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   Spectre Mnemonic is not a database of everything.
   Spectre Mnemonic is a living focus that slowly becomes organized memory.
+
+  Consolidation is the promotion step between hot active memory and durable
+  knowledge. The default strategy selects moments above an attention threshold,
+  expands them with nearby graph context, builds knowledge records, persists the
+  requested durable outputs, and marks source moments as promoted.
+
+  Custom logic can be injected per call with `:consolidate_with` or configured
+  globally with `:consolidation_adapter`. Both receive a
+  `%SpectreMnemonic.Knowledge.Consolidation{}` struct that already contains
+  selected moments, associations, graph windows, timestamps, opts, and default
+  durable outputs.
   """
 
   use GenServer
@@ -33,6 +44,25 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   experiments, or configure `:consolidation_adapter` for application-level
   promotion logic. Both receive a `%SpectreMnemonic.Knowledge.Consolidation{}`
   with graph windows and default durable outputs already populated.
+
+  Useful options:
+
+    * `:min_attention` - select source moments with at least this attention.
+    * `:graph_depth` - include associations around selected moments.
+    * `:consolidate_with` - one- or two-arity function for custom promotion.
+    * `:consolidation_adapter` - module implementing the adapter behaviour.
+    * `:timeout` - GenServer call timeout in milliseconds.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Knowledge.Consolidator.consolidate(min_attention: 1.5)
+      {:ok, [%SpectreMnemonic.Knowledge.Record{} | _]}
+
+      iex> fun = fn context ->
+      ...>   {:ok, %{context | strategy: :custom, warnings: [:inspected]}}
+      ...> end
+      iex> SpectreMnemonic.Knowledge.Consolidator.consolidate(consolidate_with: fun)
+      {:ok, _records}
   """
   @spec consolidate(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
@@ -53,6 +83,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     active_moments = Focus.moments()
     associations = Focus.associations()
 
+    # Build the default consolidation first, then let the custom function or
+    # adapter modify it. This keeps adapters focused on policy instead of making
+    # every adapter rebuild the same active-memory context.
     consolidation =
       active_moments
       |> candidate_moments(min_attention)

@@ -4,6 +4,18 @@ defmodule SpectreMnemonic.Governance do
 
   Governance is stored as append-only `:memory_states` records so existing
   memory structs stay backward compatible.
+
+  This module answers questions such as:
+
+    * Is a memory still visible in search?
+    * Which newer fact replaced an older fact?
+    * Where did this fact come from?
+    * Has this memory been promoted, pinned, marked stale, contradicted, or
+      forgotten?
+
+  The key design choice is append-only state. Memory payloads are not mutated
+  when their lifecycle changes; instead, state events are written beside them and
+  readers interpret the latest event.
   """
 
   alias SpectreMnemonic.Persistence.Manager
@@ -15,11 +27,29 @@ defmodule SpectreMnemonic.Governance do
   @type state ::
           :candidate | :short_term | :promoted | :pinned | :stale | :contradicted | :forgotten
 
-  @doc "Returns known lifecycle states."
+  @doc """
+  Returns known lifecycle states.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.states()
+      [:candidate, :short_term, :promoted, :pinned, :stale, :contradicted, :forgotten]
+  """
   @spec states :: [state()]
   def states, do: @states
 
-  @doc "Merges a normalized provenance map into metadata."
+  @doc """
+  Merges a normalized provenance map into metadata.
+
+  Existing provenance is preserved and caller-supplied provenance fields are
+  merged in. Use this when building derived records such as summaries,
+  observations, or consolidation outputs.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.with_provenance(%{}, source_ids: ["mom_1"], provider: :adapter)
+      %{provenance: %{source_ids: ["mom_1"], provider: :adapter, observed_at: _observed_at}}
+  """
   @spec with_provenance(map(), keyword()) :: map()
   def with_provenance(metadata, opts \\ []) when is_map(metadata) do
     provenance =
@@ -31,7 +61,18 @@ defmodule SpectreMnemonic.Governance do
     Map.put(metadata, :provenance, provenance)
   end
 
-  @doc "Observes a persisted moment and writes state/fact governance events."
+  @doc """
+  Observes a persisted moment and writes state/fact governance events.
+
+  Plain moments get a lifecycle state event. Extracted value moments may also be
+  treated as facts: identical facts verify the current fact, newer conflicting
+  facts contradict the previous one unless it is pinned.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.observe_moment(%{id: "mom_1", kind: :text, metadata: %{}})
+      :ok
+  """
   @spec observe_moment(map(), keyword()) :: :ok
   def observe_moment(moment, opts \\ [])
 
@@ -52,7 +93,12 @@ defmodule SpectreMnemonic.Governance do
 
   def observe_moment(_moment, _opts), do: :ok
 
-  @doc "Writes promoted state events for consolidated moments."
+  @doc """
+  Writes promoted state events for consolidated moments.
+
+  Consolidation calls this after selected active moments have been written to
+  durable memory.
+  """
   @spec promote_moments([map()], keyword()) :: :ok
   def promote_moments(moments, opts \\ []) do
     Enum.each(moments, fn
@@ -64,13 +110,29 @@ defmodule SpectreMnemonic.Governance do
     end)
   end
 
-  @doc "Writes forgotten state and tombstone events for a memory id."
+  @doc """
+  Writes forgotten state for a memory id.
+
+  Search hides memories whose latest lifecycle state is `:forgotten`.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.forget("mom_1")
+      :ok
+  """
   @spec forget(binary(), keyword()) :: :ok
   def forget(id, opts \\ []) when is_binary(id) do
     append_state(id, :forgotten, :forgotten, opts)
   end
 
-  @doc "Returns the latest lifecycle state for one memory id."
+  @doc """
+  Returns the latest lifecycle state for one memory id.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.state_for("mom_1")
+      :short_term
+  """
   @spec state_for(binary(), keyword()) :: state() | nil
   def state_for(memory_id, opts \\ []) when is_binary(memory_id) do
     {:ok, records} = Manager.replay(opts)
@@ -87,13 +149,29 @@ defmodule SpectreMnemonic.Governance do
     end
   end
 
-  @doc "Returns true when a memory should be visible in default search."
+  @doc """
+  Returns true when a memory should be visible in default search.
+
+  Forgotten and contradicted memories are hidden by default. Stale memories are
+  still visible because they may remain useful with lower confidence.
+  """
   @spec search_visible?(binary(), keyword()) :: boolean()
   def search_visible?(memory_id, opts \\ []) do
     state_for(memory_id, opts) not in [:forgotten, :contradicted]
   end
 
-  @doc "Marks old unverified facts as stale unless pinned or already terminal."
+  @doc """
+  Marks old unverified facts as stale unless pinned or already terminal.
+
+  This is a freshness policy for structured facts, not a deletion policy. It
+  appends `:stale` events so future searches and reflections can treat old facts
+  more cautiously while keeping their audit history.
+
+  ## Example
+
+      iex> SpectreMnemonic.Governance.decay(stale_after_ms: 86_400_000)
+      {:ok, %{stale: _count}}
+  """
   @spec decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
   def decay(opts \\ []) do
     stale_after_ms =
@@ -134,7 +212,18 @@ defmodule SpectreMnemonic.Governance do
     end
   end
 
-  @doc "Builds a state event payload."
+  @doc """
+  Builds a state event payload.
+
+  This pure function is useful for tests and custom adapters that want to inspect
+  or persist state events themselves.
+
+  ## Example
+
+      iex> event = SpectreMnemonic.Governance.state_event("mom_1", :promoted, :manual)
+      iex> event.state
+      :promoted
+  """
   @spec state_event(binary(), state(), atom(), keyword(), map()) :: map()
   def state_event(memory_id, state, reason, opts \\ [], metadata \\ %{}) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
@@ -158,7 +247,13 @@ defmodule SpectreMnemonic.Governance do
     }
   end
 
-  @doc "Extracts a normalized entity fact claim from a memory-like map."
+  @doc """
+  Extracts a normalized entity fact claim from a memory-like map.
+
+  Fact claims come from extracted value metadata when present, otherwise from a
+  small text heuristic for common attributes such as email, phone, age, status,
+  birthday, deadline, and owner.
+  """
   @spec fact_claim(map()) :: map() | nil
   def fact_claim(%{metadata: metadata} = moment) when is_map(metadata) do
     from_extracted_value(moment) || from_text(moment)

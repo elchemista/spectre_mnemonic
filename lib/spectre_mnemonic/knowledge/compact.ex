@@ -1,13 +1,33 @@
 defmodule SpectreMnemonic.Knowledge.Compact do
   @moduledoc """
   Adapter-driven progressive knowledge compaction.
+
+  Compact knowledge is the small, always-loadable memory layer stored in
+  `knowledge.smem`. Compaction combines recent active memory with existing
+  knowledge events, optionally hands that bundle to an adapter, normalizes the
+  adapter output, and replaces the compact event log.
   """
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Knowledge.Base
   alias SpectreMnemonic.Knowledge.SMEM
 
-  @doc "Compacts active memory and existing knowledge events into `knowledge.smem`."
+  @doc """
+  Compacts active memory and existing knowledge events into `knowledge.smem`.
+
+  Without an adapter, the default strategy keeps a global summary, important
+  summaries, latest ingestions, and existing skill/procedure/fact events. With an
+  adapter, the adapter receives a map containing `:moments`, `:existing_events`,
+  `:summaries`, `:categories`, `:skills`, `:budgets`, and original opts.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Knowledge.Compact.compact_knowledge()
+      {:ok, %{events: _events, count: _count}}
+
+      iex> SpectreMnemonic.Knowledge.Compact.compact_knowledge(compact_adapter: MyCompactAdapter)
+      {:ok, %{events: _events, count: _count}}
+  """
   @spec compact_knowledge(keyword()) ::
           {:ok, %{events: [map()], count: non_neg_integer()}} | {:error, term()}
   def compact_knowledge(opts \\ []) do
@@ -27,6 +47,8 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   defp build_input(existing_events, cfg, opts) do
     moments = Focus.moments()
 
+    # Adapters receive a bounded, domain-shaped input. They do not need to know
+    # about ETS, SMEM files, or how budget settings are stored in app config.
     %{
       moments: moments,
       existing_events: existing_events,

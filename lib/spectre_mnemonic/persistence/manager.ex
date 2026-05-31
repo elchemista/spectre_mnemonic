@@ -5,6 +5,25 @@ defmodule SpectreMnemonic.Persistence.Manager do
   Focus keeps hot memory in ETS. This process normalizes durable writes into
   storage envelopes and fans them out to configured adapters according to the
   current persistence policy.
+
+  The manager is the boundary between domain memory structs and infrastructure.
+  Callers pass family-tagged payloads or `%SpectreMnemonic.Persistence.Store.Record{}`
+  envelopes; configured store adapters decide how those records are written,
+  replayed, searched, or compacted.
+
+  A minimal configuration writes to the local append-only file store:
+
+      config :spectre_mnemonic,
+        data_root: "mnemonic_data",
+        persistent_memory: [
+          stores: [
+            [id: :local_file, adapter: SpectreMnemonic.Persistence.Store.File, role: :primary]
+          ]
+        ]
+
+  Multiple stores can be configured with roles, duplicate policies, and family
+  filters. The write result reports each store outcome so callers can diagnose
+  partial failures without losing the normalized record.
   """
 
   use GenServer
@@ -36,33 +55,96 @@ defmodule SpectreMnemonic.Persistence.Manager do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @doc "Persists a family-tagged payload using the configured write policy."
+  @doc """
+  Persists a family-tagged payload using the configured write policy.
+
+  `append/3` builds the storage envelope for you. Use it from application code
+  when the payload is already a domain struct or map and belongs to a known
+  persistent family such as `:moments`, `:knowledge`, `:observations`, or
+  `:mental_models`.
+
+  ## Example
+
+      iex> SpectreMnemonic.Persistence.Manager.append(:knowledge, %{id: "k1", text: "Use retries sparingly"})
+      {:ok, %{record: %SpectreMnemonic.Persistence.Store.Record{}, stores: _stores}}
+  """
   @spec append(atom(), term(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def append(family, payload, opts \\ []) do
     GenServer.call(__MODULE__, {:append, family, payload, opts})
   end
 
-  @doc "Persists an already-built storage record."
+  @doc """
+  Persists an already-built storage record.
+
+  Use `put/2` when an upstream caller has already assigned ids, operation,
+  dedupe keys, provenance, or metadata and wants the manager to fan that exact
+  envelope out to configured stores.
+
+  ## Example
+
+      iex> record = %SpectreMnemonic.Persistence.Store.Record{
+      ...>   id: "pmem_1",
+      ...>   family: :knowledge,
+      ...>   operation: :put,
+      ...>   payload: %{id: "k1", text: "Operator prefers short answers"},
+      ...>   dedupe_key: "knowledge:k1",
+      ...>   inserted_at: DateTime.utc_now()
+      ...> }
+      iex> SpectreMnemonic.Persistence.Manager.put(record)
+      {:ok, %{record: ^record, stores: _stores}}
+  """
   @spec put(Record.t(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def put(%Record{} = record, opts \\ []) do
     GenServer.call(__MODULE__, {:put, record, opts})
   end
 
-  @doc "Replays and deduplicates records from stores that advertise replay."
+  @doc """
+  Replays and deduplicates records from stores that advertise replay.
+
+  Replay is the recovery path used by durable indexes and startup tooling. It
+  folds append-only frames from each replayable store, keeps the latest state by
+  family/id, and hides tombstoned records.
+
+  ## Example
+
+      iex> SpectreMnemonic.Persistence.Manager.replay()
+      {:ok, [%SpectreMnemonic.Persistence.Store.Record{} | _]}
+  """
   @spec replay(keyword()) :: {:ok, [Record.t()]}
   def replay(opts \\ []) do
     GenServer.call(__MODULE__, {:replay, opts})
   end
 
-  @doc "Looks up one durable record from stores that advertise lookup."
+  @doc """
+  Looks up one durable record from stores that advertise lookup.
+
+  Stores are queried in configured order. The first `{:ok, record}` wins; missing
+  or unsupported lookups continue to the next store.
+
+  ## Example
+
+      iex> SpectreMnemonic.Persistence.Manager.get(:knowledge, "k1")
+      {:ok, _record}
+  """
   @spec get(atom(), binary(), keyword()) :: {:ok, term()} | {:error, :not_found}
   def get(family, id, opts \\ []) do
     GenServer.call(__MODULE__, {:get, family, id, opts})
   end
 
-  @doc "Searches durable stores that advertise query capabilities."
+  @doc """
+  Searches durable stores that advertise query capabilities.
+
+  The manager merges results from the local durable index and any store adapter
+  with `:search`, `:vector_search`, or `:fulltext_search` capability. Results are
+  tagged by store before being returned.
+
+  ## Example
+
+      iex> SpectreMnemonic.Persistence.Manager.search("retry policy", limit: 10)
+      {:ok, _results}
+  """
   @spec search(term(), keyword()) :: {:ok, [map()]}
   def search(cue, opts \\ []) do
     GenServer.call(__MODULE__, {:search, cue, opts})
@@ -74,6 +156,18 @@ defmodule SpectreMnemonic.Persistence.Manager do
   Defaults to physical snapshot compaction for backward compatibility.
   Pass `mode: :semantic` to run semantic compaction, or `mode: :all` to run
   semantic compaction followed by physical snapshotting.
+
+  Physical compaction writes a snapshot of replayable records. Semantic
+  compaction gives a configured adapter a selected set of records and lets it
+  write replacement records and tombstones.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Persistence.Manager.compact(mode: :physical)
+      {:ok, _snapshots}
+
+      iex> SpectreMnemonic.Persistence.Manager.compact(mode: :all)
+      {:ok, %{mode: :all, semantic: _semantic, physical: _physical}}
   """
   @spec compact(keyword()) ::
           {:ok, [{term(), {:ok, Path.t()} | {:error, term()}}]}
@@ -83,7 +177,19 @@ defmodule SpectreMnemonic.Persistence.Manager do
     GenServer.call(__MODULE__, {:compact, opts})
   end
 
-  @doc "Returns the active persistent-memory configuration."
+  @doc """
+  Returns the active persistent-memory configuration.
+
+  Configuration is read from application env and normalized with defaults. This
+  is useful in tests and diagnostics because it shows the stores after default
+  roles, ids, and adapter options have been applied.
+
+  ## Example
+
+      iex> config = SpectreMnemonic.Persistence.Manager.config()
+      iex> Keyword.has_key?(config, :stores)
+      true
+  """
   @spec config :: config()
   def config do
     configured = Application.get_env(:spectre_mnemonic, :persistent_memory, [])
@@ -132,6 +238,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
   end
 
   def handle_call({:search, cue, opts}, _from, state) do
+    # Durable search has two independent sources: the derived local index and
+    # adapters with their own query capability. Merging here keeps callers from
+    # needing to understand which stores support which search mode.
     adapter_results =
       opts
       |> effective_config()

@@ -4,6 +4,20 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
 
   The file adapter owns paths and writes. This module owns the durable frame
   format so the binary protocol can be tested and changed independently.
+
+  Frame layout:
+
+    * `"SMEM"` magic bytes
+    * one-byte format version
+    * unsigned 64-bit sequence number
+    * signed 64-bit millisecond timestamp
+    * 32-bit payload byte length
+    * 32-bit CRC32 of the encoded payload
+    * compressed Erlang term payload
+
+  Replay stops at the first incomplete or corrupt frame. That makes appends
+  crash-tolerant: a partial trailing write is ignored instead of poisoning the
+  whole log.
   """
 
   @magic "SMEM"
@@ -13,7 +27,19 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
   @type t :: {pos_integer(), integer(), term()}
   @type fold_fun(acc) :: (t(), acc -> {:cont, acc} | {:halt, acc})
 
-  @doc "Encodes one storage payload into the append-only frame format."
+  @doc """
+  Encodes one storage payload into the append-only frame format.
+
+  The payload is serialized with `:erlang.term_to_binary/2` and compressed. The
+  timestamp argument exists mostly for deterministic tests; production callers
+  normally use the default current system time.
+
+  ## Example
+
+      iex> frame = SpectreMnemonic.Persistence.Store.FileFrame.encode(1, {:put, "hello"}, 1_717_000_000_000)
+      iex> byte_size(frame) > 0
+      true
+  """
   @spec encode(pos_integer(), term(), integer()) :: binary()
   def encode(seq, payload, timestamp \\ System.system_time(:millisecond))
       when is_integer(seq) and seq > 0 and is_integer(timestamp) do
@@ -26,6 +52,15 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
 
   @doc """
   Reads frames from an IO device until EOF, corruption, or the fold asks to halt.
+
+  The fold function receives `{seq, timestamp, payload}` and returns either
+  `{:cont, acc}` to keep reading or `{:halt, acc}` to stop early.
+
+  ## Example
+
+      iex> {:ok, io} = StringIO.open(SpectreMnemonic.Persistence.Store.FileFrame.encode(1, :ok))
+      iex> SpectreMnemonic.Persistence.Store.FileFrame.read_frames(io, [], fn frame, acc -> {:cont, [frame | acc]} end)
+      [{1, _timestamp, :ok}]
   """
   @spec read_frames(File.io_device(), acc, fold_fun(acc)) :: acc when acc: term()
   def read_frames(io, acc, fun) when is_function(fun, 2) do

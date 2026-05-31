@@ -4,6 +4,19 @@ defmodule SpectreMnemonic.Intake do
 
   Intake accepts already-parsed information, keeps JSON-looking strings as text,
   creates active memory moments, and wires those moments into a graph.
+
+  The pipeline is active-first:
+
+    1. Normalize the caller input into `%SpectreMnemonic.Intake.Memory{}`.
+    2. Attach recent stream/task context so plugs can route or enrich memory.
+    3. Run configured plugs.
+    4. Record a root moment, chunks, summaries, categories, extracted facts, and
+       graph associations.
+    5. Return a `%SpectreMnemonic.Intake.Packet{}` describing all created data.
+
+  The module keeps external input handling at the boundary. Downstream code sees
+  internal structs and metadata rather than arbitrary webhook, JSON, or tool
+  payload shapes.
   """
 
   alias SpectreMnemonic.Active.Focus
@@ -29,7 +42,34 @@ defmodule SpectreMnemonic.Intake do
 
   @type envelope :: Memory.t()
 
-  @doc "Runs unified active-first memory intake."
+  @doc """
+  Runs unified active-first memory intake.
+
+  `remember/2` is the richer ingestion path. It is best for documents, task
+  descriptions, chat transcripts, structured maps, and any input where summaries,
+  categories, or entity timeline extraction are useful.
+
+  Options worth knowing:
+
+    * `:kind` - overrides inferred input kind.
+    * `:task_id` - associates all root memory with a task.
+    * `:stream` - groups memory with an activity lane.
+    * `:persist?` - immediately writes created moments through persistence.
+    * `:extract_entities?` - enables or disables extraction.
+    * `:plugs` - per-call plug modules or `{module, opts}` tuples.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Intake.remember("The API token expires on Monday")
+      {:ok, %SpectreMnemonic.Intake.Packet{}}
+
+      iex> SpectreMnemonic.Intake.remember(
+      ...>   %{title: "Onboarding", text: "Always ask for timezone before scheduling."},
+      ...>   stream: :support,
+      ...>   tags: [:process]
+      ...> )
+      {:ok, %SpectreMnemonic.Intake.Packet{}}
+  """
   @spec remember(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
     with {:ok, memory} <- normalize(input, opts),
@@ -53,6 +93,9 @@ defmodule SpectreMnemonic.Intake do
 
   @spec remember_public(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   defp remember_public(%Memory{} = memory, opts) do
+    # Each step writes a different role of active memory. The packet preserves
+    # those roles so callers can inspect root, chunks, summaries, categories, and
+    # extracted facts without re-deriving structure from flat ETS data.
     with {:ok, root_result} <- record_root(memory, opts),
          {:ok, chunk_results} <- record_chunks(memory, root_result.moment, opts),
          {:ok, summary_results} <-
@@ -378,6 +421,8 @@ defmodule SpectreMnemonic.Intake do
           {:ok, [map()], [Association.t()]} | {:error, term()}
   defp record_extraction(envelope, root, opts) do
     if Keyword.get(opts, :extract_entities?, true) do
+      # Extraction adapters can return provider-specific graph data, but intake
+      # immediately converts it into normal memory moments and associations.
       with {:ok, graph} <-
              Extraction.extract(
                envelope.text,

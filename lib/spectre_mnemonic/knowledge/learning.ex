@@ -1,6 +1,11 @@
 defmodule SpectreMnemonic.Knowledge.Learning do
   @moduledoc """
   Normalizes agent-authored skills and stores them in compact knowledge.
+
+  Skills are durable, compact knowledge events. They are intentionally smaller
+  than active memories: a name, text, ordered steps, optional rules, optional
+  examples, and metadata. This makes them cheap to load into prompts or local
+  decision logic.
   """
 
   alias SpectreMnemonic.Knowledge.Base
@@ -8,7 +13,24 @@ defmodule SpectreMnemonic.Knowledge.Learning do
 
   @type result :: %{event: SMEM.event(), seq: pos_integer()}
 
-  @doc "Learns one skill by appending a `:skill` event to `knowledge.smem`."
+  @doc """
+  Learns one skill by appending a `:skill` event to `knowledge.smem`.
+
+  Text input is split into a name and steps. Map or keyword input can provide
+  structured fields directly.
+
+  ## Examples
+
+      iex> SpectreMnemonic.Knowledge.Learning.learn("Review PR\\n- Read failing tests\\n- Check edge cases")
+      {:ok, %{event: %{type: :skill}, seq: _seq}}
+
+      iex> SpectreMnemonic.Knowledge.Learning.learn(
+      ...>   name: "Handle incident",
+      ...>   steps: ["stabilize", "communicate", "write follow-up"],
+      ...>   examples: ["database failover"]
+      ...> )
+      {:ok, %{event: _event, seq: _seq}}
+  """
   @spec learn(term(), keyword()) :: {:ok, result()} | {:error, term()}
   def learn(input, opts \\ []) do
     with {:ok, event} <- normalize(input, opts),

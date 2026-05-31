@@ -1,6 +1,11 @@
 defmodule SpectreMnemonic.Observations do
   @moduledoc """
   Evidence-grounded observations built from existing moments and governance facts.
+
+  Observations are derived claims such as "Project X owner is Ana". They are not
+  raw memories. Each observation keeps source ids, supporting and weakening
+  evidence, confidence, proof counts, contradiction counts, temporal metadata,
+  and lifecycle state.
   """
 
   alias SpectreMnemonic.Active.Focus
@@ -13,7 +18,19 @@ defmodule SpectreMnemonic.Observations do
 
   @observation_table :mnemonic_observations
 
-  @doc "Consolidates observations from active and durable moments."
+  @doc """
+  Consolidates observations from active and durable moments.
+
+  The consolidator reads visible moments, extracts fact claims through
+  `SpectreMnemonic.Governance.fact_claim/1`, groups matching facts, and writes
+  observation records. Pass `include_durable?: false` to derive observations
+  only from active memory.
+
+  ## Example
+
+      iex> SpectreMnemonic.Observations.consolidate(include_durable?: false)
+      {:ok, [%SpectreMnemonic.Memory.Observation{} | _]}
+  """
   @spec consolidate(keyword()) :: {:ok, [Observation.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
@@ -29,7 +46,17 @@ defmodule SpectreMnemonic.Observations do
     {:ok, observations}
   end
 
-  @doc "Searches active observations and durable observation records."
+  @doc """
+  Searches active observations and durable observation records.
+
+  Results are filtered by scope and temporal options, then ranked by keyword
+  overlap for active observations and merged with durable search results.
+
+  ## Example
+
+      iex> SpectreMnemonic.Observations.search("project owner", scope: {:agent, "planner"})
+      {:ok, _observations}
+  """
   @spec search(term(), keyword()) :: {:ok, [Observation.t() | map()]}
   def search(cue, opts \\ []) do
     active =
@@ -45,7 +72,18 @@ defmodule SpectreMnemonic.Observations do
     {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
   end
 
-  @doc "Adds a verification event for an observation and returns the updated observation."
+  @doc """
+  Adds a verification event for an observation and returns the updated observation.
+
+  Use `relation: :supports` to strengthen an observation, or `:weakens` /
+  `:contradicts` to record negative evidence. The function updates confidence,
+  proof counts, contradiction counts, trend, and state in one place.
+
+  ## Example
+
+      iex> SpectreMnemonic.Observations.verify(observation, relation: :contradicts, source_id: "mom_2")
+      {:ok, %SpectreMnemonic.Memory.Observation{}}
+  """
   @spec verify(binary() | Observation.t(), keyword()) :: {:ok, Observation.t()} | {:error, term()}
   def verify(observation_or_id, opts \\ [])
 
@@ -59,6 +97,9 @@ defmodule SpectreMnemonic.Observations do
       [%{source_id: source_id, relation: relation, observed_at: now}]
       |> Enum.reject(&is_nil(&1.source_id))
 
+    # Verification is append-like at the observation level: keep prior evidence
+    # and add the new event, then derive the public counters and state from the
+    # resulting evidence set.
     proof_count = observation.proof_count + if(relation == :supports, do: 1, else: 0)
 
     contradiction_count =

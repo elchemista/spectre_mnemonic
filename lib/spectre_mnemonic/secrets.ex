@@ -1,16 +1,47 @@
 defmodule SpectreMnemonic.Secrets do
-  @moduledoc false
+  @moduledoc """
+  Secret encryption and reveal orchestration.
+
+  Secret moments keep plaintext out of recall by default. During ingestion the
+  configured crypto adapter stores ciphertext and metadata. During recall,
+  locked secrets remain placeholders unless `reveal/2` is called and the
+  configured authorization adapter approves the request.
+
+  Application code normally calls `SpectreMnemonic.reveal/2`; this module exists
+  so adapters and lower-level tests can exercise the secret boundary directly.
+  """
 
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Secrets.Crypto.AESGCM
 
-  @doc "Encrypts plaintext with the configured crypto adapter."
+  @doc """
+  Encrypts plaintext with the configured crypto adapter.
+
+  The context map is passed to key functions and crypto adapters. It should
+  contain the stable identifiers and labels needed to audit or scope encryption.
+
+  ## Example
+
+      iex> SpectreMnemonic.Secrets.encrypt("sk_live_...", %{label: "Stripe key"}, [])
+      {:ok, %{ciphertext: _ciphertext, iv: _iv, tag: _tag}}
+  """
   @spec encrypt(binary(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def encrypt(plaintext, context, opts) do
     crypto_adapter(opts).encrypt(plaintext, context, opts)
   end
 
-  @doc "Authorizes and decrypts a locked secret moment."
+  @doc """
+  Authorizes and decrypts a locked secret moment.
+
+  The authorization adapter receives a request containing secret id, memory id,
+  label, metadata, and optional authorization context. Only after authorization
+  succeeds does the crypto adapter decrypt the ciphertext.
+
+  ## Example
+
+      iex> SpectreMnemonic.Secrets.reveal(secret, actor: "operator")
+      {:ok, %SpectreMnemonic.Memory.Secret{locked?: false, revealed?: true}}
+  """
   @spec reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
   def reveal(%Secret{locked?: false} = secret, _opts), do: {:ok, secret}
 
@@ -37,7 +68,13 @@ defmodule SpectreMnemonic.Secrets do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  @doc "Attempts to authorize and reveal a secret moment, returning it locked on denial."
+  @doc """
+  Attempts to authorize and reveal a secret moment, returning it locked on denial.
+
+  Recall uses this helper so callers can opt into revealing secrets without
+  turning authorization failures into recall failures. On denial, the returned
+  secret includes authorization status and the public reveal instruction.
+  """
   @spec maybe_reveal(Secret.t(), keyword()) :: Secret.t()
   def maybe_reveal(%Secret{locked?: false} = secret, _opts), do: secret
 
@@ -50,7 +87,12 @@ defmodule SpectreMnemonic.Secrets do
 
   def maybe_reveal(moment, _opts), do: moment
 
-  @doc "Returns the standard public reveal instruction stored on locked secrets."
+  @doc """
+  Returns the standard public reveal instruction stored on locked secrets.
+
+  UI and agent callers can expose this metadata to explain how a locked secret
+  should be requested without embedding module names by hand.
+  """
   @spec reveal_instruction :: map()
   def reveal_instruction do
     %{module: SpectreMnemonic, function: :reveal, arity: 2}
