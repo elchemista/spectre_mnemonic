@@ -38,25 +38,23 @@ defmodule SpectreMnemonic.MentalModels do
       @mental_model_table
       |> safe_tab2list()
       |> Enum.map(fn {_id, model} -> model end)
-      |> Enum.filter(&Scope.match?(&1, opts))
-      |> Enum.filter(&Temporal.match?(&1, opts))
+      |> Enum.filter(&visible?(&1, opts))
       |> score_models(cue)
 
-    durable =
-      case Manager.search(cue, opts) do
-        {:ok, results} ->
-          results
-          |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
-          |> Enum.map(&Map.get(&1, :record, &1))
-          |> Enum.filter(&Scope.match?(&1, opts))
-          |> Enum.filter(&Temporal.match?(&1, opts))
-
-        {:error, _reason} ->
-          []
-      end
+    durable = durable_models(cue, opts)
 
     limit = Keyword.get(opts, :limit, 10)
     {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+  end
+
+  @spec durable_models(term(), keyword()) :: [MentalModel.t() | map()]
+  defp durable_models(cue, opts) do
+    {:ok, results} = Manager.search(cue, opts)
+
+    results
+    |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
+    |> Enum.map(&Map.get(&1, :record, &1))
+    |> Enum.filter(&visible?(&1, opts))
   end
 
   @spec build(term(), keyword(), DateTime.t()) :: MentalModel.t()
@@ -131,7 +129,20 @@ defmodule SpectreMnemonic.MentalModels do
   @spec input_map(term()) :: map()
   defp input_map(input) when is_map(input), do: input
   defp input_map(input) when is_list(input), do: Map.new(input)
+  defp input_map(input) when is_binary(input), do: binary_input_map(input)
   defp input_map(_input), do: %{}
+
+  @spec binary_input_map(binary()) :: map()
+  defp binary_input_map(input) do
+    title = input |> non_empty_lines() |> List.first()
+
+    %{
+      title: title,
+      query: title || "",
+      answer: input,
+      text: input
+    }
+  end
 
   @spec value(map(), atom(), term()) :: term()
   defp value(map, key, default), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
@@ -144,16 +155,23 @@ defmodule SpectreMnemonic.MentalModels do
   @spec temporal_opts(map(), keyword()) :: keyword()
   defp temporal_opts(map, opts) do
     Enum.reduce(Temporal.fields(), opts, fn field, acc ->
-      if Keyword.has_key?(acc, field) do
-        acc
-      else
-        case value(map, field, nil) do
-          nil -> acc
-          value -> Keyword.put(acc, field, value)
-        end
-      end
+      put_temporal_opt(acc, map, field)
     end)
   end
+
+  @spec put_temporal_opt(keyword(), map(), atom()) :: keyword()
+  defp put_temporal_opt(opts, map, field) do
+    value = value(map, field, nil)
+
+    cond do
+      Keyword.has_key?(opts, field) -> opts
+      is_nil(value) -> opts
+      true -> Keyword.put(opts, field, value)
+    end
+  end
+
+  @spec visible?(map(), keyword()) :: boolean()
+  defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
 
   @spec stable_model_id(term(), binary(), binary()) :: binary()
   defp stable_model_id(scope, query, answer) do
@@ -175,6 +193,14 @@ defmodule SpectreMnemonic.MentalModels do
     |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
     |> Enum.reject(&(String.length(&1) < 2))
     |> Enum.uniq()
+  end
+
+  @spec non_empty_lines(binary()) :: [binary()]
+  defp non_empty_lines(text) do
+    text
+    |> String.split(~r/\R/u, trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
   end
 
   @spec entities(binary()) :: [binary()]

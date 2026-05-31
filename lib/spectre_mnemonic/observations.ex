@@ -19,8 +19,7 @@ defmodule SpectreMnemonic.Observations do
     observations =
       opts
       |> source_moments()
-      |> Enum.filter(&Scope.match?(&1, opts))
-      |> Enum.filter(&Temporal.match?(&1, opts))
+      |> Enum.filter(&visible?(&1, opts))
       |> Enum.flat_map(&fact_entry(&1, opts))
       |> build_observations(now, opts)
 
@@ -35,22 +34,10 @@ defmodule SpectreMnemonic.Observations do
       @observation_table
       |> safe_tab2list()
       |> Enum.map(fn {_id, observation} -> observation end)
-      |> Enum.filter(&Scope.match?(&1, opts))
-      |> Enum.filter(&Temporal.match?(&1, opts))
+      |> Enum.filter(&visible?(&1, opts))
       |> score_observations(cue)
 
-    durable =
-      case Manager.search(cue, opts) do
-        {:ok, results} ->
-          results
-          |> Enum.filter(&(Map.get(&1, :family) == :observations))
-          |> Enum.map(&Map.get(&1, :record, &1))
-          |> Enum.filter(&Scope.match?(&1, opts))
-          |> Enum.filter(&Temporal.match?(&1, opts))
-
-        {:error, _reason} ->
-          []
-      end
+    durable = durable_observations(cue, opts)
 
     limit = Keyword.get(opts, :limit, 10)
     {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
@@ -70,17 +57,21 @@ defmodule SpectreMnemonic.Observations do
       [%{source_id: source_id, relation: relation, observed_at: now}]
       |> Enum.reject(&is_nil(&1.source_id))
 
+    proof_count = observation.proof_count + if(relation == :supports, do: 1, else: 0)
+
+    contradiction_count =
+      observation.contradiction_count + if(relation in [:weakens, :contradicts], do: 1, else: 0)
+
     observation = %{
       observation
       | evidence: observation.evidence ++ evidence,
         source_ids: Enum.uniq(observation.source_ids ++ Enum.map(evidence, & &1.source_id)),
-        proof_count: observation.proof_count + if(relation == :supports, do: 1, else: 0),
-        contradiction_count:
-          observation.contradiction_count +
-            if(relation in [:weakens, :contradicts], do: 1, else: 0),
-        confidence: clamp(observation.confidence + confidence_delta),
+        proof_count: proof_count,
+        contradiction_count: contradiction_count,
+        confidence: verified_confidence(observation.confidence, relation, confidence_delta),
         last_verified_at: now,
-        trend: if(relation == :supports, do: :strengthening, else: :weakening)
+        trend: verified_trend(relation),
+        state: state(proof_count, contradiction_count)
     }
 
     store_observation(observation, opts)
@@ -92,6 +83,16 @@ defmodule SpectreMnemonic.Observations do
       [{^id, observation}] -> verify(observation, opts)
       [] -> {:error, :not_found}
     end
+  end
+
+  @spec durable_observations(term(), keyword()) :: [Observation.t() | map()]
+  defp durable_observations(cue, opts) do
+    {:ok, results} = Manager.search(cue, opts)
+
+    results
+    |> Enum.filter(&(Map.get(&1, :family) == :observations))
+    |> Enum.map(&Map.get(&1, :record, &1))
+    |> Enum.filter(&visible?(&1, opts))
   end
 
   @spec store_observation(Observation.t(), keyword()) :: :ok
@@ -112,15 +113,11 @@ defmodule SpectreMnemonic.Observations do
 
     durable =
       if Keyword.get(opts, :include_durable?, true) do
-        case Manager.replay(opts) do
-          {:ok, records} ->
-            records
-            |> Enum.filter(&(&1.family == :moments))
-            |> Enum.map(& &1.payload)
+        {:ok, records} = Manager.replay(opts)
 
-          {:error, _reason} ->
-            []
-        end
+        records
+        |> Enum.filter(&(&1.family == :moments))
+        |> Enum.map(& &1.payload)
       else
         []
       end
@@ -146,6 +143,9 @@ defmodule SpectreMnemonic.Observations do
         ]
     end
   end
+
+  @spec visible?(map(), keyword()) :: boolean()
+  defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
 
   @spec build_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
   defp build_observations(entries, now, opts) do
@@ -251,21 +251,47 @@ defmodule SpectreMnemonic.Observations do
   @spec score_observations([Observation.t()], term()) :: [Observation.t()]
   defp score_observations(observations, cue) do
     query_terms = cue |> to_string() |> keywords() |> MapSet.new()
+    query_entities = cue |> to_string() |> entities() |> normalized_set()
 
     observations
     |> Enum.map(fn observation ->
-      overlap =
+      keyword_overlap =
         observation.keywords
         |> MapSet.new()
         |> MapSet.intersection(query_terms)
         |> MapSet.size()
 
-      {overlap + observation.confidence, observation}
+      entity_overlap =
+        observation.entities
+        |> normalized_set()
+        |> MapSet.intersection(query_entities)
+        |> MapSet.size()
+
+      score =
+        if keyword_overlap > 0 or entity_overlap > 0 do
+          keyword_overlap * 2 + entity_overlap * 3 + observation.confidence
+        else
+          0
+        end
+
+      {score, observation}
     end)
     |> Enum.filter(fn {score, _observation} -> score > 0 end)
     |> Enum.sort_by(fn {score, observation} -> {-score, observation.id} end)
     |> Enum.map(fn {_score, observation} -> observation end)
   end
+
+  @spec verified_confidence(float(), atom(), number()) :: float()
+  defp verified_confidence(confidence, :supports, delta), do: clamp(confidence + delta)
+  defp verified_confidence(confidence, :weakens, delta), do: clamp(confidence - delta)
+  defp verified_confidence(confidence, :contradicts, delta), do: clamp(confidence - delta * 2)
+  defp verified_confidence(confidence, _relation, _delta), do: clamp(confidence)
+
+  @spec verified_trend(atom()) :: Observation.trend()
+  defp verified_trend(:supports), do: :strengthening
+  defp verified_trend(:weakens), do: :weakening
+  defp verified_trend(:contradicts), do: :contradicted
+  defp verified_trend(_relation), do: :stable
 
   @spec stable_observation_id(term(), binary(), binary()) :: binary()
   defp stable_observation_id(scope, fact_key, value) do
@@ -331,5 +357,12 @@ defmodule SpectreMnemonic.Observations do
     Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
     |> List.flatten()
     |> Enum.uniq()
+  end
+
+  @spec normalized_set([term()]) :: MapSet.t(binary())
+  defp normalized_set(values) do
+    values
+    |> Enum.map(&(to_string(&1) |> String.downcase()))
+    |> MapSet.new()
   end
 end

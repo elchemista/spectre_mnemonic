@@ -44,6 +44,24 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert found.id == current.id
   end
 
+  test "observation search does not return unrelated confident observations" do
+    {:ok, _} =
+      SpectreMnemonic.signal("Alice email is alice@example.com",
+        persist?: true,
+        scope: {:user, "alice"}
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(scope: {:user, "alice"})
+
+    assert observation.confidence > 0
+
+    assert {:ok, []} =
+             SpectreMnemonic.search_observations("Stripe invoice retry",
+               scope: {:user, "alice"}
+             )
+  end
+
   test "verify_observation records fresh evidence and confidence" do
     {:ok, %{moment: moment}} =
       SpectreMnemonic.signal("Marta status is active", persist?: true)
@@ -60,6 +78,37 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert verified.proof_count == observation.proof_count + 1
     assert verified.confidence > observation.confidence
     assert verified.last_verified_at
+  end
+
+  test "verify_observation lowers confidence for weakening and contradictory evidence" do
+    {:ok, %{moment: moment}} =
+      SpectreMnemonic.signal("Marta status is active", persist?: true)
+
+    assert {:ok, [observation]} = SpectreMnemonic.consolidate_observations()
+
+    assert {:ok, weakened} =
+             SpectreMnemonic.verify_observation(observation,
+               source_id: "#{moment.id}:weakens",
+               relation: :weakens,
+               confidence_delta: 0.05
+             )
+
+    assert weakened.contradiction_count == observation.contradiction_count + 1
+    assert weakened.proof_count == observation.proof_count
+    assert weakened.confidence < observation.confidence
+    assert weakened.trend == :weakening
+
+    assert {:ok, contradicted} =
+             SpectreMnemonic.verify_observation(weakened,
+               source_id: "#{moment.id}:contradicts",
+               relation: :contradicts,
+               confidence_delta: 0.05
+             )
+
+    assert contradicted.contradiction_count == weakened.contradiction_count + 1
+    assert contradicted.confidence < weakened.confidence
+    assert contradicted.trend == :contradicted
+    assert contradicted.state == :contradicted
   end
 
   test "observation consolidation keeps identical facts isolated by scope" do
@@ -171,6 +220,18 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
              SpectreMnemonic.reflect("billing retry", adapter: __MODULE__.ReflectionAdapter)
 
     assert adapted.response == {:reflected, "billing retry", [model.id]}
+  end
+
+  test "plain text mental models use first line as title and query" do
+    text = "Use bounded retries\nKeep idempotency keys on every retry."
+
+    assert {:ok, model} = SpectreMnemonic.put_mental_model(text)
+    assert model.title == "Use bounded retries"
+    assert model.query == "Use bounded retries"
+    assert model.answer == text
+
+    assert {:ok, [found]} = SpectreMnemonic.search_mental_models("bounded retries")
+    assert found.id == model.id
   end
 
   test "mental model search is scoped and durable after active reset" do
@@ -335,6 +396,33 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert Enum.map(budgeted.moments, & &1.id) == [short.id]
     assert budgeted.usage.max_tokens == 8
     refute Enum.any?(budgeted.moments, &(&1.id == long.id))
+  end
+
+  test "token budget recall applies to mental models observations and moments together" do
+    assert {:ok, model} =
+             SpectreMnemonic.put_mental_model(%{
+               title: "Budget Owner",
+               query: "budget owner",
+               answer: "Alice owns budget."
+             })
+
+    {:ok, _} = SpectreMnemonic.signal("Budget owner is Alice", persist?: true, attention: 2.0)
+
+    {:ok, %{moment: long}} =
+      SpectreMnemonic.signal(
+        "budget owner " <> Enum.map_join(1..80, " ", &"detail#{&1}"),
+        attention: 3.0
+      )
+
+    assert {:ok, [observation]} = SpectreMnemonic.consolidate_observations()
+
+    assert {:ok, packet} = SpectreMnemonic.recall("budget owner", max_tokens: 10)
+
+    assert Enum.map(packet.mental_models, & &1.id) == [model.id]
+    assert Enum.map(packet.observations, & &1.id) == [observation.id]
+    assert packet.moments == []
+    assert packet.usage.estimated_tokens <= packet.usage.max_tokens
+    refute Enum.any?(packet.moments, &(&1.id == long.id))
   end
 
   test "retain mission is carried through intake without dropping memory" do

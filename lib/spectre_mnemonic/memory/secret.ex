@@ -44,6 +44,7 @@ defmodule SpectreMnemonic.Memory.Secret do
           metadata: map()
         }
 
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :id,
     :signal_id,

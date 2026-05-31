@@ -232,8 +232,7 @@ defmodule SpectreMnemonic.Durable.Index do
 
     docs
     |> Map.values()
-    |> Enum.filter(&Scope.match?(&1.record.payload, opts))
-    |> Enum.filter(&Temporal.match?(&1.record.payload, opts))
+    |> Enum.filter(&visible?(&1.record.payload, opts))
     |> Enum.map(fn doc ->
       score_doc(doc, query, query_terms, query_entities, embedding, state)
     end)
@@ -244,6 +243,9 @@ defmodule SpectreMnemonic.Durable.Index do
     |> Enum.take(limit)
     |> Enum.map(&Map.drop(&1, [:inserted_at]))
   end
+
+  @spec visible?(map(), keyword()) :: boolean()
+  defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
 
   @spec score_doc(doc(), binary(), [binary()], [binary()], map(), map()) :: map()
   defp score_doc(doc, query, query_terms, query_entities, embedding, state) do
