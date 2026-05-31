@@ -285,8 +285,13 @@ defmodule SpectreMnemonic do
   Reflects over memory without requiring an LLM.
 
   The default returns a structured evidence packet ordered as mental models,
-  observations, then raw recall. Pass `:adapter` or configure
-  `:reflection_adapter` to turn that packet into a final response.
+  ranked observations, then raw recall. Observation evidence is ranked as
+  decisions, preferences, project state, patterns, then facts. Pass `:adapter`
+  or configure `:reflection_adapter` to turn that packet into a final response.
+
+  `:max_tokens` is forwarded to recall as a best-effort packet budget. Recall
+  may include one oversized primary evidence item when excluding it would make
+  the packet empty.
 
   Use reflection when a caller wants a prepared evidence bundle or when a custom
   adapter should transform memory into a natural-language answer.

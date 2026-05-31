@@ -412,10 +412,21 @@ defmodule SpectreMnemonic.Observations do
       %{
         source_id: entry.moment.id,
         relation: relation,
-        confidence: Map.get(entry, :confidence) || entry.fact.confidence,
+        confidence: evidence_confidence(entry),
         observed_at: Map.get(entry.temporal, :observed_at)
       }
     end)
+  end
+
+  @spec evidence_confidence(map()) :: float()
+  defp evidence_confidence(entry) do
+    Map.get(entry, :confidence) || get_in(entry, [:fact, :confidence]) || 0.5
+  end
+
+  if Code.ensure_loaded?(Mix) and Mix.env() == :test do
+    @doc false
+    @spec __evidence_confidence_for_test__(map()) :: float()
+    def __evidence_confidence_for_test__(entry), do: evidence_confidence(entry)
   end
 
   @spec semantic_claims(binary()) :: [map()]
@@ -579,7 +590,11 @@ defmodule SpectreMnemonic.Observations do
     "obs_#{Base.encode16(hash, case: :lower) |> binary_part(0, 24)}"
   end
 
-  @spec confidence(non_neg_integer(), non_neg_integer(), number()) :: float()
+  @spec confidence(non_neg_integer(), non_neg_integer(), term()) :: float()
+  defp confidence(proof_count, contradiction_count, base) when not is_number(base) do
+    confidence(proof_count, contradiction_count, 0.5)
+  end
+
   defp confidence(proof_count, contradiction_count, base) do
     (base + proof_count * 0.12 - contradiction_count * 0.1)
     |> clamp()
