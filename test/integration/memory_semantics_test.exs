@@ -35,6 +35,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert current.contradiction_count == 1
     assert current.state == :promoted
     assert current.trend == :weakening
+    assert current.metadata.observation_type == :fact
     assert Enum.sort(current.source_ids) == Enum.sort([first.id, second.id])
     assert Enum.any?(current.evidence, &(&1.source_id == conflict.id and &1.relation == :weakens))
 
@@ -60,6 +61,80 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
              SpectreMnemonic.search_observations("Stripe invoice retry",
                scope: {:user, "alice"}
              )
+  end
+
+  test "legacy observations without observation_type metadata still search" do
+    legacy = %Observation{
+      id: "legacy_obs",
+      statement: "legacy preference survives search",
+      scope: {:project, "legacy"},
+      confidence: 0.8,
+      keywords: ["legacy", "preference", "survives", "search"],
+      entities: [],
+      metadata: %{}
+    }
+
+    :ets.insert(:mnemonic_observations, {legacy.id, legacy})
+
+    assert {:ok, [found]} =
+             SpectreMnemonic.search_observations("legacy preference",
+               scope: {:project, "legacy"}
+             )
+
+    assert found.id == legacy.id
+    assert Map.get(found.metadata, :observation_type, :fact) == :fact
+  end
+
+  test "observation consolidation extracts typed non-fact learning" do
+    examples = [
+      {:preference, "The user prefers simple Elixir-native architecture."},
+      {:project_state, "The project direction is moving away from external services."},
+      {:pattern, "This agent often fails because it searches too broadly."},
+      {:decision, "We decided to keep persistence append-only for compatibility."}
+    ]
+
+    Enum.each(examples, fn {_type, text} ->
+      {:ok, _} = SpectreMnemonic.signal(text, scope: {:project, "typed"})
+    end)
+
+    assert {:ok, observations} =
+             SpectreMnemonic.consolidate_observations(scope: {:project, "typed"})
+
+    by_type = Map.new(observations, &{&1.metadata.observation_type, &1})
+
+    assert by_type.preference.statement == "user prefers simple elixir-native architecture"
+
+    assert by_type.project_state.statement ==
+             "project direction is moving away from external services"
+
+    assert by_type.pattern.statement == "agent often fails because it searches too broadly"
+
+    assert by_type.decision.statement ==
+             "decided to keep persistence append-only for compatibility"
+
+    assert Enum.all?(Map.values(by_type), &(&1.contradiction_count == 0))
+    assert Enum.all?(Map.values(by_type), &(&1.proof_count == 1))
+  end
+
+  test "typed observations accumulate support without fact-style contradictions" do
+    {:ok, %{moment: first}} =
+      SpectreMnemonic.signal("The user prefers simple Elixir-native architecture.",
+        scope: {:project, "typed"}
+      )
+
+    {:ok, %{moment: second}} =
+      SpectreMnemonic.signal("The user prefers simple Elixir-native architecture.",
+        scope: {:project, "typed"}
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(scope: {:project, "typed"})
+
+    assert observation.metadata.observation_type == :preference
+    assert observation.proof_count == 2
+    assert observation.contradiction_count == 0
+    assert observation.state == :promoted
+    assert Enum.sort(observation.source_ids) == Enum.sort([first.id, second.id])
   end
 
   test "verify_observation records fresh evidence and confidence" do
@@ -301,6 +376,84 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     refute Enum.any?(packet.mental_models, &(&1.id == expired.id))
   end
 
+  test "observation and mental model search degrade to active records when durable search fails" do
+    {:ok, _} =
+      SpectreMnemonic.signal("The user prefers simple Elixir-native architecture.",
+        scope: {:project, "fallback"}
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(
+               scope: {:project, "fallback"},
+               persist?: false
+             )
+
+    assert {:ok, model} =
+             SpectreMnemonic.put_mental_model(
+               %{
+                 title: "Fallback Model",
+                 query: "fallback model",
+                 answer: "Active model survives durable search failure.",
+                 scope: {:project, "fallback"}
+               },
+               persist?: false
+             )
+
+    failing_persistence = [
+      stores: [
+        [
+          id: :failing_store,
+          adapter: __MODULE__.FailingReadStore,
+          role: :primary,
+          opts: []
+        ]
+      ]
+    ]
+
+    assert {:ok, observation_results} =
+             SpectreMnemonic.search_observations("simple architecture",
+               scope: {:project, "fallback"},
+               persistent_memory: failing_persistence
+             )
+
+    assert Enum.map(observation_results, & &1.id) == [observation.id]
+
+    assert {:ok, model_results} =
+             SpectreMnemonic.search_mental_models("fallback model",
+               scope: {:project, "fallback"},
+               persistent_memory: failing_persistence
+             )
+
+    assert Enum.map(model_results, & &1.id) == [model.id]
+  end
+
+  test "observation consolidation degrades to active moments when durable replay fails" do
+    {:ok, _} =
+      SpectreMnemonic.signal("The project direction is moving away from external services.",
+        scope: {:project, "fallback"}
+      )
+
+    failing_persistence = [
+      stores: [
+        [
+          id: :failing_store,
+          adapter: __MODULE__.FailingReadStore,
+          role: :primary,
+          opts: []
+        ]
+      ]
+    ]
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(
+               scope: {:project, "fallback"},
+               persist?: false,
+               persistent_memory: failing_persistence
+             )
+
+    assert observation.metadata.observation_type == :project_state
+  end
+
   test "scope filters recall while scopes allows explicit cross-scope recall" do
     {:ok, %{moment: alpha}} =
       SpectreMnemonic.signal("shared invoice retry strategy",
@@ -425,6 +578,25 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     refute Enum.any?(packet.moments, &(&1.id == long.id))
   end
 
+  test "token budget can include the first oversized primary item to avoid empty recall" do
+    {:ok, %{moment: long}} =
+      SpectreMnemonic.signal(
+        "oversized primary evidence " <> Enum.map_join(1..80, " ", &"detail#{&1}"),
+        attention: 4.0
+      )
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("oversized primary evidence",
+               include_observations: false,
+               include_mental_models: false,
+               include_knowledge: false,
+               max_tokens: 4
+             )
+
+    assert Enum.map(packet.moments, & &1.id) == [long.id]
+    assert packet.usage.estimated_tokens > packet.usage.max_tokens
+  end
+
   test "retain mission is carried through intake without dropping memory" do
     assert {:ok, packet} =
              SpectreMnemonic.remember("hello, but also remember API retry constraints",
@@ -440,6 +612,49 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert packet.root.text =~ "API retry constraints"
   end
 
+  test "mission policy only affects intake when explicitly plugged in" do
+    assert {:ok, metadata_only} =
+             SpectreMnemonic.remember("hello",
+               mission: :code_agent,
+               scope: {:agent, "planner"}
+             )
+
+    assert metadata_only.root.metadata.mission == :code_agent
+    assert metadata_only.root.text =~ "hello"
+
+    assert {:ok, dropped} =
+             SpectreMnemonic.remember("hello",
+               mission: :code_agent,
+               plugs: [SpectreMnemonic.Intake.MissionPolicy],
+               scope: {:agent, "planner"}
+             )
+
+    assert dropped.root == nil
+    assert dropped.moments == []
+    assert [{:mission_policy_dropped, :code_agent, :low_value_intake}] = dropped.warnings
+  end
+
+  test "mission policy enriches code-agent technical memory" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember(
+               "TODO fix API retry contract because the callback schema is broken.",
+               mission: :code_agent,
+               plugs: [SpectreMnemonic.Intake.MissionPolicy],
+               scope: {:agent, "planner"},
+               chunk_words: 8
+             )
+
+    assert packet.root.metadata.mission == :code_agent
+    assert packet.root.metadata.mission_policy == SpectreMnemonic.Intake.MissionPolicy
+    assert packet.root.metadata.mission_priority > 1.0
+    assert packet.root.metadata.extraction_mode == :technical
+    assert :todo in packet.root.metadata.tags
+    assert :api_contract in packet.root.metadata.mission_categories
+    assert packet.chunks != []
+    assert packet.categories != []
+    assert packet.root.text =~ "API retry contract"
+  end
+
   defmodule ReflectionAdapter do
     @behaviour SpectreMnemonic.Reflection.Adapter
 
@@ -448,5 +663,21 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
       ids = Enum.map(packet.mental_models, & &1.id)
       {:ok, {:reflected, packet.query, ids}}
     end
+  end
+
+  defmodule FailingReadStore do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(_opts), do: [:replay, :search]
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def replay(_opts), do: raise("durable replay unavailable")
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def search(_cue, _opts), do: raise("durable search unavailable")
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, _opts), do: :ok
   end
 end

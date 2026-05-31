@@ -81,12 +81,25 @@ defmodule SpectreMnemonic.MentalModels do
 
   @spec durable_models(term(), keyword()) :: [MentalModel.t() | map()]
   defp durable_models(cue, opts) do
-    {:ok, results} = Manager.search(cue, opts)
+    case safe_manager_search(cue, opts) do
+      {:ok, results} ->
+        results
+        |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
+        |> Enum.map(&Map.get(&1, :record, &1))
+        |> Enum.filter(&visible?(&1, opts))
 
-    results
-    |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
-    |> Enum.map(&Map.get(&1, :record, &1))
-    |> Enum.filter(&visible?(&1, opts))
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  @spec safe_manager_search(term(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp safe_manager_search(cue, opts) do
+    Manager.search(cue, opts)
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   @spec build(term(), keyword(), DateTime.t()) :: MentalModel.t()

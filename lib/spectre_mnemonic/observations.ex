@@ -22,9 +22,10 @@ defmodule SpectreMnemonic.Observations do
   Consolidates observations from active and durable moments.
 
   The consolidator reads visible moments, extracts fact claims through
-  `SpectreMnemonic.Governance.fact_claim/1`, groups matching facts, and writes
-  observation records. Pass `include_durable?: false` to derive observations
-  only from active memory.
+  `SpectreMnemonic.Governance.fact_claim/1`, extracts deterministic preference,
+  decision, pattern, and project-state observations, groups matching claims, and
+  writes observation records. Pass `include_durable?: false` to derive
+  observations only from active memory.
 
   ## Example
 
@@ -39,7 +40,7 @@ defmodule SpectreMnemonic.Observations do
       opts
       |> source_moments()
       |> Enum.filter(&visible?(&1, opts))
-      |> Enum.flat_map(&fact_entry(&1, opts))
+      |> Enum.flat_map(&observation_entries(&1, opts))
       |> build_observations(now, opts)
 
     Enum.each(observations, &store_observation(&1, opts))
@@ -130,12 +131,16 @@ defmodule SpectreMnemonic.Observations do
 
   @spec durable_observations(term(), keyword()) :: [Observation.t() | map()]
   defp durable_observations(cue, opts) do
-    {:ok, results} = Manager.search(cue, opts)
+    case safe_manager_search(cue, opts) do
+      {:ok, results} ->
+        results
+        |> Enum.filter(&(Map.get(&1, :family) == :observations))
+        |> Enum.map(&Map.get(&1, :record, &1))
+        |> Enum.filter(&visible?(&1, opts))
 
-    results
-    |> Enum.filter(&(Map.get(&1, :family) == :observations))
-    |> Enum.map(&Map.get(&1, :record, &1))
-    |> Enum.filter(&visible?(&1, opts))
+      {:error, _reason} ->
+        []
+    end
   end
 
   @spec store_observation(Observation.t(), keyword()) :: :ok
@@ -156,11 +161,15 @@ defmodule SpectreMnemonic.Observations do
 
     durable =
       if Keyword.get(opts, :include_durable?, true) do
-        {:ok, records} = Manager.replay(opts)
+        case safe_manager_replay(opts) do
+          {:ok, records} ->
+            records
+            |> Enum.filter(&(&1.family == :moments))
+            |> Enum.map(& &1.payload)
 
-        records
-        |> Enum.filter(&(&1.family == :moments))
-        |> Enum.map(& &1.payload)
+          {:error, _reason} ->
+            []
+        end
       else
         []
       end
@@ -169,8 +178,31 @@ defmodule SpectreMnemonic.Observations do
     |> Enum.uniq_by(&Map.get(&1, :id))
   end
 
-  @spec fact_entry(map(), keyword()) :: [map()]
-  defp fact_entry(moment, _opts) do
+  @spec safe_manager_search(term(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp safe_manager_search(cue, opts) do
+    Manager.search(cue, opts)
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @spec safe_manager_replay(keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp safe_manager_replay(opts) do
+    Manager.replay(opts)
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @spec observation_entries(map(), keyword()) :: [map()]
+  defp observation_entries(moment, _opts) do
+    fact_entries(moment) ++ typed_entries(moment)
+  end
+
+  @spec fact_entries(map()) :: [map()]
+  defp fact_entries(moment) do
     case Governance.fact_claim(moment) do
       nil ->
         []
@@ -178,6 +210,7 @@ defmodule SpectreMnemonic.Observations do
       fact ->
         [
           %{
+            type: :fact,
             moment: moment,
             fact: fact,
             scope: Scope.scope(moment),
@@ -187,11 +220,41 @@ defmodule SpectreMnemonic.Observations do
     end
   end
 
+  @spec typed_entries(map()) :: [map()]
+  defp typed_entries(%{text: text} = moment) when is_binary(text) do
+    text
+    |> semantic_claims()
+    |> Enum.map(fn claim ->
+      statement = normalize_statement(claim.statement)
+
+      %{
+        type: claim.type,
+        key: "#{claim.type}:#{statement}",
+        statement: statement,
+        confidence: claim.confidence,
+        moment: moment,
+        scope: Scope.scope(moment),
+        temporal: Temporal.temporal_map(moment)
+      }
+    end)
+    |> Enum.reject(&(&1.statement == ""))
+  end
+
+  defp typed_entries(_moment), do: []
+
   @spec visible?(map(), keyword()) :: boolean()
   defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
 
   @spec build_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
   defp build_observations(entries, now, opts) do
+    {facts, typed} = Enum.split_with(entries, &(&1.type == :fact))
+
+    build_fact_observations(facts, now, opts) ++
+      build_typed_observations(typed, now, opts)
+  end
+
+  @spec build_fact_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
+  defp build_fact_observations(entries, now, opts) do
     entries
     |> Enum.group_by(fn entry -> {entry.scope, entry.fact.key} end)
     |> Enum.flat_map(fn {{scope, fact_key}, key_entries} ->
@@ -200,14 +263,14 @@ defmodule SpectreMnemonic.Observations do
       |> Enum.map(fn {value, supports} ->
         weakens = Enum.reject(key_entries, &(&1.fact.value == value))
         fact = hd(supports).fact
-        build_observation(scope, fact_key, fact, supports, weakens, now, opts)
+        build_fact_observation(scope, fact_key, fact, supports, weakens, now, opts)
       end)
     end)
   end
 
-  @spec build_observation(term(), binary(), map(), [map()], [map()], DateTime.t(), keyword()) ::
+  @spec build_fact_observation(term(), binary(), map(), [map()], [map()], DateTime.t(), keyword()) ::
           Observation.t()
-  defp build_observation(scope, fact_key, fact, supports, weakens, now, opts) do
+  defp build_fact_observation(scope, fact_key, fact, supports, weakens, now, opts) do
     statement = "#{fact.subject} #{fact.attribute} is #{fact.value}"
     source_ids = supports |> Enum.map(& &1.moment.id) |> Enum.uniq()
     contradiction_count = length(weakens)
@@ -248,10 +311,74 @@ defmodule SpectreMnemonic.Observations do
       valid_until: temporal.valid_until,
       metadata:
         %{
+          observation_type: :fact,
           fact_key: fact_key,
           fact_subject: fact.subject,
           fact_attribute: fact.attribute,
           fact_value: fact.value,
+          provenance: %{
+            source_ids: source_ids,
+            provider: :observations,
+            confidence: confidence,
+            observed_at: temporal.observed_at || now,
+            last_verified_at: temporal.last_verified_at || now
+          }
+        }
+        |> Map.put(:scope, scope)
+        |> Temporal.put_metadata(temporal),
+      inserted_at: now
+    }
+  end
+
+  @spec build_typed_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
+  defp build_typed_observations(entries, now, opts) do
+    entries
+    |> Enum.group_by(fn entry -> {entry.scope, entry.type, entry.key} end)
+    |> Enum.map(fn {{scope, type, key}, supports} ->
+      build_typed_observation(scope, type, key, supports, now, opts)
+    end)
+  end
+
+  @spec build_typed_observation(term(), atom(), binary(), [map()], DateTime.t(), keyword()) ::
+          Observation.t()
+  defp build_typed_observation(scope, type, key, supports, now, opts) do
+    statement = hd(supports).statement
+    source_ids = supports |> Enum.map(& &1.moment.id) |> Enum.uniq()
+    proof_count = length(supports)
+    base_confidence = supports |> Enum.map(& &1.confidence) |> Enum.max(fn -> 0.65 end)
+    confidence = confidence(proof_count, 0, base_confidence)
+    trend = trend(proof_count, 0)
+    state = state(proof_count, 0)
+    embedding = Service.embed(statement, opts)
+    temporal = observation_temporal(supports, now)
+    id = Keyword.get(opts, :id) || stable_observation_id(scope, key, statement)
+
+    %Observation{
+      id: id,
+      statement: statement,
+      scope: scope,
+      tags: Keyword.get(opts, :tags, []),
+      source_ids: source_ids,
+      evidence: evidence(supports, :supports),
+      proof_count: proof_count,
+      contradiction_count: 0,
+      confidence: confidence,
+      trend: trend,
+      state: state,
+      vector: embedding.vector,
+      binary_signature: Map.get(embedding, :binary_signature),
+      embedding: embedding,
+      keywords: keywords(statement),
+      entities: entities(statement),
+      occurred_at: temporal.occurred_at,
+      observed_at: temporal.observed_at,
+      last_verified_at: temporal.last_verified_at,
+      valid_from: temporal.valid_from,
+      valid_until: temporal.valid_until,
+      metadata:
+        %{
+          observation_type: type,
+          observation_key: key,
           provenance: %{
             source_ids: source_ids,
             provider: :observations,
@@ -285,10 +412,121 @@ defmodule SpectreMnemonic.Observations do
       %{
         source_id: entry.moment.id,
         relation: relation,
-        confidence: entry.fact.confidence,
+        confidence: Map.get(entry, :confidence) || entry.fact.confidence,
         observed_at: Map.get(entry.temporal, :observed_at)
       }
     end)
+  end
+
+  @spec semantic_claims(binary()) :: [map()]
+  defp semantic_claims(text) do
+    [
+      semantic_claim(text, :preference, ~r/\b(?:the\s+)?user\s+prefers?\s+(?<body>[^.;\n]+)/iu,
+        prefix: "user prefers "
+      ),
+      semantic_claim(text, :preference, ~r/\bprefer\s+(?<body>[^.;\n]+)/iu, prefix: "prefer "),
+      semantic_claim(text, :preference, ~r/\bavoid\s+(?<body>[^.;\n]+)/iu, prefix: "avoid "),
+      semantic_claim(text, :decision, ~r/\bdecided\s+to\s+(?<body>[^.;\n]+)/iu,
+        prefix: "decided to "
+      ),
+      semantic_claim(text, :decision, ~r/\bdecision\s+(?:is|was)\s+to\s+(?<body>[^.;\n]+)/iu,
+        prefix: "decision is to "
+      ),
+      semantic_claim(text, :decision, ~r/\bwill\s+use\s+(?<body>[^.;\n]+)/iu,
+        prefix: "will use "
+      ),
+      semantic_claim(
+        text,
+        :pattern,
+        ~r/\b(?:this\s+agent|agent|system|it)\s+often\s+(?<body>[^.;\n]+)/iu,
+        prefix: "agent often "
+      ),
+      semantic_claim(
+        text,
+        :pattern,
+        ~r/\b(?:this\s+agent|agent|system|it)\s+usually\s+(?<body>[^.;\n]+)/iu,
+        prefix: "agent usually "
+      ),
+      semantic_claim(
+        text,
+        :pattern,
+        ~r/\b(?:this\s+agent|agent|system|it)\s+keeps\s+(?<body>[^.;\n]+)/iu,
+        prefix: "agent keeps "
+      ),
+      semantic_claim(text, :pattern, ~r/\bkeeps\s+failing\s+because\s+(?<body>[^.;\n]+)/iu,
+        prefix: "keeps failing because "
+      ),
+      semantic_claim(text, :project_state, ~r/\bproject\s+direction\s+is\s+(?<body>[^.;\n]+)/iu,
+        prefix: "project direction is "
+      ),
+      semantic_claim(
+        text,
+        :project_state,
+        ~r/\bmoving\s+(?<body>(?:toward|towards|away\s+from)\s+[^.;\n]+)/iu,
+        prefix: "moving "
+      ),
+      semantic_claim(text, :project_state, ~r/\bblocked\s+by\s+(?<body>[^.;\n]+)/iu,
+        prefix: "blocked by "
+      ),
+      semantic_claim(
+        text,
+        :project_state,
+        ~r/\bcurrent\s+status\s+(?:is|:)\s+(?<body>[^.;\n]+)/iu,
+        prefix: "current status is "
+      )
+    ]
+    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(fn claim -> {claim.type, normalize_statement(claim.statement)} end)
+    |> reject_subsumed_claims()
+  end
+
+  @spec reject_subsumed_claims([map()]) :: [map()]
+  defp reject_subsumed_claims(claims) do
+    Enum.reject(claims, fn claim ->
+      statement = normalize_statement(claim.statement)
+
+      Enum.any?(claims, fn other ->
+        other.type == claim.type and
+          normalize_statement(other.statement) != statement and
+          String.contains?(normalize_statement(other.statement), statement)
+      end)
+    end)
+  end
+
+  @spec semantic_claim(binary(), atom(), Regex.t(), keyword()) :: [map()]
+  defp semantic_claim(text, type, pattern, opts) do
+    prefix = Keyword.fetch!(opts, :prefix)
+
+    pattern
+    |> Regex.scan(text, capture: :all_names)
+    |> Enum.map(fn
+      [body] ->
+        %{
+          type: type,
+          statement: prefix <> String.trim(body),
+          confidence: semantic_confidence(type)
+        }
+
+      _other ->
+        nil
+    end)
+  end
+
+  @spec semantic_confidence(atom()) :: float()
+  defp semantic_confidence(:decision), do: 0.78
+  defp semantic_confidence(:project_state), do: 0.74
+  defp semantic_confidence(:preference), do: 0.72
+  defp semantic_confidence(:pattern), do: 0.68
+  defp semantic_confidence(_type), do: 0.65
+
+  @spec normalize_statement(binary()) :: binary()
+  defp normalize_statement(statement) do
+    statement
+    |> String.trim()
+    |> String.trim_trailing(".")
+    |> String.replace(~r/\s+/u, " ")
+    |> String.downcase()
   end
 
   @spec score_observations([Observation.t()], term()) :: [Observation.t()]

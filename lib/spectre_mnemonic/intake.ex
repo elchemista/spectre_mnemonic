@@ -56,6 +56,9 @@ defmodule SpectreMnemonic.Intake do
     * `:stream` - groups memory with an activity lane.
     * `:persist?` - immediately writes created moments through persistence.
     * `:extract_entities?` - enables or disables extraction.
+    * `:mission` - stores mission metadata; add
+      `SpectreMnemonic.Intake.MissionPolicy` as a plug to make it affect
+      retention.
     * `:plugs` - per-call plug modules or `{module, opts}` tuples.
 
   ## Examples

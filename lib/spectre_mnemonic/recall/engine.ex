@@ -57,7 +57,8 @@ defmodule SpectreMnemonic.Recall.Engine do
 
     * `:limit` - maximum primary memory candidates.
     * `:budget` - `:low`, `:mid`, or `:high` preset.
-    * `:max_tokens` - hard packet budget.
+    * `:max_tokens` - best-effort packet budget. The first primary evidence
+      item may exceed it so recall does not return an empty packet.
     * `:include_observations` - include derived observations.
     * `:include_mental_models` - include curated models.
     * `:include_knowledge` - include compact progressive knowledge.

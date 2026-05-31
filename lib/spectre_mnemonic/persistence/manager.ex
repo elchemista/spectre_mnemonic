@@ -915,6 +915,10 @@ defmodule SpectreMnemonic.Persistence.Manager do
       {:ok, state} -> state
       {:error, _reason} -> state
     end
+  rescue
+    _exception -> state
+  catch
+    _kind, _reason -> state
   end
 
   @spec replay_store_list(store(), replay_state()) :: replay_state()
@@ -923,6 +927,10 @@ defmodule SpectreMnemonic.Persistence.Manager do
       {:ok, frames} -> Enum.reduce(frames, state, &absorb_frame/2)
       {:error, _reason} -> state
     end
+  rescue
+    _exception -> state
+  catch
+    _kind, _reason -> state
   end
 
   @spec absorb_frame(term(), replay_state()) :: replay_state()
@@ -959,12 +967,22 @@ defmodule SpectreMnemonic.Persistence.Manager do
     else
       []
     end
+  rescue
+    _exception -> []
+  catch
+    _kind, _reason -> []
   end
 
   @spec durable_index_results(term(), keyword()) :: [map()]
   defp durable_index_results(cue, opts) do
-    {:ok, results} = DurableIndex.search(cue, opts)
-    results
+    case DurableIndex.search(cue, opts) do
+      {:ok, results} -> results
+      {:error, _reason} -> []
+    end
+  rescue
+    _exception -> []
+  catch
+    _kind, _reason -> []
   end
 
   @spec merge_search_results([map()], [map()]) :: [map()]

@@ -106,6 +106,9 @@ packet.associations
 packet.knowledge
 ```
 
+`max_tokens` is a best-effort packet budget. Recall may include one oversized
+primary evidence item when excluding it would make the packet empty.
+
 Use `search/2` when you want active recall plus durable persisted memory:
 
 ```elixir
@@ -293,6 +296,20 @@ SpectreMnemonic.recall("payment retry",
 )
 ```
 
+`mission:` is metadata by default. To let a mission affect intake retention,
+add the opt-in mission policy plug:
+
+```elixir
+SpectreMnemonic.remember("TODO fix API retry contract",
+  mission: :code_agent,
+  plugs: [SpectreMnemonic.Intake.MissionPolicy]
+)
+```
+
+The built-in `:code_agent` policy drops low-value conversational filler and
+prioritizes technical decisions, bugs, API contracts, constraints, TODOs, user
+preferences, and project state.
+
 Temporal fields separate when something happened from when SpectreMnemonic
 learned it:
 
@@ -401,9 +418,11 @@ SpectreMnemonic.Durable.Index.rebuild()
 
 ### Observations, Mental Models, And Reflection
 
-Observations are consolidated beliefs built from existing moments and governance
-facts. They keep their evidence, source ids, proof count, contradiction count,
-confidence, trend, lifecycle state, scope, and temporal fields.
+Observations are consolidated beliefs built from existing moments. Fact
+observations still come from governance facts, while deterministic V1 extraction
+also recognizes preferences, decisions, patterns, and project state. Observation
+type is stored in metadata as `:observation_type` so old `%Observation{}`
+records continue to work.
 
 ```elixir
 {:ok, observations} =
