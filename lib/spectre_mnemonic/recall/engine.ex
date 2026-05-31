@@ -63,32 +63,64 @@ defmodule SpectreMnemonic.Recall.Engine do
     index_ranked =
       index_results |> Enum.map(& &1.id) |> Focus.moments_by_ids() |> filter_moments(opts)
 
-    ranked =
+    ranked_candidates =
       [base_ranked, graph_ranked, index_ranked]
       |> Fusion.rrf()
       |> Enum.map(fn {_score, moment} -> moment end)
       |> Enum.uniq_by(& &1.id)
       |> rerank_moments(cue, index_scores)
       |> filter_moments(opts)
-      |> apply_memory_budget(opts, limit)
 
-    associations = ranked |> Enum.map(& &1.id) |> Focus.associations_for_ids()
-    revealed = Enum.map(ranked, &Secrets.maybe_reveal(&1, opts))
-    observations = recall_observations(cue_input, opts)
-    mental_models = recall_mental_models(cue_input, opts)
+    observation_candidates = recall_observations(cue_input, opts)
+    mental_model_candidates = recall_mental_models(cue_input, opts)
+    knowledge_candidates = compact_knowledge(opts)
+
+    {components, used_tokens} =
+      apply_primary_budget(
+        ranked_candidates,
+        observation_candidates,
+        mental_model_candidates,
+        opts,
+        limit
+      )
+
+    associations = components.moments |> Enum.map(& &1.id) |> Focus.associations_for_ids()
+
+    {components, _used_tokens} =
+      apply_dependent_budget(
+        components,
+        artifacts_for(components.moments, associations),
+        associations,
+        action_recipes_for(components.moments, associations),
+        knowledge_candidates,
+        opts,
+        used_tokens
+      )
+
+    revealed = Enum.map(components.moments, &Secrets.maybe_reveal(&1, opts))
 
     packet = %Packet{
       cue: cue,
-      active_status: active_status(ranked),
+      active_status: active_status(components.moments),
       moments: revealed,
-      observations: observations,
-      mental_models: mental_models,
-      knowledge: compact_knowledge(opts),
-      artifacts: artifacts_for(ranked, associations),
-      associations: associations,
-      action_recipes: action_recipes_for(ranked, associations),
-      confidence: confidence(ranked),
-      usage: usage(revealed, observations, mental_models, opts)
+      observations: components.observations,
+      mental_models: components.mental_models,
+      knowledge: components.knowledge,
+      artifacts: components.artifacts,
+      associations: components.associations,
+      action_recipes: components.action_recipes,
+      confidence: confidence(components.moments),
+      usage:
+        usage(
+          revealed,
+          components.observations,
+          components.mental_models,
+          components.knowledge,
+          components.artifacts,
+          components.associations,
+          components.action_recipes,
+          opts
+        )
     }
 
     {:reply, {:ok, packet}, state}
@@ -100,17 +132,28 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp ranked_moments(cue, index_scores, limit, opts) do
     []
     |> Focus.fold_moments(fn moment, ranked ->
-      if memory_visible?(moment, opts) do
-        case score(moment, cue, index_scores) do
-          score when score > 0 -> insert_ranked({score, moment}, ranked, limit)
-          _score -> ranked
-        end
-      else
-        ranked
-      end
+      maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts)
     end)
     |> Enum.sort_by(&rank_key/1)
     |> Enum.map(fn {_score, moment} -> moment end)
+  end
+
+  @spec maybe_insert_ranked_moment(
+          recall_moment(),
+          [{number(), recall_moment()}],
+          Cue.t(),
+          map(),
+          pos_integer(),
+          keyword()
+        ) :: [{number(), recall_moment()}]
+  defp maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts) do
+    score = if memory_visible?(moment, opts), do: score(moment, cue, index_scores), else: 0
+
+    if score > 0 do
+      insert_ranked({score, moment}, ranked, limit)
+    else
+      ranked
+    end
   end
 
   @spec insert_ranked({number(), recall_moment()}, [{number(), recall_moment()}], pos_integer()) ::
@@ -314,30 +357,136 @@ defmodule SpectreMnemonic.Recall.Engine do
     end
   end
 
-  @spec apply_memory_budget([recall_moment()], keyword(), non_neg_integer()) :: [recall_moment()]
-  defp apply_memory_budget(moments, opts, limit) do
+  @spec apply_primary_budget(
+          [recall_moment()],
+          [term()],
+          [term()],
+          keyword(),
+          non_neg_integer()
+        ) ::
+          {map(), non_neg_integer() | nil}
+  defp apply_primary_budget(moments, observations, mental_models, opts, limit) do
+    case max_tokens(opts) do
+      nil ->
+        {%{
+           moments: Enum.take(moments, limit),
+           observations: observations,
+           mental_models: mental_models,
+           knowledge: [],
+           artifacts: [],
+           associations: [],
+           action_recipes: []
+         }, nil}
+
+      max_tokens ->
+        groups = [
+          {:mental_models, mental_models},
+          {:observations, observations},
+          {:moments, moments}
+        ]
+
+        {selected, used} = select_budgeted_groups(groups, max_tokens, 0)
+
+        {Map.merge(
+           %{
+             moments: [],
+             observations: [],
+             mental_models: [],
+             knowledge: [],
+             artifacts: [],
+             associations: [],
+             action_recipes: []
+           },
+           selected
+         ), used}
+    end
+  end
+
+  @spec apply_dependent_budget(
+          map(),
+          [Artifact.t()],
+          [Association.t()],
+          [ActionRecipe.t()],
+          [Knowledge.Record.t()],
+          keyword(),
+          non_neg_integer() | nil
+        ) ::
+          {map(), non_neg_integer() | nil}
+  defp apply_dependent_budget(
+         components,
+         artifacts,
+         associations,
+         action_recipes,
+         knowledge,
+         _opts,
+         nil
+       ) do
+    {%{
+       components
+       | artifacts: artifacts,
+         associations: associations,
+         action_recipes: action_recipes,
+         knowledge: knowledge
+     }, nil}
+  end
+
+  defp apply_dependent_budget(
+         components,
+         artifacts,
+         associations,
+         action_recipes,
+         knowledge,
+         opts,
+         used
+       ) do
+    max_tokens = max_tokens(opts)
+
+    groups = [
+      {:associations, associations},
+      {:artifacts, artifacts},
+      {:action_recipes, action_recipes},
+      {:knowledge, knowledge}
+    ]
+
+    {selected, used} = select_budgeted_groups(groups, max_tokens, used)
+    {Map.merge(components, selected), used}
+  end
+
+  @spec select_budgeted_groups([{atom(), [term()]}], pos_integer(), non_neg_integer()) ::
+          {map(), non_neg_integer()}
+  defp select_budgeted_groups(groups, max_tokens, used) do
+    Enum.reduce(groups, {%{}, used}, fn {key, items}, {selected, current_used} ->
+      {selected_items, current_used} = select_budgeted_items(items, max_tokens, current_used)
+      {Map.put(selected, key, selected_items), current_used}
+    end)
+  end
+
+  @spec select_budgeted_items([term()], pos_integer(), non_neg_integer()) ::
+          {[term()], non_neg_integer()}
+  defp select_budgeted_items(items, max_tokens, used) do
+    items
+    |> Enum.reduce_while({[], used}, fn item, {selected, current_used} ->
+      cost = estimate_tokens(memory_text(item))
+
+      cond do
+        selected == [] and current_used == 0 and cost > max_tokens ->
+          {:halt, {[item], current_used + cost}}
+
+        current_used + cost <= max_tokens ->
+          {:cont, {[item | selected], current_used + cost}}
+
+        true ->
+          {:halt, {selected, current_used}}
+      end
+    end)
+    |> then(fn {selected, current_used} -> {Enum.reverse(selected), current_used} end)
+  end
+
+  @spec max_tokens(keyword()) :: pos_integer() | nil
+  defp max_tokens(opts) do
     case Keyword.get(opts, :max_tokens) do
-      max_tokens when is_integer(max_tokens) and max_tokens > 0 ->
-        moments
-        |> Enum.reduce_while({[], 0}, fn moment, {selected, used} ->
-          cost = estimate_tokens(Map.get(moment, :text, ""))
-
-          cond do
-            selected == [] and cost > max_tokens ->
-              {:halt, {[moment], cost}}
-
-            used + cost <= max_tokens ->
-              {:cont, {[moment | selected], used + cost}}
-
-            true ->
-              {:halt, {selected, used}}
-          end
-        end)
-        |> elem(0)
-        |> Enum.reverse()
-
-      _missing ->
-        Enum.take(moments, limit)
+      max_tokens when is_integer(max_tokens) and max_tokens > 0 -> max_tokens
+      _missing -> nil
     end
   end
 
@@ -345,11 +494,8 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp recall_observations(cue, opts) do
     if Keyword.get(opts, :include_observations, true) do
       opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :observation_limit, 5))
-
-      case SpectreMnemonic.search_observations(cue, opts) do
-        {:ok, observations} -> observations
-        {:error, _reason} -> []
-      end
+      {:ok, observations} = SpectreMnemonic.search_observations(cue, opts)
+      observations
     else
       []
     end
@@ -359,20 +505,33 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp recall_mental_models(cue, opts) do
     if Keyword.get(opts, :include_mental_models, true) do
       opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :mental_model_limit, 5))
-
-      case SpectreMnemonic.search_mental_models(cue, opts) do
-        {:ok, mental_models} -> mental_models
-        {:error, _reason} -> []
-      end
+      {:ok, mental_models} = SpectreMnemonic.search_mental_models(cue, opts)
+      mental_models
     else
       []
     end
   end
 
-  @spec usage([term()], [term()], [term()], keyword()) :: map()
-  defp usage(moments, observations, mental_models, opts) do
+  @spec usage([term()], [term()], [term()], [term()], [term()], [term()], [term()], keyword()) ::
+          map()
+  defp usage(
+         moments,
+         observations,
+         mental_models,
+         knowledge,
+         artifacts,
+         associations,
+         action_recipes,
+         opts
+       ) do
     estimated =
-      (moments ++ observations ++ mental_models)
+      (mental_models ++
+         observations ++
+         moments ++
+         knowledge ++
+         artifacts ++
+         associations ++
+         action_recipes)
       |> Enum.map(&estimate_tokens(memory_text(&1)))
       |> Enum.sum()
 
@@ -387,6 +546,12 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp memory_text(%{text: text}) when is_binary(text), do: text
   defp memory_text(%{statement: statement}) when is_binary(statement), do: statement
   defp memory_text(%{answer: answer}) when is_binary(answer), do: answer
+  defp memory_text(%{source: source}) when is_binary(source), do: source
+
+  defp memory_text(%{relation: relation, source_id: source_id, target_id: target_id}) do
+    "#{source_id} #{relation} #{target_id}"
+  end
+
   defp memory_text(_memory), do: ""
 
   @spec estimate_tokens(binary()) :: non_neg_integer()

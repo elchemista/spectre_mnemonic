@@ -13,12 +13,12 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Intake
   alias SpectreMnemonic.Knowledge.{Base, Compact, Consolidator, Learning, Record}
-  alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Memory.{ActionRecipe, Artifact, Association, Secret}
+  alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Observations
   alias SpectreMnemonic.Persistence.Manager
-  alias SpectreMnemonic.Reflection
   alias SpectreMnemonic.Recall.{Engine, Packet}
+  alias SpectreMnemonic.Reflection
   alias SpectreMnemonic.Secrets
 
   @doc """
