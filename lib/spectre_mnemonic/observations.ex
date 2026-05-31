@@ -513,12 +513,11 @@ defmodule SpectreMnemonic.Observations do
     end)
   end
 
-  @spec semantic_confidence(atom()) :: float()
+  @spec semantic_confidence(:decision | :pattern | :preference | :project_state) :: float()
   defp semantic_confidence(:decision), do: 0.78
   defp semantic_confidence(:project_state), do: 0.74
   defp semantic_confidence(:preference), do: 0.72
   defp semantic_confidence(:pattern), do: 0.68
-  defp semantic_confidence(_type), do: 0.65
 
   @spec normalize_statement(binary()) :: binary()
   defp normalize_statement(statement) do

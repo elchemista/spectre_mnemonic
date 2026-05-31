@@ -137,6 +137,50 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert Enum.sort(observation.source_ids) == Enum.sort([first.id, second.id])
   end
 
+  test "typed observations are searchable after durable replay" do
+    {:ok, _} =
+      SpectreMnemonic.signal("The user prefers simple Elixir-native architecture.",
+        scope: {:project, "typed-durable"},
+        persist?: true
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(scope: {:project, "typed-durable"})
+
+    assert observation.metadata.observation_type == :preference
+
+    clear_memory()
+    DurableIndex.rebuild()
+
+    assert {:ok, [found]} =
+             SpectreMnemonic.search_observations("simple elixir native",
+               scope: {:project, "typed-durable"}
+             )
+
+    assert found.id == observation.id
+    assert found.metadata.observation_type == :preference
+  end
+
+  test "typed observations participate in recall packets" do
+    {:ok, _} =
+      SpectreMnemonic.signal("This agent often fails because it searches too broadly.",
+        scope: {:project, "typed-recall"}
+      )
+
+    assert {:ok, [observation]} =
+             SpectreMnemonic.consolidate_observations(scope: {:project, "typed-recall"})
+
+    assert {:ok, packet} =
+             SpectreMnemonic.recall("searches too broadly",
+               scope: {:project, "typed-recall"},
+               include_mental_models: false,
+               include_knowledge: false
+             )
+
+    assert Enum.map(packet.observations, & &1.id) == [observation.id]
+    assert hd(packet.observations).metadata.observation_type == :pattern
+  end
+
   test "verify_observation records fresh evidence and confidence" do
     {:ok, %{moment: moment}} =
       SpectreMnemonic.signal("Marta status is active", persist?: true)
@@ -655,6 +699,35 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert packet.root.text =~ "API retry contract"
   end
 
+  test "mission policy keeps mixed small talk when technical signal is present" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("hello, TODO fix the API contract",
+               mission: :code_agent,
+               plugs: [SpectreMnemonic.Intake.MissionPolicy],
+               scope: {:agent, "planner"}
+             )
+
+    assert packet.root
+    assert packet.root.metadata.mission_priority > 1.0
+    assert :todo in packet.root.metadata.mission_categories
+    assert :api_contract in packet.root.metadata.mission_categories
+  end
+
+  test "mission policy supports custom keep priority and extraction profile callbacks" do
+    assert {:ok, packet} =
+             SpectreMnemonic.remember("custom agent should keep this planning note",
+               mission: :custom_agent,
+               plugs: [SpectreMnemonic.Intake.MissionPolicy],
+               mission_policy: __MODULE__.CustomMissionPolicy,
+               scope: {:agent, "planner"}
+             )
+
+    assert packet.root.metadata.mission_policy == __MODULE__.CustomMissionPolicy
+    assert packet.root.metadata.mission_priority == 2.5
+    assert packet.root.metadata.extraction_mode == :custom
+    assert packet.root.metadata.extraction_profile[:remember] == [:custom_learning]
+  end
+
   defmodule ReflectionAdapter do
     @behaviour SpectreMnemonic.Reflection.Adapter
 
@@ -679,5 +752,19 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
 
     @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(_record, _opts), do: :ok
+  end
+
+  defmodule CustomMissionPolicy do
+    @behaviour SpectreMnemonic.Intake.MissionPolicy
+
+    @impl SpectreMnemonic.Intake.MissionPolicy
+    def keep?(_memory, :custom_agent, _opts), do: true
+
+    @impl SpectreMnemonic.Intake.MissionPolicy
+    def priority(_memory, :custom_agent, _opts), do: 2.5
+
+    @impl SpectreMnemonic.Intake.MissionPolicy
+    def extraction_profile(:custom_agent),
+      do: [extraction_mode: :custom, remember: [:custom_learning]]
   end
 end

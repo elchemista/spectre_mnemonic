@@ -975,10 +975,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec durable_index_results(term(), keyword()) :: [map()]
   defp durable_index_results(cue, opts) do
-    case DurableIndex.search(cue, opts) do
-      {:ok, results} -> results
-      {:error, _reason} -> []
-    end
+    {:ok, results} = DurableIndex.search(cue, opts)
+    results
   rescue
     _exception -> []
   catch

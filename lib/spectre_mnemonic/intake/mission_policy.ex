@@ -19,6 +19,17 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
   alias SpectreMnemonic.Intake.Packet
 
   @behaviour SpectreMnemonic.Intake.Plug
+  @dialyzer :no_match
+
+  @code_agent_priority [
+    {[:decision, :bug, :api_contract], 1.8},
+    {[:architecture, :constraint, :todo], 1.6},
+    {[:preference, :project_state], 1.4}
+  ]
+
+  @small_talk_phrases ~w(
+    hi hello hey thanks ok okay cool great nice awesome lol haha yep yes no sure roger
+  ) ++ ["thank you", "sounds good", "got it"]
 
   @type keep_result :: true | false | {:rewrite, Memory.t()}
 
@@ -31,20 +42,14 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
   @impl SpectreMnemonic.Intake.Plug
   def call(%Memory{} = memory, opts) do
     mission = memory.mission || Keyword.get(opts, :mission)
+    decision = apply_policy(memory, mission, opts)
 
-    case apply_policy(memory, mission, opts) do
-      false ->
-        {:ok,
-         %Packet{
-           warnings: [
-             {:mission_policy_dropped, mission, :low_value_intake}
-             | memory.warnings
-           ],
-           errors: memory.errors,
-           persistence: %{mode: :mission_policy, durable?: false}
-         }}
+    cond do
+      decision == false ->
+        drop_packet(memory, mission)
 
-      {:rewrite, %Memory{} = rewritten} ->
+      match?({:rewrite, %Memory{}}, decision) ->
+        {:rewrite, rewritten} = decision
         rewritten
 
       true ->
@@ -52,9 +57,26 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
     end
   end
 
+  @spec drop_packet(Memory.t(), term()) :: {:ok, Packet.t()}
+  defp drop_packet(%Memory{} = memory, mission) do
+    {:ok,
+     %Packet{
+       warnings: [
+         {:mission_policy_dropped, mission, :low_value_intake}
+         | memory.warnings
+       ],
+       errors: memory.errors,
+       persistence: %{mode: :mission_policy, durable?: false}
+     }}
+  end
+
   @spec keep?(Memory.t(), term(), keyword()) :: keep_result()
+  def keep?(%Memory{text: text}, :code_agent, _opts)
+      when text in ["hi", "hello", "hey", "thanks", "ok", "okay"],
+      do: false
+
   def keep?(%Memory{} = memory, :code_agent, _opts) do
-    if small_talk?(memory.text) and not technical_signal?(memory.text) do
+    if small_talk?(memory.text) do
       false
     else
       true
@@ -67,12 +89,14 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
   def priority(%Memory{} = memory, :code_agent, _opts) do
     categories = code_agent_categories(memory.text)
 
-    cond do
-      :decision in categories or :bug in categories or :api_contract in categories -> 1.8
-      :architecture in categories or :constraint in categories or :todo in categories -> 1.6
-      :preference in categories or :project_state in categories -> 1.4
-      categories != [] -> 1.2
-      true -> 1.0
+    @code_agent_priority
+    |> Enum.find_value(fn {important_categories, priority} ->
+      if Enum.any?(important_categories, &(&1 in categories)), do: priority
+    end)
+    |> case do
+      nil when categories != [] -> 1.2
+      nil -> 1.0
+      priority -> priority
     end
   end
 
@@ -199,18 +223,8 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
 
   @spec small_talk?(binary()) :: boolean()
   defp small_talk?(text) do
-    normalized = normalize(text)
-
-    Regex.match?(
-      ~r/^(hi|hello|hey|thanks|thank you|ok|okay|cool|great|nice|awesome|lol|haha|yep|yes|no|sure|sounds good|got it|roger)[.!?\s]*$/iu,
-      normalized
-    ) or
-      (String.length(normalized) <= 24 and
-         Regex.match?(~r/\b(hi|hello|hey|thanks|ok|okay|cool|great|nice|awesome)\b/iu, normalized))
+    normalize(text) in @small_talk_phrases
   end
-
-  @spec technical_signal?(binary()) :: boolean()
-  defp technical_signal?(text), do: code_agent_categories(text) != []
 
   @spec code_agent_categories(binary()) :: [atom()]
   defp code_agent_categories(text) do
@@ -235,5 +249,12 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
   end
 
   @spec normalize(binary()) :: binary()
-  defp normalize(text), do: text |> String.trim() |> String.downcase()
+  defp normalize(text) do
+    text
+    |> String.trim()
+    |> String.trim_trailing(".")
+    |> String.trim_trailing("!")
+    |> String.trim_trailing("?")
+    |> String.downcase()
+  end
 end
