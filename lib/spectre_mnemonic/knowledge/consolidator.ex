@@ -92,19 +92,12 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       |> graph_expanded_candidates(active_moments, associations, opts)
       |> default_consolidation(associations, now, opts)
 
-    case run_consolidation(consolidation, opts) do
-      {:ok, consolidation} ->
-        case persist_consolidation(consolidation) do
-          :ok ->
-            Manager.compact()
-            {:reply, {:ok, consolidation.knowledge}, state}
-
-          {:error, reason} ->
-            {:reply, {:error, reason}, state}
-        end
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
+    with {:ok, consolidation} <- run_consolidation(consolidation, opts),
+         :ok <- persist_consolidation(consolidation) do
+      Manager.compact()
+      {:reply, {:ok, consolidation.knowledge}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -290,18 +283,18 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
           acc
           |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
           |> Map.update!(:summaries, &[moment | &1])
-          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+          |> add_embeddings(moment)
 
         %{kind: :memory_category} = moment, acc ->
           acc
           |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
           |> Map.update!(:categories, &[moment | &1])
-          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+          |> add_embeddings(moment)
 
         moment, acc ->
           acc
           |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
-          |> Map.update!(:embeddings, &(embedding_record(moment) ++ &1))
+          |> add_embeddings(moment)
       end)
 
     %{
@@ -310,6 +303,11 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       categories: Enum.reverse(outputs.categories),
       embeddings: Enum.reverse(outputs.embeddings)
     }
+  end
+
+  @spec add_embeddings(map(), term()) :: map()
+  defp add_embeddings(outputs, moment) do
+    Map.update!(outputs, :embeddings, &Enum.reverse(embedding_record(moment), &1))
   end
 
   @spec knowledge_record(term(), DateTime.t()) :: Record.t()
@@ -353,38 +351,30 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       embeddings: consolidation.embeddings,
       associations: consolidation.associations
     ]
-    |> Enum.reduce_while(:ok, fn {family, values}, :ok ->
-      case persist_values(family, values) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    |> stop_on_error(fn {family, values} -> persist_values(family, values) end)
   end
 
   @spec persist_values(atom(), [term()]) :: :ok | {:error, term()}
   defp persist_values(family, values) do
-    Enum.reduce_while(values, :ok, fn value, :ok ->
-      case Manager.append(family, value) do
-        {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    stop_on_error(values, fn value -> Manager.append(family, value) end)
   end
 
   @spec persist_adapter_records([term()]) :: :ok | {:error, term()}
   defp persist_adapter_records(records) do
-    Enum.reduce_while(records, :ok, fn record, :ok ->
-      case append_record(record) do
-        {:ok, _result} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    stop_on_error(records, &append_record/1)
   end
 
   @spec persist_tombstones([term()]) :: :ok | {:error, term()}
   defp persist_tombstones(tombstones) do
-    Enum.reduce_while(tombstones, :ok, fn tombstone, :ok ->
-      case append_tombstone(tombstone) do
+    stop_on_error(tombstones, &append_tombstone/1)
+  end
+
+  @spec stop_on_error(Enumerable.t(), (term() -> :ok | {:ok, term()} | {:error, term()})) ::
+          :ok | {:error, term()}
+  defp stop_on_error(enumerable, fun) do
+    Enum.reduce_while(enumerable, :ok, fn item, :ok ->
+      case fun.(item) do
+        :ok -> {:cont, :ok}
         {:ok, _result} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -522,8 +512,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     if Map.has_key?(seen, id) do
       visit_component(rest, adjacency, seen)
     else
-      neighbors = adjacency |> Map.get(id, MapSet.new()) |> MapSet.to_list()
-      visit_component(neighbors ++ rest, adjacency, Map.put(seen, id, true))
+      next = [adjacency |> Map.get(id, MapSet.new()) |> MapSet.to_list(), rest] |> List.flatten()
+      visit_component(next, adjacency, Map.put(seen, id, true))
     end
   end
 
