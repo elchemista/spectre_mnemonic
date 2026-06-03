@@ -562,11 +562,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec semantic_with_adapter(module(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp semantic_with_adapter(module, input, opts) do
     if Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
-      case module.compact(input, opts) do
-        {:ok, output} -> {:ok, output}
-        {:error, reason} -> {:error, reason}
-        other -> {:error, {:unexpected_semantic_compact_result, other}}
-      end
+      module
+      |> apply(:compact, [input, opts])
+      |> normalize_semantic_adapter_result()
     else
       {:error, {:invalid_semantic_compact_adapter, module}}
     end
@@ -575,6 +573,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
   catch
     kind, reason -> {:error, {kind, reason}}
   end
+
+  @spec normalize_semantic_adapter_result(term()) :: {:ok, term()} | {:error, term()}
+  defp normalize_semantic_adapter_result({:ok, output}), do: {:ok, output}
+  defp normalize_semantic_adapter_result({:error, reason}), do: {:error, reason}
+
+  defp normalize_semantic_adapter_result(other),
+    do: {:error, {:unexpected_semantic_compact_result, other}}
 
   @spec default_semantic_output(map()) :: map()
   defp default_semantic_output(%{records: records, families: families}) do
@@ -618,9 +623,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
       |> Enum.reject(&is_nil/1)
 
     tombstones =
-      output
-      |> semantic_values(:tombstones)
-      |> Kernel.++(replace_id_tombstones(output, selected))
+      [semantic_values(output, :tombstones), replace_id_tombstones(output, selected)]
+      |> List.flatten()
       |> Enum.map(&semantic_tombstone/1)
       |> Enum.reject(&is_nil/1)
 
@@ -636,7 +640,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec write_semantic_plan(store(), map()) :: {:ok, map()} | {:error, term()}
   defp write_semantic_plan(store, plan) do
-    compact_records = plan.records ++ plan.tombstones
+    compact_records = List.flatten([plan.records, plan.tombstones])
 
     summary =
       Enum.reduce_while(compact_records, %{written: 0, tombstones: 0, skipped: 0}, fn record,
@@ -985,7 +989,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec merge_search_results([map()], [map()]) :: [map()]
   defp merge_search_results(index_results, adapter_results) do
-    (index_results ++ adapter_results)
+    [index_results, adapter_results]
+    |> List.flatten()
     |> Enum.uniq_by(fn result ->
       {Map.get(result, :source), Map.get(result, :family), Map.get(result, :id)}
     end)

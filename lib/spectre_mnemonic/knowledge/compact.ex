@@ -83,11 +83,9 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   @spec compact_with_adapter(module(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp compact_with_adapter(module, input, opts) do
     if Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
-      case module.compact(input, opts) do
-        {:ok, output} -> {:ok, output}
-        {:error, reason} -> {:error, reason}
-        other -> {:error, {:unexpected_compact_result, other}}
-      end
+      module
+      |> apply(:compact, [input, opts])
+      |> normalize_adapter_result()
     else
       {:error, {:invalid_compact_adapter, module}}
     end
@@ -96,6 +94,11 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   catch
     kind, reason -> {:error, {kind, reason}}
   end
+
+  @spec normalize_adapter_result(term()) :: {:ok, term()} | {:error, term()}
+  defp normalize_adapter_result({:ok, output}), do: {:ok, output}
+  defp normalize_adapter_result({:error, reason}), do: {:error, reason}
+  defp normalize_adapter_result(other), do: {:error, {:unexpected_compact_result, other}}
 
   @spec default_compact(map()) :: [map()]
   defp default_compact(%{moments: moments, existing_events: existing_events, budgets: budgets}) do
@@ -120,10 +123,13 @@ defmodule SpectreMnemonic.Knowledge.Compact do
       |> Enum.map(&SMEM.normalize_event/1)
       |> Enum.filter(&(&1.type in [:skill, :procedure, :fact]))
 
-    [%{type: :summary, summary: summary, text: summary, metadata: %{strategy: :default}}]
-    |> Kernel.++(summaries)
-    |> Kernel.++(latest)
-    |> Kernel.++(existing_keep)
+    [
+      [%{type: :summary, summary: summary, text: summary, metadata: %{strategy: :default}}],
+      summaries,
+      latest,
+      existing_keep
+    ]
+    |> List.flatten()
     |> dedupe_events()
   end
 
@@ -134,13 +140,15 @@ defmodule SpectreMnemonic.Knowledge.Compact do
 
   defp normalize_output(output) when is_map(output) do
     events =
-      output
-      |> events_from_output(:summary)
-      |> Kernel.++(events_from_output(output, :skill))
-      |> Kernel.++(events_from_output(output, :latest_ingestion))
-      |> Kernel.++(events_from_output(output, :fact))
-      |> Kernel.++(events_from_output(output, :procedure))
-      |> Kernel.++(events_from_output(output, :compaction_marker))
+      [
+        events_from_output(output, :summary),
+        events_from_output(output, :skill),
+        events_from_output(output, :latest_ingestion),
+        events_from_output(output, :fact),
+        events_from_output(output, :procedure),
+        events_from_output(output, :compaction_marker)
+      ]
+      |> List.flatten()
 
     {:ok, normalize_events(events)}
   end
@@ -185,7 +193,7 @@ defmodule SpectreMnemonic.Knowledge.Compact do
       inserted_at: DateTime.utc_now()
     }
 
-    events ++ [SMEM.normalize_event(marker)]
+    List.flatten([events, [SMEM.normalize_event(marker)]])
   end
 
   @spec event_from_moment(map(), atom()) :: map()

@@ -116,8 +116,14 @@ defmodule SpectreMnemonic.Intake do
              opts
            ) do
       results =
-        [root_result] ++
-          chunk_results ++ summary_results ++ category_results ++ extraction_results
+        [
+          [root_result],
+          chunk_results,
+          summary_results,
+          category_results,
+          extraction_results
+        ]
+        |> List.flatten()
 
       {:ok,
        %Packet{
@@ -127,7 +133,7 @@ defmodule SpectreMnemonic.Intake do
          chunks: Enum.map(chunk_results, & &1.moment),
          summaries: Enum.map(summary_results, & &1.moment),
          categories: Enum.map(category_results, & &1.moment),
-         associations: associations ++ extraction_associations,
+         associations: List.flatten([associations, extraction_associations]),
          warnings: memory.warnings,
          errors: memory.errors,
          persistence: persistence_status(opts)
@@ -318,32 +324,33 @@ defmodule SpectreMnemonic.Intake do
           metadata: metadata
         )
 
-      case SpectreMnemonic.signal(chunk, signal_opts) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, reason}
-      end
+      signal_memory(chunk, signal_opts)
     end)
   end
 
   @spec record_summaries(envelope(), Moment.t(), [map()], keyword()) ::
           {:ok, [map()]} | {:error, term()}
   defp record_summaries(envelope, root, chunk_results, opts) do
-    chunk_summaries =
-      Result.collect_ok(chunk_results, fn %{moment: chunk} ->
-        record_summary(:chunk, chunk.text, root, envelope, opts,
-          chunk_memory_id: chunk.id,
-          chunk_index: chunk.metadata.chunk_index
-        )
-      end)
-
-    with {:ok, summaries} <- chunk_summaries do
-      combined = Enum.map_join(summaries, "\n", & &1.moment.text)
-
-      case record_summary(:root, combined, root, envelope, opts) do
-        {:ok, root_summary} -> {:ok, summaries ++ [root_summary]}
-        {:error, reason} -> {:error, reason}
-      end
+    with {:ok, summaries} <-
+           Result.collect_ok(chunk_results, fn %{moment: chunk} ->
+             record_chunk_summary(chunk, root, envelope, opts)
+           end),
+         combined <- Enum.map_join(summaries, "\n", & &1.moment.text),
+         {:ok, root_summary} <- record_summary(:root, combined, root, envelope, opts) do
+      {:ok, List.flatten([summaries, [root_summary]])}
     end
+  end
+
+  @spec signal_memory(binary(), keyword()) :: {:ok, map()} | {:error, term()}
+  defp signal_memory(text, opts), do: SpectreMnemonic.signal(text, opts)
+
+  @spec record_chunk_summary(Moment.t(), Moment.t(), envelope(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  defp record_chunk_summary(chunk, root, envelope, opts) do
+    record_summary(:chunk, chunk.text, root, envelope, opts,
+      chunk_memory_id: chunk.id,
+      chunk_index: chunk.metadata.chunk_index
+    )
   end
 
   @spec record_summary(atom(), binary(), Moment.t(), envelope(), keyword(), keyword()) ::
@@ -388,7 +395,8 @@ defmodule SpectreMnemonic.Intake do
           {:ok, [map()]} | {:error, term()}
   defp record_categories(envelope, root, chunk_results, summary_results, opts) do
     labels =
-      (chunk_results ++ summary_results)
+      [chunk_results, summary_results]
+      |> List.flatten()
       |> Enum.flat_map(&Map.get(&1.moment.metadata, :categories, []))
       |> Enum.concat([envelope.kind])
       |> Enum.reject(&is_nil/1)
@@ -413,30 +421,17 @@ defmodule SpectreMnemonic.Intake do
             })
         )
 
-      case SpectreMnemonic.signal("Category: #{label}", signal_opts) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, reason}
-      end
+      signal_memory("Category: #{label}", signal_opts)
     end)
   end
 
   @spec record_extraction(envelope(), Moment.t(), keyword()) ::
           {:ok, [map()], [Association.t()]} | {:error, term()}
   defp record_extraction(envelope, root, opts) do
-    if Keyword.get(opts, :extract_entities?, true) do
+    if extract_entities?(opts) do
       # Extraction adapters can return provider-specific graph data, but intake
       # immediately converts it into normal memory moments and associations.
-      with {:ok, graph} <-
-             Extraction.extract(
-               envelope.text,
-               opts
-               |> Keyword.put(:input, envelope.input)
-               |> Keyword.put(:stream, envelope.stream)
-               |> Keyword.put(:task_id, envelope.task_id)
-               |> Keyword.put(:scope, envelope.scope)
-               |> Keyword.put(:mission, envelope.mission)
-               |> Keyword.put(:extraction_mode, envelope.extraction_mode)
-             ),
+      with {:ok, graph} <- Extraction.extract(envelope.text, extraction_opts(envelope, opts)),
            {:ok, results} <- record_extraction_nodes(graph, root, envelope, opts),
            {:ok, associations} <- link_extraction_graph(graph, root, results, opts) do
         {:ok, results, associations}
@@ -444,6 +439,20 @@ defmodule SpectreMnemonic.Intake do
     else
       {:ok, [], []}
     end
+  end
+
+  @spec extract_entities?(keyword()) :: boolean()
+  defp extract_entities?(opts), do: Keyword.get(opts, :extract_entities?, true)
+
+  @spec extraction_opts(envelope(), keyword()) :: keyword()
+  defp extraction_opts(envelope, opts) do
+    opts
+    |> Keyword.put(:input, envelope.input)
+    |> Keyword.put(:stream, envelope.stream)
+    |> Keyword.put(:task_id, envelope.task_id)
+    |> Keyword.put(:scope, envelope.scope)
+    |> Keyword.put(:mission, envelope.mission)
+    |> Keyword.put(:extraction_mode, envelope.extraction_mode)
   end
 
   @spec record_extraction_nodes(map(), Moment.t(), envelope(), keyword()) ::
@@ -474,19 +483,19 @@ defmodule SpectreMnemonic.Intake do
           metadata: metadata
         )
 
-      case SpectreMnemonic.signal(text, signal_opts) do
-        {:ok, result} -> {:ok, result}
-        {:error, reason} -> {:error, reason}
-      end
+      signal_memory(text, signal_opts)
     end)
   end
 
   @spec extraction_items(map()) :: [{binary(), binary(), atom(), map(), number()}]
   defp extraction_items(graph) do
-    entity_items(graph.entities) ++
-      event_items(graph.events) ++
-      time_items(graph.times) ++
+    [
+      entity_items(graph.entities),
+      event_items(graph.events),
+      time_items(graph.times),
       value_items(graph.values)
+    ]
+    |> List.flatten()
   end
 
   @spec entity_items([map()]) :: [{binary(), binary(), atom(), map(), number()}]
@@ -569,29 +578,44 @@ defmodule SpectreMnemonic.Intake do
   defp link_extraction_graph(graph, root, results, opts) do
     node_by_local_id = Map.new(results, &{&1.moment.metadata.extraction_local_id, &1.moment})
 
-    planned_edges =
-      observed_edges(root, Map.values(node_by_local_id)) ++
-        mention_edges(root, graph.entities, node_by_local_id) ++
-        relation_edges(graph.relations, node_by_local_id) ++
-        event_field_edges(graph.events, node_by_local_id) ++
-        value_entity_edges(graph.values, node_by_local_id) ++
-        same_entity_edges(graph.entities, node_by_local_id)
-
-    planned_edges
+    graph
+    |> extraction_edge_plan(root, node_by_local_id)
     |> Enum.uniq_by(fn {source, relation, target, _edge_opts} ->
       {source.id, relation, target.id}
     end)
+    |> link_edges(opts)
+  end
+
+  @spec extraction_edge_plan(map(), Moment.t(), map()) :: [
+          {Moment.t(), atom(), Moment.t(), keyword()}
+        ]
+  defp extraction_edge_plan(graph, root, node_by_local_id) do
+    [
+      observed_edges(root, Map.values(node_by_local_id)),
+      mention_edges(root, graph.entities, node_by_local_id),
+      relation_edges(graph.relations, node_by_local_id),
+      event_field_edges(graph.events, node_by_local_id),
+      value_entity_edges(graph.values, node_by_local_id),
+      same_entity_edges(graph.entities, node_by_local_id)
+    ]
+    |> List.flatten()
+  end
+
+  @spec link_edges([{Moment.t(), atom(), Moment.t(), keyword()}], keyword()) ::
+          {:ok, [Association.t()]} | {:error, term()}
+  defp link_edges(planned_edges, opts) do
+    persist? = Keyword.get(opts, :persist?, false)
+
+    planned_edges
     |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
-      case SpectreMnemonic.link(
-             source.id,
-             relation,
-             target.id,
-             Keyword.put_new(edge_opts, :persist?, Keyword.get(opts, :persist?, false))
-           ) do
-        {:ok, edge} -> {:ok, edge}
-        {:error, reason} -> {:error, reason}
-      end
+      link_memory(source, relation, target, Keyword.put_new(edge_opts, :persist?, persist?))
     end)
+  end
+
+  @spec link_memory(Moment.t(), atom(), Moment.t(), keyword()) ::
+          {:ok, Association.t()} | {:error, term()}
+  defp link_memory(source, relation, target, opts) do
+    SpectreMnemonic.link(source.id, relation, target.id, opts)
   end
 
   @spec observed_edges(Moment.t(), [Moment.t()]) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
@@ -686,27 +710,25 @@ defmodule SpectreMnemonic.Intake do
 
     category_by_label = Map.new(categories, &{&1.metadata.category, &1})
 
-    planned_edges =
-      Enum.map(chunks, &{root, :contains_chunk, &1, []}) ++
-        Enum.map(summaries, &{root, :has_summary, &1, []}) ++
-        Enum.map(categories, &{root, :has_category, &1, []}) ++
-        chunk_summary_edges(chunks, summaries) ++
-        sequence_edges(chunks, :next_chunk, :previous_chunk) ++
-        category_edges(chunks ++ summaries, category_by_label) ++
-        related_chunk_edges(chunks, opts) ++
-        cross_memory_edges(root, chunks, summaries, categories, opts)
+    root
+    |> intake_edge_plan(chunks, summaries, categories, category_by_label, opts)
+    |> link_edges(opts)
+  end
 
-    Result.collect_ok(planned_edges, fn {source, relation, target, edge_opts} ->
-      case SpectreMnemonic.link(
-             source.id,
-             relation,
-             target.id,
-             Keyword.put_new(edge_opts, :persist?, Keyword.get(opts, :persist?, false))
-           ) do
-        {:ok, edge} -> {:ok, edge}
-        {:error, reason} -> {:error, reason}
-      end
-    end)
+  @spec intake_edge_plan(Moment.t(), [Moment.t()], [Moment.t()], [Moment.t()], map(), keyword()) ::
+          [{Moment.t(), atom(), Moment.t(), keyword()}]
+  defp intake_edge_plan(root, chunks, summaries, categories, category_by_label, opts) do
+    [
+      Enum.map(chunks, &{root, :contains_chunk, &1, []}),
+      Enum.map(summaries, &{root, :has_summary, &1, []}),
+      Enum.map(categories, &{root, :has_category, &1, []}),
+      chunk_summary_edges(chunks, summaries),
+      sequence_edges(chunks, :next_chunk, :previous_chunk),
+      category_edges(List.flatten([chunks, summaries]), category_by_label),
+      related_chunk_edges(chunks, opts),
+      cross_memory_edges(root, chunks, summaries, categories, opts)
+    ]
+    |> List.flatten()
   end
 
   @spec chunk_summary_edges([Moment.t()], [Moment.t()]) :: [
@@ -787,7 +809,13 @@ defmodule SpectreMnemonic.Intake do
         )
 
       max_edges = Keyword.get(opts, :max_cross_memory_edges, @default_max_cross_memory_edges)
-      current_ids = MapSet.new(Enum.map([root | chunks ++ summaries ++ categories], & &1.id))
+
+      current_ids =
+        [[root], chunks, summaries, categories]
+        |> List.flatten()
+        |> Enum.map(& &1.id)
+        |> MapSet.new()
+
       existing_edges = existing_cross_memory_edges(current_ids)
       anchors = [root | chunks] |> Enum.filter(&linkable_memory?/1)
 

@@ -56,6 +56,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
     A An And At Category Date Email Entity Event I Il La Le Les Los On The Time Value
   ))
 
+  @graph_sections ~w(entities events times values relations)a
+
   @doc "Extracts and normalizes a graph fragment from text."
   @spec extract(binary(), keyword()) :: {:ok, map()}
   def extract(text, opts \\ []) when is_binary(text) do
@@ -78,12 +80,15 @@ defmodule SpectreMnemonic.Intake.Extraction do
     sensitive_numbers = Keyword.get(opts, :sensitive_numbers, :classify)
     input = Keyword.get(opts, :input)
 
-    entities = text_entities(text) ++ structured_entities(input)
-    times = iso_times(text) ++ month_times(text) ++ structured_times(input)
+    entities = List.flatten([text_entities(text), structured_entities(input)])
+    times = List.flatten([iso_times(text), month_times(text), structured_times(input)])
 
     values =
-      text_values(text, entities, sensitive_numbers) ++
+      [
+        text_values(text, entities, sensitive_numbers),
         structured_values(input, sensitive_numbers)
+      ]
+      |> List.flatten()
 
     events = text_events(text, times)
     relations = inferred_relations(entities, events, times, values)
@@ -102,20 +107,34 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp adapter_extract(nil, _text, _opts), do: empty()
 
   defp adapter_extract(adapter, text, opts) do
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :extract, 2) do
-      adapter.extract(text, opts)
-      |> case do
-        {:ok, result} -> normalize(result, %{provider: adapter})
-        {:error, reason} -> %{empty() | metadata: %{provider: adapter, error: reason}}
-        result when is_map(result) -> normalize(result, %{provider: adapter})
-        other -> %{empty() | metadata: %{provider: adapter, error: {:invalid_result, other}}}
-      end
+    if adapter_available?(adapter) do
+      adapter
+      |> apply(:extract, [text, opts])
+      |> normalize_adapter_result(adapter)
     else
       %{empty() | metadata: %{provider: adapter, error: :adapter_not_available}}
     end
   rescue
     exception -> %{empty() | metadata: %{provider: adapter, error: exception}}
   end
+
+  @spec adapter_available?(module()) :: boolean()
+  defp adapter_available?(adapter) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :extract, 2)
+  end
+
+  @spec normalize_adapter_result(term(), module()) :: map()
+  defp normalize_adapter_result({:ok, result}, adapter),
+    do: normalize(result, %{provider: adapter})
+
+  defp normalize_adapter_result({:error, reason}, adapter),
+    do: %{empty() | metadata: %{provider: adapter, error: reason}}
+
+  defp normalize_adapter_result(result, adapter) when is_map(result),
+    do: normalize(result, %{provider: adapter})
+
+  defp normalize_adapter_result(other, adapter),
+    do: %{empty() | metadata: %{provider: adapter, error: {:invalid_result, other}}}
 
   @spec text_entities(binary()) :: [map()]
   defp text_entities(text) do
@@ -188,9 +207,11 @@ defmodule SpectreMnemonic.Intake.Extraction do
     emails = email_values(text, entities)
     ages = age_values(text)
     phone_exclusions = phone_exclusion_values(text)
-    numbers = number_values(text, entities, phones ++ ages ++ phone_exclusions)
+    exclusions = List.flatten([phones, ages, phone_exclusions])
+    numbers = number_values(text, entities, exclusions)
 
-    phones ++ emails ++ ages ++ numbers
+    [phones, emails, ages, numbers]
+    |> List.flatten()
   end
 
   @spec phone_exclusion_values(binary()) :: [map()]
@@ -365,7 +386,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
         end
       end)
 
-    event_relations ++ value_relations
+    [event_relations, value_relations]
+    |> List.flatten()
   end
 
   @spec normalize(map(), map()) :: map()
@@ -458,14 +480,18 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec merge(map(), map()) :: map()
   defp merge(left, right) do
-    %{
-      entities: Map.get(left, :entities, []) ++ Map.get(right, :entities, []),
-      events: Map.get(left, :events, []) ++ Map.get(right, :events, []),
-      times: Map.get(left, :times, []) ++ Map.get(right, :times, []),
-      values: Map.get(left, :values, []) ++ Map.get(right, :values, []),
-      relations: Map.get(left, :relations, []) ++ Map.get(right, :relations, []),
-      metadata: Map.merge(Map.get(left, :metadata, %{}), Map.get(right, :metadata, %{}))
-    }
+    @graph_sections
+    |> Map.new(&{&1, merge_section(left, right, &1)})
+    |> Map.put(
+      :metadata,
+      Map.merge(Map.get(left, :metadata, %{}), Map.get(right, :metadata, %{}))
+    )
+  end
+
+  @spec merge_section(map(), map(), atom()) :: [term()]
+  defp merge_section(left, right, section) do
+    [Map.get(left, section, []), Map.get(right, section, [])]
+    |> List.flatten()
   end
 
   @spec dedupe(map()) :: map()
