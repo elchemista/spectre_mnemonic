@@ -19,6 +19,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   @spec put(SpectreMnemonic.Persistence.Store.Record.t(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
   def put(record, opts) do
+    # Append first, ask existential questions later. The frame has seq, time,
+    # length, and CRC so replay can be grumpy in a useful way.
     root = data_root(opts)
     ensure_root!(root)
     path = active_path(root)
@@ -53,6 +55,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   @doc "Compacts current replayable records into a snapshot file."
   @spec compact(keyword()) :: {:ok, Path.t()} | {:error, term()}
   def compact(opts \\ []) do
+    # Physical compaction is just a snapshot of replayable truth. Not fancy,
+    # but it keeps startup from eating the whole segment buffet forever.
     root = data_root(opts)
     ensure_root!(root)
     records = replay_path(active_path(root))

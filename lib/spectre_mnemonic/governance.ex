@@ -77,6 +77,9 @@ defmodule SpectreMnemonic.Governance do
   def observe_moment(moment, opts \\ [])
 
   def observe_moment(%{id: id} = moment, opts) when is_binary(id) do
+    # Governance is where memories stop being "whatever got written last".
+    # Facts can verify, contradict, get stale, or be pinned. Annoying? yes.
+    # Better than treating old phone numbers like sacred scripture.
     state =
       normalize_state(Keyword.get(opts, :memory_state, Keyword.get(opts, :state, :short_term)))
 
@@ -174,6 +177,8 @@ defmodule SpectreMnemonic.Governance do
   """
   @spec decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
   def decay(opts \\ []) do
+    # Time matters. I kept seeing agents drag ancient facts into fresh work like
+    # they were still invited. Decay marks doubt without deleting the evidence.
     stale_after_ms =
       opts
       |> Keyword.get(:stale_after_ms, Keyword.get(opts, :freshness_ms, @default_stale_after_ms))

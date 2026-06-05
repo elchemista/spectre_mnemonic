@@ -41,6 +41,8 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
 
   @impl SpectreMnemonic.Intake.Plug
   def call(%Memory{} = memory, opts) do
+    # Mission policy is opt-in because one project's "important context" is
+    # another project's chat lint. The default keeps its hands mostly in pockets.
     mission = memory.mission || Keyword.get(opts, :mission)
     decision = apply_policy(memory, mission, opts)
 
@@ -154,6 +156,8 @@ defmodule SpectreMnemonic.Intake.MissionPolicy do
   defp enrich(%Memory{} = memory, nil, _opts), do: memory
 
   defp enrich(%Memory{} = memory, mission, opts) do
+    # Enrichment adds hints, not commandments. The model may express intent;
+    # retention still has to pass through runtime code with actual conditionals.
     policy = Keyword.get(opts, :mission_policy, __MODULE__)
     profile = policy_extraction_profile(policy, mission)
     priority = policy_priority(policy, memory, mission, opts)

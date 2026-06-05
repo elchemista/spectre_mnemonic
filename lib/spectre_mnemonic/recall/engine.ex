@@ -81,6 +81,8 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec handle_call({:recall, term(), keyword()}, GenServer.from(), map()) ::
           {:reply, {:ok, Packet.t()}, map()}
   def handle_call({:recall, cue_input, opts}, _from, state) do
+    # Recall gathers evidence. It does not write the answer, bless the answer,
+    # or pretend the top hit is truth. Ranking is useful; certainty is expensive.
     cue = build_cue(cue_input, opts)
     limit = Keyword.get(opts, :limit, 10)
     budget = budget(opts)
@@ -207,6 +209,8 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   @spec build_cue(term(), keyword()) :: Cue.t()
   defp build_cue(input, opts) do
+    # The cue gets the same embedding/fingerprint treatment as memory. If
+    # embedding fails, text and graph signals still carry the box up the stairs.
     text = if is_binary(input), do: input, else: inspect(input)
     embedding = Service.embed(input, opts)
 
@@ -290,6 +294,8 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp expand_graph(moments, 0, _opts, _seen), do: moments
 
   defp expand_graph(moments, depth, opts, _seen) do
+    # Graph expansion is where nearby context gets a chance to help. It is not
+    # permission to drag the whole attic into the prompt. Depth exists for sanity.
     ids = MapSet.new(Enum.map(moments, & &1.id))
     associations = Focus.associations_for_ids(ids)
 
@@ -404,6 +410,8 @@ defmodule SpectreMnemonic.Recall.Engine do
         ) ::
           {map(), non_neg_integer() | nil}
   defp apply_primary_budget(moments, observations, mental_models, opts, limit) do
+    # Budgeting starts with primary evidence. Dependent records come later,
+    # because citations without the thing they cite are just decorative confetti.
     case max_tokens(opts) do
       nil ->
         {%{

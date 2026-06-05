@@ -64,6 +64,9 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
   """
   @spec read_frames(File.io_device(), acc, fold_fun(acc)) :: acc when acc: term()
   def read_frames(io, acc, fun) when is_function(fun, 2) do
+    # I chose framed append-only storage because the recovery story is boring:
+    # read until the bytes stop making sense, then stop. Future work can add
+    # better repair tooling; today we do not turn one bad tail into a funeral.
     case IO.binread(io, @header_bytes) do
       <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32>> ->
         read_payload(io, seq, timestamp, len, crc, acc, fun)

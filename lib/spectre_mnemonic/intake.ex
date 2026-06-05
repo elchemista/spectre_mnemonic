@@ -96,9 +96,9 @@ defmodule SpectreMnemonic.Intake do
 
   @spec remember_public(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   defp remember_public(%Memory{} = memory, opts) do
-    # Each step writes a different role of active memory. The packet preserves
-    # those roles so callers can inspect root, chunks, summaries, categories, and
-    # extracted facts without re-deriving structure from flat ETS data.
+    # Intake is where messy caller input becomes boring internal memory. Root,
+    # chunks, summaries, categories, facts: separate roles, separate records.
+    # Future cleanup: this function still does a lot of traffic control.
     with {:ok, root_result} <- record_root(memory, opts),
          {:ok, chunk_results} <- record_chunks(memory, root_result.moment, opts),
          {:ok, summary_results} <-
@@ -179,6 +179,8 @@ defmodule SpectreMnemonic.Intake do
 
   @spec normalize(term(), keyword()) :: {:ok, Memory.t()} | {:error, :empty_memory}
   defp normalize(input, opts) do
+    # Keep JSON-looking strings as text and normalize at the edge. I do not want
+    # random webhook shapes leaking into the rest of the system wearing a badge.
     text = text_projection(input)
 
     if String.trim(text) == "" do
@@ -429,8 +431,9 @@ defmodule SpectreMnemonic.Intake do
           {:ok, [map()], [Association.t()]} | {:error, term()}
   defp record_extraction(envelope, root, opts) do
     if extract_entities?(opts) do
-      # Extraction adapters can return provider-specific graph data, but intake
-      # immediately converts it into normal memory moments and associations.
+      # Extraction is useful, but it is still just another intake product.
+      # Convert it to normal moments fast so the rest of the app does not need
+      # to care which adapter had opinions today.
       with {:ok, graph} <- Extraction.extract(envelope.text, extraction_opts(envelope, opts)),
            {:ok, results} <- record_extraction_nodes(graph, root, envelope, opts),
            {:ok, associations} <- link_extraction_graph(graph, root, results, opts) do
@@ -704,6 +707,8 @@ defmodule SpectreMnemonic.Intake do
   @spec link_graph(Moment.t(), [map()], [map()], [map()], keyword()) ::
           {:ok, [Association.t()]} | {:error, term()}
   defp link_graph(root, chunk_results, summary_results, category_results, opts) do
+    # Associations are the cheap structure that makes recall less forgetful.
+    # The graph is plain data, not a secret agent framework hiding under a coat.
     chunks = Enum.map(chunk_results, & &1.moment)
     summaries = Enum.map(summary_results, & &1.moment)
     categories = Enum.map(category_results, & &1.moment)

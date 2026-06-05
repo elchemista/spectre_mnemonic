@@ -277,6 +277,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec persist(Record.t(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   defp persist(record, opts) do
+    # This is the write boundary. Domain code hands us one envelope; stores get
+    # fan-out, telemetry, and blame labels. Future cleanup: partial failure
+    # policy is still a little too ceremonial.
     cfg = effective_config(opts)
     stores = selected_stores(cfg, record)
     results = Enum.map(stores, &write_store(&1, record))
@@ -443,6 +446,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec semantic_compact(config(), keyword()) :: map()
   defp semantic_compact(cfg, opts) do
+    # Semantic compaction is adapter-shaped because deciding what to compress is
+    # policy. Writing replacement records and tombstones is runtime work. That
+    # division keeps the model out of the forklift.
     results =
       cfg
       |> Keyword.fetch!(:stores)
@@ -614,6 +620,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
     do: normalize_semantic_output(%{records: output}, selected)
 
   defp normalize_semantic_output(output, selected) when is_map(output) do
+    # Adapters can be generous with shapes, so normalize here and nowhere else.
+    # I dont want every store adapter learning three dialects of tombstone.
     strategy = Map.get(output, :strategy, Map.get(output, "strategy", :custom))
 
     records =
@@ -872,6 +880,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec replay_records([store()]) :: [Record.t()]
   defp replay_records(stores) do
+    # Replay is boring recovery: fold every store, keep latest dedupe key, apply
+    # tombstones. If an index disagrees, replay wins and the index can apologize.
     stores
     |> Enum.reduce(replay_state(), &replay_store_into/2)
     |> replay_state_records()

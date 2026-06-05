@@ -33,6 +33,8 @@ defmodule SpectreMnemonic.Knowledge.Learning do
   """
   @spec learn(term(), keyword()) :: {:ok, result()} | {:error, term()}
   def learn(input, opts \\ []) do
+    # Learning stores small reusable moves, not the full conversation transcript.
+    # I wanted something cheap enough to load without feeling the prompt groan.
     with {:ok, event} <- normalize(input, opts),
          {:ok, seq} <- Base.append(event, opts) do
       {:ok, %{event: event, seq: seq}}
@@ -131,6 +133,8 @@ defmodule SpectreMnemonic.Knowledge.Learning do
 
   @spec validate(map()) :: {:ok, SMEM.event()} | {:error, term()}
   defp validate(skill) do
+    # A skill without a name or content is just a sticky note that fell behind
+    # the desk. Reject it now so recall does not find mystery lint later.
     cond do
       blank?(Map.get(skill, :name)) ->
         {:error, {:invalid_skill, :missing_name}}

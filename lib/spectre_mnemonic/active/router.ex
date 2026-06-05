@@ -44,6 +44,9 @@ defmodule SpectreMnemonic.Active.Router do
 
   @spec route(term(), keyword()) :: term()
   defp route(_input, opts) do
+    # Routing is intentionally dumb and inspectable. Explicit stream wins,
+    # task lanes come next, and only then do we infer. Future me may add policy,
+    # but today I want to know where the memory went without reading tea leaves.
     cond do
       Keyword.get(opts, :stream) ->
         Keyword.fetch!(opts, :stream)

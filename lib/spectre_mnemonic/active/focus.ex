@@ -223,20 +223,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
     moment = build_moment(signal, opts, now)
 
-    :ets.insert(:mnemonic_signals, {signal.id, signal})
-    insert_moment(moment)
-    :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
-    update_status(stream, task_id, input, kind, now)
-
-    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
-         {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
-         {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
-      maybe_observe_moment(moment, opts)
-      Index.upsert(moment)
-      {:ok, record_signal_result(signal, moment, action_recipe)}
-    else
-      {:error, reason} -> {:error, reason}
-    end
+    store_recorded_signal(signal, moment, opts, now)
   end
 
   @spec record_secret_signal(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
@@ -262,49 +249,48 @@ defmodule SpectreMnemonic.Active.Focus do
     }
 
     with {:ok, moment} <- build_secret(signal, label, redacted, plaintext, opts, now) do
-      :ets.insert(:mnemonic_signals, {signal.id, signal})
-      insert_moment(moment)
-      :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
-      update_status(stream, task_id, signal.input, kind, now)
+      store_recorded_signal(signal, moment, opts, now)
+    end
+  end
 
-      with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
-           {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
-           {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
-        maybe_observe_moment(moment, opts)
-        Index.upsert(moment)
-        {:ok, record_signal_result(signal, moment, action_recipe)}
-      end
+  @spec store_recorded_signal(Signal.t(), Moment.t() | Secret.t(), keyword(), DateTime.t()) ::
+          {:ok, record_result()} | {:error, term()}
+  defp store_recorded_signal(signal, moment, opts, now) do
+    # I keep this boring on purpose. ETS is the hot focus, Manager is the
+    # durable boundary, and the model does not get to invent side effects.
+    # Future cleanup: the signal/moment builders still duplicate setup work.
+    :ets.insert(:mnemonic_signals, {signal.id, signal})
+    insert_moment(moment)
+    :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
+    update_status(signal.stream, signal.task_id, signal.input, signal.kind, now)
+
+    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
+         {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
+         {:ok, action_recipe} <- maybe_attach_action_recipe(moment.id, opts, now) do
+      maybe_observe_moment(moment, opts)
+      Index.upsert(moment)
+      {:ok, record_signal_result(signal, moment, action_recipe)}
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 
   @spec lookup_artifact(binary()) :: [Artifact.t()]
-  defp lookup_artifact(id) do
-    case :ets.lookup(:mnemonic_artifacts, id) do
-      [{^id, artifact}] -> [artifact]
-      [] -> []
-    end
-  end
+  defp lookup_artifact(id), do: lookup_one(:mnemonic_artifacts, id)
 
   @spec lookup_moment(binary()) :: [Moment.t() | Secret.t()]
-  defp lookup_moment(id) do
-    case :ets.lookup(:mnemonic_moments, id) do
-      [{^id, moment}] -> [moment]
-      [] -> []
-    end
-  end
+  defp lookup_moment(id), do: lookup_one(:mnemonic_moments, id)
 
   @spec lookup_association(binary()) :: [Association.t()]
-  defp lookup_association(id) do
-    case :ets.lookup(:mnemonic_associations, id) do
-      [{^id, association}] -> [association]
-      [] -> []
-    end
-  end
+  defp lookup_association(id), do: lookup_one(:mnemonic_associations, id)
 
   @spec lookup_action_recipe(binary()) :: [ActionRecipe.t()]
-  defp lookup_action_recipe(id) do
-    case :ets.lookup(:mnemonic_action_recipes, id) do
-      [{^id, action_recipe}] -> [action_recipe]
+  defp lookup_action_recipe(id), do: lookup_one(:mnemonic_action_recipes, id)
+
+  @spec lookup_one(atom(), term()) :: [term()]
+  defp lookup_one(table, id) do
+    case :ets.lookup(table, id) do
+      [{^id, value}] -> [value]
       [] -> []
     end
   end
@@ -455,40 +441,48 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec maybe_attach_action_recipe(binary(), keyword(), DateTime.t()) ::
           {:ok, ActionRecipe.t() | nil} | {:error, term()}
   defp maybe_attach_action_recipe(memory_id, opts, now) do
-    case build_action_recipe(memory_id, opts, now) do
-      nil ->
-        {:ok, nil}
-
-      action_recipe ->
-        :ets.insert(:mnemonic_action_recipes, {action_recipe.id, action_recipe})
-
-        with {:ok, _recipe_result} <- maybe_persist_value(:action_recipes, action_recipe, opts),
-             {:ok, _association} <-
-               persist_attached_action(
-                 memory_id,
-                 action_recipe.id,
-                 action_recipe.inserted_at,
-                 opts
-               ) do
-          {:ok, action_recipe}
-        end
-    end
+    memory_id
+    |> build_action_recipe(opts, now)
+    |> attach_action_recipe(memory_id, opts)
   end
 
   @spec build_action_recipe(binary(), keyword(), DateTime.t()) :: ActionRecipe.t() | nil
   defp build_action_recipe(memory_id, opts, now) do
-    case Keyword.get(opts, :action_recipe) do
-      recipe when is_binary(recipe) and recipe != "" ->
-        action_recipe_from_text(memory_id, recipe, opts, now)
+    opts
+    |> Keyword.get(:action_recipe)
+    |> action_recipe_from_option(memory_id, opts, now)
+  end
 
-      recipe when is_map(recipe) ->
-        action_recipe_from_map(recipe, memory_id, opts, now)
+  @spec action_recipe_from_option(term(), binary(), keyword(), DateTime.t()) ::
+          ActionRecipe.t() | nil
+  defp action_recipe_from_option(recipe, memory_id, opts, now)
+       when is_binary(recipe) and recipe != "" do
+    action_recipe_from_text(memory_id, recipe, opts, now)
+  end
 
-      recipe when is_list(recipe) ->
-        recipe |> Map.new() |> action_recipe_from_map(memory_id, opts, now)
+  defp action_recipe_from_option(recipe, memory_id, opts, now) when is_map(recipe) do
+    action_recipe_from_map(recipe, memory_id, opts, now)
+  end
 
-      _missing ->
-        nil
+  defp action_recipe_from_option(recipe, memory_id, opts, now) when is_list(recipe) do
+    recipe
+    |> Map.new()
+    |> action_recipe_from_map(memory_id, opts, now)
+  end
+
+  defp action_recipe_from_option(_missing, _memory_id, _opts, _now), do: nil
+
+  @spec attach_action_recipe(ActionRecipe.t() | nil, binary(), keyword()) ::
+          {:ok, ActionRecipe.t() | nil} | {:error, term()}
+  defp attach_action_recipe(nil, _memory_id, _opts), do: {:ok, nil}
+
+  defp attach_action_recipe(action_recipe, memory_id, opts) do
+    :ets.insert(:mnemonic_action_recipes, {action_recipe.id, action_recipe})
+
+    with {:ok, _recipe_result} <- maybe_persist_value(:action_recipes, action_recipe, opts),
+         {:ok, _association} <-
+           persist_attached_action(memory_id, action_recipe.id, action_recipe.inserted_at, opts) do
+      {:ok, action_recipe}
     end
   end
 
@@ -665,14 +659,8 @@ defmodule SpectreMnemonic.Active.Focus do
   defp forget_ids({:task, task_id}), do: indexed_ids(:mnemonic_moments_by_task, task_id)
 
   defp forget_ids(id) when is_binary(id) do
-    direct_ids =
-      case :ets.lookup(:mnemonic_moments, id) do
-        [{^id, _moment}] -> [id]
-        [] -> []
-      end
-
     signal_ids = indexed_ids(:mnemonic_moments_by_signal, id)
-    Enum.uniq(direct_ids ++ signal_ids)
+    Enum.uniq(direct_moment_ids(id) ++ signal_ids)
   end
 
   defp forget_ids(selector) do
@@ -686,6 +674,14 @@ defmodule SpectreMnemonic.Active.Focus do
     table
     |> :ets.lookup(key)
     |> Enum.map(fn {_key, id} -> id end)
+  end
+
+  @spec direct_moment_ids(binary()) :: [binary()]
+  defp direct_moment_ids(id) do
+    case lookup_moment(id) do
+      [_moment] -> [id]
+      [] -> []
+    end
   end
 
   @spec update_status(term(), term(), term(), atom(), DateTime.t()) :: true
@@ -707,9 +703,6 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @spec selected?(Moment.t() | Secret.t(), selector()) :: boolean()
-  defp selected?(moment, id) when is_binary(id), do: moment.id == id or moment.signal_id == id
-  defp selected?(moment, {:stream, stream}), do: moment.stream == stream
-  defp selected?(moment, {:task, task_id}), do: moment.task_id == task_id
   defp selected?(moment, fun) when is_function(fun, 1), do: fun.(moment)
   defp selected?(_moment, _selector), do: false
 
@@ -761,7 +754,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec entities(term()) :: [binary()]
   defp entities(input) do
     Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, to_text(input))
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.uniq()
   end
 

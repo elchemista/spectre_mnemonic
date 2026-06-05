@@ -34,6 +34,8 @@ defmodule SpectreMnemonic.Observations do
   """
   @spec consolidate(keyword()) :: {:ok, [Observation.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
+    # Observations are derived claims, not raw memory wearing a nicer jacket.
+    # Group evidence first, then store the belief with counters and scars.
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
     observations =
@@ -89,6 +91,8 @@ defmodule SpectreMnemonic.Observations do
   def verify(observation_or_id, opts \\ [])
 
   def verify(%Observation{} = observation, opts) do
+    # Verification should feel like adding evidence, not editing history. The
+    # counters move, confidence moves, and the old trail stays visible.
     now = Keyword.get(opts, :now, DateTime.utc_now())
     relation = Keyword.get(opts, :relation, :supports)
     source_id = Keyword.get(opts, :source_id)

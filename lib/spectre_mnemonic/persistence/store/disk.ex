@@ -17,6 +17,8 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   @doc "Appends a family-tagged record to the default file store."
   @spec append(atom(), term()) :: {:ok, pos_integer()} | {:error, term()}
   def append(family, record) do
+    # Compatibility layer for older callers. It is not the shiny path, but
+    # breaking old supervision trees for elegance would be peak nonsense.
     payload = %SpectreMnemonic.Persistence.Store.Record{
       id: "pmem_#{System.unique_integer([:positive, :monotonic])}",
       family: family,

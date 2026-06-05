@@ -77,18 +77,18 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec deterministic(binary(), keyword()) :: map()
   defp deterministic(text, opts) do
+    # This path exists because "just ask the model" got old fast. Names, dates,
+    # emails, and numbers are runtime facts first; the adapter can be clever
+    # later. The rest can go dance somewhere else.
     sensitive_numbers = Keyword.get(opts, :sensitive_numbers, :classify)
     input = Keyword.get(opts, :input)
 
-    entities = List.flatten([text_entities(text), structured_entities(input)])
-    times = List.flatten([iso_times(text), month_times(text), structured_times(input)])
+    entities = text_entities(text) ++ structured_entities(input)
+    times = iso_times(text) ++ month_times(text) ++ structured_times(input)
 
     values =
-      [
-        text_values(text, entities, sensitive_numbers),
+      text_values(text, entities, sensitive_numbers) ++
         structured_values(input, sensitive_numbers)
-      ]
-      |> List.flatten()
 
     events = text_events(text, times)
     relations = inferred_relations(entities, events, times, values)
@@ -107,6 +107,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp adapter_extract(nil, _text, _opts), do: empty()
 
   defp adapter_extract(adapter, text, opts) do
+    # Adapters may add better language understanding, but they return graph
+    # fragments, not authority. Normalize hard here or future me gets soup.
     if adapter_available?(adapter) do
       adapter
       |> apply(:extract, [text, opts])
@@ -140,7 +142,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp text_entities(text) do
     @name_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.reject(&MapSet.member?(@stop_entities, &1))
     |> Enum.map(&entity/1)
   end
@@ -149,22 +151,26 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp structured_entities(input) when is_map(input) do
     input
     |> flat_pairs()
-    |> Enum.flat_map(fn {key, value} ->
-      key = key_name(key)
-
-      if key in ["name", "person", "entity", "actor"] and is_binary(value),
-        do: [entity(value)],
-        else: []
-    end)
+    |> Enum.flat_map(&structured_entity/1)
   end
 
   defp structured_entities(_input), do: []
+
+  @spec structured_entity({term(), term()}) :: [map()]
+  defp structured_entity({key, value}) when is_binary(value) do
+    if entity_key?(key), do: [entity(value)], else: []
+  end
+
+  defp structured_entity(_pair), do: []
+
+  @spec entity_key?(term()) :: boolean()
+  defp entity_key?(key), do: key_name(key) in ["name", "person", "entity", "actor"]
 
   @spec iso_times(binary()) :: [map()]
   defp iso_times(text) do
     @iso_date_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.map(fn date ->
       time(date, date, :date)
     end)
@@ -190,16 +196,20 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp structured_times(input) when is_map(input) do
     input
     |> flat_pairs()
-    |> Enum.flat_map(fn {key, value} ->
-      key = key_name(key)
-
-      if key in ["date", "time", "when", "inserted_at"] and is_binary(value),
-        do: [time(value, value, :date)],
-        else: []
-    end)
+    |> Enum.flat_map(&structured_time/1)
   end
 
   defp structured_times(_input), do: []
+
+  @spec structured_time({term(), term()}) :: [map()]
+  defp structured_time({key, value}) when is_binary(value) do
+    if time_key?(key), do: [time(value, value, :date)], else: []
+  end
+
+  defp structured_time(_pair), do: []
+
+  @spec time_key?(term()) :: boolean()
+  defp time_key?(key), do: key_name(key) in ["date", "time", "when", "inserted_at"]
 
   @spec text_values(binary(), [map()], atom()) :: [map()]
   defp text_values(text, entities, sensitive_numbers) do
@@ -207,18 +217,17 @@ defmodule SpectreMnemonic.Intake.Extraction do
     emails = email_values(text, entities)
     ages = age_values(text)
     phone_exclusions = phone_exclusion_values(text)
-    exclusions = List.flatten([phones, ages, phone_exclusions])
+    exclusions = phones ++ ages ++ phone_exclusions
     numbers = number_values(text, entities, exclusions)
 
-    [phones, emails, ages, numbers]
-    |> List.flatten()
+    phones ++ emails ++ ages ++ numbers
   end
 
   @spec phone_exclusion_values(binary()) :: [map()]
   defp phone_exclusion_values(text) do
     @phone_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.flat_map(fn raw ->
       [%{value: raw} | Enum.map(phone_number_fragments(raw), &%{value: &1})]
     end)
@@ -228,7 +237,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp phone_number_fragments(raw) do
     @number_regex
     |> Regex.scan(raw)
-    |> List.flatten()
+    |> Enum.concat()
   end
 
   @spec phone_values(binary(), [map()], atom()) :: [map()]
@@ -239,7 +248,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
     @phone_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.map(fn raw ->
       display = if sensitive_numbers == :raw, do: raw, else: "[redacted phone]"
 
@@ -257,7 +266,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
     @email_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.map(&value(:email, &1, &1, entity: entity_ref))
   end
 
@@ -280,7 +289,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
     @number_regex
     |> Regex.scan(text)
-    |> List.flatten()
+    |> Enum.concat()
     |> Enum.reject(&(MapSet.member?(excluded, &1) or date_part?(text, &1)))
     |> Enum.map(&value(:number, &1, &1, entity: entity_ref))
   end
@@ -294,26 +303,30 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
     input
     |> flat_pairs()
-    |> Enum.flat_map(fn {key, value} ->
-      key = key_name(key)
-
-      cond do
-        key in ["age", "count", "amount", "number"] ->
-          [value(key, to_string(value), to_string(value), entity: entity_ref)]
-
-        key in ["phone", "telephone", "mobile"] and sensitive_numbers != :skip ->
-          [structured_phone_value(value, entity_ref, sensitive_numbers)]
-
-        key == "email" ->
-          [value(:email, to_string(value), to_string(value), entity: entity_ref)]
-
-        true ->
-          []
-      end
-    end)
+    |> Enum.flat_map(&structured_value(&1, entity_ref, sensitive_numbers))
   end
 
   defp structured_values(_input, _sensitive_numbers), do: []
+
+  @spec structured_value({term(), term()}, binary() | nil, atom()) :: [map()]
+  defp structured_value({key, raw_value}, entity_ref, sensitive_numbers) do
+    key = key_name(key)
+    string_value = to_string(raw_value)
+
+    cond do
+      key in ["age", "count", "amount", "number"] ->
+        [value(key, string_value, string_value, entity: entity_ref)]
+
+      key in ["phone", "telephone", "mobile"] and sensitive_numbers != :skip ->
+        [structured_phone_value(raw_value, entity_ref, sensitive_numbers)]
+
+      key == "email" ->
+        [value(:email, string_value, string_value, entity: entity_ref)]
+
+      true ->
+        []
+    end
+  end
 
   @spec structured_phone_value(term(), binary() | nil, atom()) :: map()
   defp structured_phone_value(value, entity_ref, sensitive_numbers) do
@@ -348,8 +361,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec event_from_captures([binary()], binary(), [map()]) :: map()
   defp event_from_captures([actor, action, object | _rest], text, times) do
-    acted_on = if object == "", do: nil, else: entity_id(object)
-    time_ref = times |> List.first() |> then(&(&1 && &1.id))
+    acted_on = object_id(object)
+    time_ref = first_time_id(times)
 
     %{
       id: local_id("event", "#{actor}:#{action}:#{object}:#{time_ref}"),
@@ -369,26 +382,33 @@ defmodule SpectreMnemonic.Intake.Extraction do
   @spec inferred_relations([map()], [map()], [map()], [map()]) :: [map()]
   defp inferred_relations(entities, events, _times, values) do
     event_relations =
-      Enum.flat_map(events, fn event ->
-        [
-          relation(event.id, :actor, event.actor, 1.0),
-          relation(event.id, :acted_on, event.acted_on, 0.9),
-          relation(event.id, :happened_at, event.time, 0.9)
-        ]
-      end)
+      Enum.flat_map(events, &event_relations/1)
 
     value_relations =
       values
-      |> Enum.flat_map(fn value ->
-        case Map.get(value, :entity) || single_entity_ref(entities) do
-          nil -> []
-          entity -> [relation(entity, :has_value, value.id, 0.9)]
-        end
-      end)
+      |> Enum.flat_map(&value_relation(&1, entities))
 
-    [event_relations, value_relations]
-    |> List.flatten()
+    event_relations ++ value_relations
   end
+
+  @spec event_relations(map()) :: [map()]
+  defp event_relations(event) do
+    [
+      relation(event.id, :actor, event.actor, 1.0),
+      relation(event.id, :acted_on, event.acted_on, 0.9),
+      relation(event.id, :happened_at, event.time, 0.9)
+    ]
+  end
+
+  @spec value_relation(map(), [map()]) :: [map()]
+  defp value_relation(value, entities) do
+    entity = Map.get(value, :entity) || single_entity_ref(entities)
+    has_value_relation(entity, value.id)
+  end
+
+  @spec has_value_relation(binary() | nil, binary()) :: [map()]
+  defp has_value_relation(nil, _value_id), do: []
+  defp has_value_relation(entity, value_id), do: [relation(entity, :has_value, value_id, 0.9)]
 
   @spec normalize(map(), map()) :: map()
   defp normalize(result, metadata) do
@@ -490,8 +510,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec merge_section(map(), map(), atom()) :: [term()]
   defp merge_section(left, right, section) do
-    [Map.get(left, section, []), Map.get(right, section, [])]
-    |> List.flatten()
+    Map.get(left, section, []) ++ Map.get(right, section, [])
   end
 
   @spec dedupe(map()) :: map()
@@ -572,12 +591,15 @@ defmodule SpectreMnemonic.Intake.Extraction do
       value
       |> to_string()
       |> String.downcase()
-      |> then(&:crypto.hash(:sha256, &1))
+      |> hash_text()
       |> Base.encode16(case: :lower)
       |> binary_part(0, 16)
 
     "#{prefix}:#{hash}"
   end
+
+  @spec hash_text(binary()) :: binary()
+  defp hash_text(text), do: :crypto.hash(:sha256, text)
 
   @spec canonical(term()) :: binary()
   defp canonical(value) do
@@ -595,19 +617,28 @@ defmodule SpectreMnemonic.Intake.Extraction do
         |> String.slice(-40, 40)
         |> text_entities()
         |> List.last()
-        |> case do
-          nil -> nil
-          entity -> entity.id
-        end
+        |> entity_ref()
 
       _other ->
         nil
     end
   end
 
+  @spec entity_ref(map() | nil) :: binary() | nil
+  defp entity_ref(nil), do: nil
+  defp entity_ref(entity), do: entity.id
+
   @spec single_entity_ref([map()]) :: binary() | nil
   defp single_entity_ref([entity]), do: entity.id
   defp single_entity_ref(_entities), do: nil
+
+  @spec object_id(binary()) :: binary() | nil
+  defp object_id(""), do: nil
+  defp object_id(object), do: entity_id(object)
+
+  @spec first_time_id([map()]) :: binary() | nil
+  defp first_time_id([%{id: id} | _times]), do: id
+  defp first_time_id(_times), do: nil
 
   @spec date_part?(binary(), binary()) :: boolean()
   defp date_part?(text, number) do

@@ -30,6 +30,9 @@ defmodule SpectreMnemonic.Active.StreamServer do
   @impl GenServer
   @spec init(stream :: term()) :: {:ok, state()}
   def init(stream) do
+    # A stream process is mostly a lane marker right now. That is fine. I kept
+    # the process boundary because batching and throttling always arrive later
+    # wearing a fake mustache.
     :ets.insert(
       :mnemonic_streams,
       {stream, %{name: stream, status: :active, inserted_at: DateTime.utc_now()}}

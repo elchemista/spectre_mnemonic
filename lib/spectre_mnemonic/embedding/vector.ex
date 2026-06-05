@@ -134,6 +134,8 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Normalizes a vector and returns a f32 binary."
   @spec normalize_to_f32_binary(vector_input() | term()) :: binary() | nil
   def normalize_to_f32_binary(vector) do
+    # Stored vectors use one boring binary format. Lists, tensors, adapters,
+    # drama: all of it gets squeezed through here before persistence sees it.
     if nx_available?() do
       vector
       |> normalize_tensor()
@@ -263,6 +265,8 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Computes Hamming distance between two equally sized packed binaries."
   @spec hamming_distance(term(), term()) :: non_neg_integer() | :infinity
   def hamming_distance(left, right) when is_binary(left) and is_binary(right) do
+    # Different signature sizes are not "close enough". Return infinity and let
+    # ranking move on with its life.
     if byte_size(left) == byte_size(right) do
       hamming_distance_bytes(left, right, 0)
     else

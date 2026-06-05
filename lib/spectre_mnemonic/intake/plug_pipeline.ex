@@ -8,6 +8,8 @@ defmodule SpectreMnemonic.Intake.PlugPipeline do
   @doc "Runs global plugs followed by per-call plugs."
   @spec run(Memory.t(), keyword()) :: {:ok, Memory.t()} | {:halt, Memory.t()} | {:error, term()}
   def run(%Memory{} = memory, opts) do
+    # Plugs are allowed to rewrite or halt intake, but the result shape is
+    # normalized immediately. This is where custom code gets a leash. A nice one.
     opts
     |> plugs()
     |> Enum.reduce_while({:ok, memory}, fn plug, {:ok, acc} ->

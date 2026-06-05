@@ -14,6 +14,8 @@ defmodule SpectreMnemonic.Reflection do
   @doc "Builds an evidence packet and optionally lets an adapter respond."
   @spec reflect(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def reflect(query, opts \\ []) do
+    # Reflection is a packet builder before it is an adapter call. I want sources
+    # lined up first, then the model can talk. Receipts before poetry.
     model_limit = Keyword.get(opts, :mental_model_limit, Keyword.get(opts, :limit, 5))
     observation_limit = Keyword.get(opts, :observation_limit, Keyword.get(opts, :limit, 5))
 
@@ -48,6 +50,8 @@ defmodule SpectreMnemonic.Reflection do
 
   @spec run_adapter(Packet.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   defp run_adapter(packet, opts) do
+    # Adapter output is allowed to be prose or a packet, but it is not allowed
+    # to erase the evidence shape. Future me will thank current me, probably.
     case reflection_adapter(opts) do
       nil ->
         {:ok, packet}

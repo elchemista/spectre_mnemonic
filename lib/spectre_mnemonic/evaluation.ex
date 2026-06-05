@@ -6,6 +6,8 @@ defmodule SpectreMnemonic.Evaluation do
   @doc "Runs a local evaluation scenario and returns aggregate metrics."
   @spec run(keyword()) :: map()
   def run(opts \\ []) do
+    # This is not a benchmark cathedral. It is a smoke test with numbers, useful
+    # enough to notice when recall starts forgetting its own shoes.
     size = opts |> Keyword.get(:size, 100) |> max(1)
     started = System.monotonic_time()
 

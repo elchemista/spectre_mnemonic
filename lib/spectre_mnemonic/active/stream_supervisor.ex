@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.Active.StreamSupervisor do
   @doc "Ensures a stream server exists for a stream name."
   @spec ensure_stream(stream :: term()) :: {:ok, pid()} | {:error, term()}
   def ensure_stream(stream) do
+    # Starting the same stream twice is normal traffic, not an incident report.
+    # DynamicSupervisor already knows this trick; let it earn rent.
     spec = {SpectreMnemonic.Active.StreamServer, stream}
 
     case DynamicSupervisor.start_child(__MODULE__, spec) do

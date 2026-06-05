@@ -12,6 +12,9 @@ defmodule SpectreMnemonic.Application do
   @impl Application
   @spec start(Application.start_type(), term()) :: Supervisor.on_start()
   def start(_type, _args) do
+    # The tree is deliberately boring: owners before users, indexes before
+    # callers, background work last. OTP does the babysitting so agents dont
+    # cosplay as infrastructure.
     children = [
       SpectreMnemonic.Active.ETSOwner,
       SpectreMnemonic.Persistence.Manager,
