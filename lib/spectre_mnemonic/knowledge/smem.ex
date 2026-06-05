@@ -70,6 +70,8 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @doc "Rewrites `knowledge.smem` with a compact replacement event set."
   @spec replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def replace(events, opts \\ []) when is_list(events) do
+    # Replace writes a temp file first because compact knowledge should not
+    # vanish halfway through a rewrite. I like boring file moves. They pay rent.
     root = data_root(opts)
     ensure_root!(root)
     path = active_path(root)
@@ -106,6 +108,8 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @spec normalize_event(map()) :: event()
   def normalize_event(event) do
+    # Compact events come from people, adapters, and tests with opinions. Clamp
+    # the shape here before the tiny knowledge log becomes a junk drawer.
     event = atomize_known_keys(event)
     now = DateTime.utc_now()
     type = event |> Map.get(:type, :fact) |> normalize_type()

@@ -11,6 +11,8 @@ defmodule SpectreMnemonic.Actions.Runtime do
   @doc "Delegates recipe analysis to the configured runtime adapter."
   @spec analyze(ActionRecipe.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def analyze(%ActionRecipe{} = recipe, opts \\ []) do
+    # Recipes are stored intent, not executable wishes. I want the adapter to
+    # make the scary choice explicitly, with a real module name on the paperwork.
     with {:ok, adapter} <- adapter(opts) do
       adapter.analyze(recipe, opts)
     end
@@ -19,6 +21,8 @@ defmodule SpectreMnemonic.Actions.Runtime do
   @doc "Delegates recipe execution to the configured runtime adapter."
   @spec run(ActionRecipe.t(), context :: term(), keyword()) :: {:ok, term()} | {:error, term()}
   def run(%ActionRecipe{} = recipe, context, opts \\ []) do
+    # No default executor lives here. That is not laziness; that is me refusing
+    # to let a memory library become a tiny remote-control chainsaw.
     with {:ok, adapter} <- adapter(opts) do
       adapter.run(recipe, context, opts)
     end

@@ -18,6 +18,8 @@ defmodule SpectreMnemonic.Memory.Scope do
   @doc "Returns true when memory matches the requested scope filters."
   @spec match?(term(), keyword()) :: boolean()
   def match?(memory, opts) do
+    # Scope is a plain runtime filter. No ontology parade. If the caller asks
+    # for this scope, show this scope; otherwise let the memory stay home.
     scopes = scopes(opts)
 
     scopes == :all or scope(memory) in scopes

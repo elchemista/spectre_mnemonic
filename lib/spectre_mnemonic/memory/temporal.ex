@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.Memory.Temporal do
   def normalize(%DateTime{} = value), do: value
 
   def normalize(%NaiveDateTime{} = value) do
+    # Naive times get UTC because this library needs a boring default. If the
+    # caller cares about timezone nuance, they should send a DateTime. Per favore.
     DateTime.from_naive!(value, "Etc/UTC")
   end
 
@@ -52,6 +54,8 @@ defmodule SpectreMnemonic.Memory.Temporal do
   @doc "Returns true when a memory-like map satisfies temporal filters."
   @spec match?(map(), keyword()) :: boolean()
   def match?(memory, opts) do
+    # Temporal filters keep old context from wandering into every room. Memory
+    # without time is still allowed, but range filters are allowed to be picky.
     temporal = temporal_map(memory)
 
     Enum.all?([

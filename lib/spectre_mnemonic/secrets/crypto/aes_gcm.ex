@@ -17,6 +17,8 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
 
   @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def encrypt(plaintext, context, opts) when is_binary(plaintext) do
+    # AES-GCM is intentionally boring here: random IV, AAD from stable ids, and
+    # no homebrew crypto dance. La sicurezza non fa cabaret.
     with {:ok, key} <- key(context, opts) do
       iv = :crypto.strong_rand_bytes(@iv_bytes)
       aad = aad(context)

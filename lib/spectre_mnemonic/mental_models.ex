@@ -35,6 +35,8 @@ defmodule SpectreMnemonic.MentalModels do
   """
   @spec put(term(), keyword()) :: {:ok, MentalModel.t()} | {:error, term()}
   def put(input, opts \\ []) do
+    # Mental models are curated on purpose. If everything becomes a principle,
+    # nothing is a principle and we are back to prompt soup with nicer labels.
     now = Keyword.get(opts, :now, DateTime.utc_now())
     model = build(input, opts, now)
     :ets.insert(@mental_model_table, {model.id, model})
@@ -104,6 +106,8 @@ defmodule SpectreMnemonic.MentalModels do
 
   @spec build(term(), keyword(), DateTime.t()) :: MentalModel.t()
   defp build(input, opts, now) do
+    # Build accepts friendly shapes, then pins them into one struct. Humans can
+    # type text; runtime still gets ids, scope, provenance, and time.
     map = input_map(input)
     query = value(map, :query, Keyword.get(opts, :query) || value(map, :title, ""))
 

@@ -43,6 +43,8 @@ defmodule SpectreMnemonic.Active.ETSOwner do
   @impl GenServer
   @spec init(map()) :: {:ok, map()}
   def init(state) do
+    # Named ETS tables are blunt tools, but for hot memory they are fast,
+    # observable, and blessedly not pretending to be a distributed brain.
     Enum.each(@tables, &create_table/1)
     {:ok, state}
   end

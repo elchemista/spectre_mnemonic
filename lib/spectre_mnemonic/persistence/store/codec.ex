@@ -16,6 +16,8 @@ defmodule SpectreMnemonic.Persistence.Store.Codec do
   @doc "Encodes a persistent-memory record into a JSON-safe map."
   @spec encode_record(Record.t()) :: map()
   def encode_record(%Record{} = record) do
+    # SQL and document stores want JSON-ish shapes. Erlang terms want to remain
+    # Erlang terms. This codec is the uneasy handshake in the middle.
     %{
       "codec" => @codec,
       "version" => @version,

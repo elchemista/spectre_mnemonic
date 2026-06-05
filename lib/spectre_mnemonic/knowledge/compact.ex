@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   alias SpectreMnemonic.Knowledge.Base
   alias SpectreMnemonic.Knowledge.SMEM
 
+  @output_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
+
   @doc """
   Compacts active memory and existing knowledge events into `knowledge.smem`.
 
@@ -47,8 +49,8 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   defp build_input(existing_events, cfg, opts) do
     moments = Focus.moments()
 
-    # Adapters receive a bounded, domain-shaped input. They do not need to know
-    # about ETS, SMEM files, or how budget settings are stored in app config.
+    # The adapter gets a bounded bundle, not the keys to the basement. I wanted
+    # model-shaped intent here, while the application still decides consequences.
     %{
       moments: moments,
       existing_events: existing_events,
@@ -68,11 +70,14 @@ defmodule SpectreMnemonic.Knowledge.Compact do
 
   @spec run_adapter(map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp run_adapter(input, opts) do
-    case adapter(opts) do
-      nil -> {:ok, default_compact(input)}
-      module -> compact_with_adapter(module, input, opts)
-    end
+    opts
+    |> adapter()
+    |> run_adapter(input, opts)
   end
+
+  @spec run_adapter(module() | nil, map(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp run_adapter(nil, input, _opts), do: {:ok, default_compact(input)}
+  defp run_adapter(module, input, opts), do: compact_with_adapter(module, input, opts)
 
   @spec adapter(keyword()) :: module() | nil
   defp adapter(opts) do
@@ -102,35 +107,18 @@ defmodule SpectreMnemonic.Knowledge.Compact do
 
   @spec default_compact(map()) :: [map()]
   defp default_compact(%{moments: moments, existing_events: existing_events, budgets: budgets}) do
+    # Default compaction is intentionally dull: keep a summary, keep useful
+    # facts, keep latest ingestions. No grand memory palace, just fewer boxes
+    # on the floor. Future cleanup: summaries deserve a better scorer.
     summary = global_summary(moments, existing_events)
 
-    summaries =
-      moments
-      |> Enum.filter(&(&1.kind == :memory_summary))
-      |> Enum.sort_by(&{-&1.attention, DateTime.to_unix(&1.inserted_at, :microsecond)})
-      |> Enum.take(5)
-      |> Enum.map(&event_from_moment(&1, :fact))
+    events =
+      summary_event(summary) ++
+        summary_fact_events(moments) ++
+        latest_ingestion_events(moments, budgets.max_latest_ingestions) ++
+        kept_existing_events(existing_events)
 
-    latest =
-      moments
-      |> Enum.reject(&(&1.kind in [:memory_summary, :memory_category]))
-      |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
-      |> Enum.take(budgets.max_latest_ingestions)
-      |> Enum.map(&event_from_moment(&1, :latest_ingestion))
-
-    existing_keep =
-      existing_events
-      |> Enum.map(&SMEM.normalize_event/1)
-      |> Enum.filter(&(&1.type in [:skill, :procedure, :fact]))
-
-    [
-      [%{type: :summary, summary: summary, text: summary, metadata: %{strategy: :default}}],
-      summaries,
-      latest,
-      existing_keep
-    ]
-    |> List.flatten()
-    |> dedupe_events()
+    dedupe_events(events)
   end
 
   @spec normalize_output(term()) :: {:ok, [map()]} | {:error, term()}
@@ -140,15 +128,8 @@ defmodule SpectreMnemonic.Knowledge.Compact do
 
   defp normalize_output(output) when is_map(output) do
     events =
-      [
-        events_from_output(output, :summary),
-        events_from_output(output, :skill),
-        events_from_output(output, :latest_ingestion),
-        events_from_output(output, :fact),
-        events_from_output(output, :procedure),
-        events_from_output(output, :compaction_marker)
-      ]
-      |> List.flatten()
+      @output_types
+      |> Enum.flat_map(&events_from_output(output, &1))
 
     {:ok, normalize_events(events)}
   end
@@ -157,23 +138,18 @@ defmodule SpectreMnemonic.Knowledge.Compact do
 
   @spec events_from_output(map(), atom()) :: [map()]
   defp events_from_output(output, :summary) do
-    case Map.get(output, :summary) || Map.get(output, "summary") do
-      nil -> []
-      summary when is_map(summary) -> [Map.put(summary, :type, :summary)]
-      summary -> [%{type: :summary, summary: to_text(summary), text: to_text(summary)}]
-    end
+    output
+    |> output_value(:summary)
+    |> summary_from_output()
   end
 
   defp events_from_output(output, type) do
     key = plural_key(type)
-    values = Map.get(output, key) || Map.get(output, Atom.to_string(key)) || []
 
-    values
+    output
+    |> output_value(key, [])
     |> List.wrap()
-    |> Enum.map(fn
-      event when is_map(event) -> Map.put(event, :type, type)
-      value -> %{type: type, text: to_text(value), value: value}
-    end)
+    |> Enum.map(&event_from_output(&1, type))
   end
 
   @spec normalize_events([term()]) :: [map()]
@@ -193,7 +169,7 @@ defmodule SpectreMnemonic.Knowledge.Compact do
       inserted_at: DateTime.utc_now()
     }
 
-    List.flatten([events, [SMEM.normalize_event(marker)]])
+    events ++ [SMEM.normalize_event(marker)]
   end
 
   @spec event_from_moment(map(), atom()) :: map()
@@ -219,19 +195,69 @@ defmodule SpectreMnemonic.Knowledge.Compact do
       |> Enum.map(&SMEM.normalize_event/1)
       |> Enum.find(&(&1.type == :summary))
 
-    cond do
-      existing_summary && existing_summary.summary ->
-        existing_summary.summary
+    summary_text(existing_summary, moments)
+  end
 
-      moments == [] ->
-        "No compact knowledge has been built yet."
+  @spec summary_event(binary()) :: [map()]
+  defp summary_event(summary) do
+    [%{type: :summary, summary: summary, text: summary, metadata: %{strategy: :default}}]
+  end
 
-      true ->
-        moments
-        |> Enum.sort_by(&{-&1.attention, DateTime.to_unix(&1.inserted_at, :microsecond)})
-        |> Enum.take(5)
-        |> Enum.map_join(" | ", &compact_moment_text(&1.text))
-    end
+  @spec summary_fact_events([map()]) :: [map()]
+  defp summary_fact_events(moments) do
+    moments
+    |> Enum.filter(&(&1.kind == :memory_summary))
+    |> Enum.sort_by(&{-&1.attention, DateTime.to_unix(&1.inserted_at, :microsecond)})
+    |> Enum.take(5)
+    |> Enum.map(&event_from_moment(&1, :fact))
+  end
+
+  @spec latest_ingestion_events([map()], non_neg_integer()) :: [map()]
+  defp latest_ingestion_events(moments, limit) do
+    moments
+    |> Enum.reject(&(&1.kind in [:memory_summary, :memory_category]))
+    |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
+    |> Enum.take(limit)
+    |> Enum.map(&event_from_moment(&1, :latest_ingestion))
+  end
+
+  @spec kept_existing_events([map()]) :: [map()]
+  defp kept_existing_events(existing_events) do
+    existing_events
+    |> Enum.map(&SMEM.normalize_event/1)
+    |> Enum.filter(&(&1.type in [:skill, :procedure, :fact]))
+  end
+
+  @spec summary_from_output(term()) :: [map()]
+  defp summary_from_output(nil), do: []
+  defp summary_from_output(summary) when is_map(summary), do: [Map.put(summary, :type, :summary)]
+
+  defp summary_from_output(summary) do
+    text = to_text(summary)
+    [%{type: :summary, summary: text, text: text}]
+  end
+
+  @spec event_from_output(term(), atom()) :: map()
+  defp event_from_output(event, type) when is_map(event), do: Map.put(event, :type, type)
+  defp event_from_output(value, type), do: %{type: type, text: to_text(value), value: value}
+
+  @spec output_value(map(), atom()) :: term()
+  defp output_value(output, key), do: output_value(output, key, nil)
+
+  @spec output_value(map(), atom(), term()) :: term()
+  defp output_value(output, key, default) do
+    Map.get(output, key) || Map.get(output, Atom.to_string(key)) || default
+  end
+
+  @spec summary_text(map() | nil, [map()]) :: binary()
+  defp summary_text(%{summary: summary}, _moments) when not is_nil(summary), do: summary
+  defp summary_text(_existing_summary, []), do: "No compact knowledge has been built yet."
+
+  defp summary_text(_existing_summary, moments) do
+    moments
+    |> Enum.sort_by(&{-&1.attention, DateTime.to_unix(&1.inserted_at, :microsecond)})
+    |> Enum.take(5)
+    |> Enum.map_join(" | ", &compact_moment_text(&1.text))
   end
 
   @spec dedupe_events([map()]) :: [map()]

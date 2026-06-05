@@ -46,6 +46,8 @@ defmodule SpectreMnemonic.Embedding.Service do
   """
   @spec embed(input :: term(), opts :: keyword()) :: map()
   def embed(input, opts) do
+    # Embeddings improve recall, but ingestion must not depend on them. Models,
+    # files, and NIFs fail in creative ways. Text still gets remembered.
     adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
 
     cond do
@@ -126,6 +128,8 @@ defmodule SpectreMnemonic.Embedding.Service do
 
   @spec normalize_result(term(), keyword()) :: map()
   defp normalize_result(result, opts) when is_map(result) do
+    # Provider output is where little format differences go to breed. Normalize
+    # once here so the rest of the code can stay boring and mildly hydrated.
     vector = fetch_key(result, :vector)
     normalized = Vector.normalize_to_f32_binary(vector)
     dimensions = fetch_key(result, :dimensions) || Vector.dimensions(normalized)

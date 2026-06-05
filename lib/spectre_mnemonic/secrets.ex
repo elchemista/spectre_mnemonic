@@ -46,6 +46,8 @@ defmodule SpectreMnemonic.Secrets do
   def reveal(%Secret{locked?: false} = secret, _opts), do: {:ok, secret}
 
   def reveal(%Secret{} = secret, opts) do
+    # Recall can show that a secret exists. Plaintext needs authorization first.
+    # The model does not get to wink and say it had a good reason.
     request = authorization_request(secret, opts)
 
     with {:ok, adapter} <- authorization_adapter(opts),
@@ -79,6 +81,8 @@ defmodule SpectreMnemonic.Secrets do
   def maybe_reveal(%Secret{locked?: false} = secret, _opts), do: secret
 
   def maybe_reveal(%Secret{} = secret, opts) do
+    # Recall should not explode just because authorization said no. Return the
+    # locked placeholder with the denial attached, like a tiny bureaucratic stamp.
     case reveal(secret, opts) do
       {:ok, revealed} -> revealed
       {:error, reason} -> lock_with_authorization(secret, reason, opts)

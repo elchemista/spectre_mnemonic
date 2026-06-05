@@ -83,9 +83,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     active_moments = Focus.moments()
     associations = Focus.associations()
 
-    # Build the default consolidation first, then let the custom function or
-    # adapter modify it. This keeps adapters focused on policy instead of making
-    # every adapter rebuild the same active-memory context.
+    # Build the boring default first, then let custom policy edit it. I picked
+    # this path after seeing adapters rebuild half the runtime just to say
+    # "promote these three things". That way lies tiny framework lasagna.
     consolidation =
       active_moments
       |> candidate_moments(min_attention)
@@ -250,28 +250,38 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   defp expand_ids(seen, _frontier, _associations, _moment_by_id, 0), do: seen
 
   defp expand_ids(seen, frontier, associations, moment_by_id, depth) do
-    next =
-      associations
-      |> Enum.reduce(MapSet.new(), fn association, acc ->
-        cond do
-          MapSet.member?(frontier, association.source_id) and
-              Map.has_key?(moment_by_id, association.target_id) ->
-            MapSet.put(acc, association.target_id)
-
-          MapSet.member?(frontier, association.target_id) and
-              Map.has_key?(moment_by_id, association.source_id) ->
-            MapSet.put(acc, association.source_id)
-
-          true ->
-            acc
-        end
-      end)
-      |> MapSet.difference(seen)
+    next = associations |> next_expansion_ids(frontier, moment_by_id) |> MapSet.difference(seen)
 
     if MapSet.size(next) == 0 do
       seen
     else
       expand_ids(MapSet.union(seen, next), next, associations, moment_by_id, depth - 1)
+    end
+  end
+
+  @spec next_expansion_ids([term()], MapSet.t(binary()), map()) :: MapSet.t(binary())
+  defp next_expansion_ids(associations, frontier, moment_by_id) do
+    Enum.reduce(associations, MapSet.new(), fn association, ids ->
+      case linked_memory_id(association, frontier, moment_by_id) do
+        nil -> ids
+        id -> MapSet.put(ids, id)
+      end
+    end)
+  end
+
+  @spec linked_memory_id(term(), MapSet.t(binary()), map()) :: binary() | nil
+  defp linked_memory_id(association, frontier, moment_by_id) do
+    cond do
+      MapSet.member?(frontier, association.source_id) and
+          Map.has_key?(moment_by_id, association.target_id) ->
+        association.target_id
+
+      MapSet.member?(frontier, association.target_id) and
+          Map.has_key?(moment_by_id, association.source_id) ->
+        association.source_id
+
+      true ->
+        nil
     end
   end
 
@@ -416,16 +426,24 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   defp append_tombstone(%{"family" => family, "id" => id} = tombstone)
        when is_binary(family) and is_binary(id) do
-    case tombstone_payload(tombstone) do
-      {:ok, payload} -> Manager.append(:tombstones, payload)
-      :error -> {:error, {:invalid_consolidation_tombstone_family, family}}
-    end
+    tombstone
+    |> tombstone_payload()
+    |> append_tombstone_payload(family)
   end
 
   defp append_tombstone(other), do: {:error, {:invalid_consolidation_tombstone, other}}
 
+  @spec append_tombstone_payload({:ok, map()} | :error, binary()) ::
+          {:ok, term()} | {:error, term()}
+  defp append_tombstone_payload({:ok, payload}, _family), do: Manager.append(:tombstones, payload)
+
+  defp append_tombstone_payload(:error, family),
+    do: {:error, {:invalid_consolidation_tombstone_family, family}}
+
   @spec tombstone_payload(map()) :: {:ok, map()} | :error
   defp tombstone_payload(tombstone) do
+    # Adapters sometimes send string keys because the outside world keeps doing
+    # outside-world things. Normalize once here; dont leak that sadness inward.
     with {:ok, family} <- Family.from_string(Map.fetch!(tombstone, "family")) do
       payload =
         tombstone
@@ -451,42 +469,42 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     moment_by_id = Map.new(moments, &{&1.id, &1})
     selected_ids = MapSet.new(Map.keys(moment_by_id))
 
-    # Consolidation windows are connected components in the expanded active
-    # graph. The candidate set is expanded through associations before this
-    # step, so linked context can travel into durable consolidation.
-    graph_associations =
-      Enum.filter(associations, fn association ->
-        MapSet.member?(selected_ids, association.source_id) and
-          MapSet.member?(selected_ids, association.target_id)
-      end)
-
-    adjacency =
-      Enum.reduce(graph_associations, Map.new(selected_ids, &{&1, MapSet.new()}), fn association,
-                                                                                     acc ->
-        acc
-        |> Map.update!(association.source_id, &MapSet.put(&1, association.target_id))
-        |> Map.update!(association.target_id, &MapSet.put(&1, association.source_id))
-      end)
+    # Windows are connected components, not whatever the last prompt felt was
+    # important. Graph edges give us a boring runtime boundary, which is my
+    # favorite kind of boundary because it usually survives lunch.
+    graph_associations = graph_associations(associations, selected_ids)
+    adjacency = adjacency(selected_ids, graph_associations)
 
     selected_ids
     |> connected_components(adjacency)
     |> Enum.sort_by(&component_sort_key(&1, moment_by_id), :desc)
     |> Enum.with_index(1)
-    |> Enum.map(fn {component, index} ->
-      component_set = MapSet.new(component)
-
-      component_associations =
-        Enum.filter(graph_associations, fn association ->
-          MapSet.member?(component_set, association.source_id) and
-            MapSet.member?(component_set, association.target_id)
-        end)
-
-      window_for(component, component_associations, moment_by_id, index)
-    end)
+    |> Enum.map(&window_from_component(&1, graph_associations, moment_by_id))
   end
 
   @typep memory_id :: binary()
   @typep adjacency :: %{memory_id() => MapSet.t(memory_id())}
+
+  @spec graph_associations([term()], MapSet.t(memory_id())) :: [term()]
+  defp graph_associations(associations, selected_ids) do
+    Enum.filter(associations, &selected_association?(&1, selected_ids))
+  end
+
+  @spec selected_association?(term(), MapSet.t(memory_id())) :: boolean()
+  defp selected_association?(association, selected_ids) do
+    MapSet.member?(selected_ids, association.source_id) and
+      MapSet.member?(selected_ids, association.target_id)
+  end
+
+  @spec adjacency(MapSet.t(memory_id()), [term()]) :: adjacency()
+  defp adjacency(selected_ids, graph_associations) do
+    Enum.reduce(graph_associations, Map.new(selected_ids, &{&1, MapSet.new()}), fn association,
+                                                                                   adjacency ->
+      adjacency
+      |> Map.update!(association.source_id, &MapSet.put(&1, association.target_id))
+      |> Map.update!(association.target_id, &MapSet.put(&1, association.source_id))
+    end)
+  end
 
   @spec connected_components(MapSet.t(memory_id()), adjacency()) :: [[memory_id()]]
   defp connected_components(ids, adjacency) do
@@ -512,7 +530,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     if Map.has_key?(seen, id) do
       visit_component(rest, adjacency, seen)
     else
-      next = [adjacency |> Map.get(id, MapSet.new()) |> MapSet.to_list(), rest] |> List.flatten()
+      next = MapSet.to_list(Map.get(adjacency, id, MapSet.new())) ++ rest
       visit_component(next, adjacency, Map.put(seen, id, true))
     end
   end
@@ -520,41 +538,78 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   @spec component_sort_key([binary()], map()) :: integer()
   defp component_sort_key(component, moment_by_id) do
     component
-    |> Enum.map(fn id ->
-      case Map.get(moment_by_id, id) do
-        %{inserted_at: %DateTime{} = inserted_at} -> DateTime.to_unix(inserted_at, :microsecond)
-        _moment -> 0
-      end
-    end)
+    |> Enum.map(fn id -> moment_timestamp(Map.get(moment_by_id, id)) end)
     |> Enum.max(fn -> 0 end)
+  end
+
+  @spec moment_timestamp(term()) :: integer()
+  defp moment_timestamp(%{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp moment_timestamp(_moment), do: 0
+
+  @spec window_from_component({[binary()], pos_integer()}, [term()], map()) :: map()
+  defp window_from_component({component, index}, graph_associations, moment_by_id) do
+    component_set = MapSet.new(component)
+
+    component_associations =
+      graph_associations
+      |> Enum.filter(&selected_association?(&1, component_set))
+
+    window_for(component, component_associations, moment_by_id, index)
   end
 
   @spec window_for([binary()], [term()], map(), pos_integer()) :: map()
   defp window_for(component, component_associations, moment_by_id, index) do
     moments = Enum.map(component, &Map.fetch!(moment_by_id, &1))
-    streams = moments |> Enum.map(& &1.stream) |> Enum.uniq()
-    inserted = moments |> Enum.map(& &1.inserted_at) |> Enum.filter(&match?(%DateTime{}, &1))
 
     %{
       id: "window_#{index}",
       moment_ids: component,
       association_ids: Enum.map(component_associations, & &1.id),
-      stream: if(length(streams) == 1, do: hd(streams), else: :mixed),
-      task_ids: moments |> Enum.map(& &1.task_id) |> Enum.reject(&is_nil/1) |> Enum.uniq(),
-      time_range: %{
-        from: Enum.min_by(inserted, &DateTime.to_unix(&1, :microsecond), fn -> nil end),
-        to: Enum.max_by(inserted, &DateTime.to_unix(&1, :microsecond), fn -> nil end)
-      },
-      keywords:
-        moments
-        |> Enum.flat_map(&Map.get(&1, :keywords, []))
-        |> Enum.uniq()
-        |> Enum.take(24),
+      stream: window_stream(moments),
+      task_ids: window_task_ids(moments),
+      time_range: window_time_range(moments),
+      keywords: window_keywords(moments),
       metadata: %{
         size: length(moments),
         associations: length(component_associations)
       }
     }
+  end
+
+  @spec window_stream([term()]) :: term()
+  defp window_stream(moments) do
+    case moments |> Enum.map(& &1.stream) |> Enum.uniq() do
+      [stream] -> stream
+      _streams -> :mixed
+    end
+  end
+
+  @spec window_task_ids([term()]) :: [term()]
+  defp window_task_ids(moments) do
+    moments
+    |> Enum.map(& &1.task_id)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  @spec window_time_range([term()]) :: %{from: DateTime.t() | nil, to: DateTime.t() | nil}
+  defp window_time_range(moments) do
+    inserted = Enum.filter(Enum.map(moments, & &1.inserted_at), &match?(%DateTime{}, &1))
+
+    %{
+      from: Enum.min_by(inserted, &DateTime.to_unix(&1, :microsecond), fn -> nil end),
+      to: Enum.max_by(inserted, &DateTime.to_unix(&1, :microsecond), fn -> nil end)
+    }
+  end
+
+  @spec window_keywords([term()]) :: [binary()]
+  defp window_keywords(moments) do
+    moments
+    |> Enum.flat_map(&Map.get(&1, :keywords, []))
+    |> Enum.uniq()
+    |> Enum.take(24)
   end
 
   @spec embedding_record(SpectreMnemonic.Memory.Moment.t()) :: [map()]

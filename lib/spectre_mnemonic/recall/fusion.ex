@@ -6,6 +6,8 @@ defmodule SpectreMnemonic.Recall.Fusion do
   @doc "Fuses ranked result lists with reciprocal rank fusion."
   @spec rrf([[term()]], keyword()) :: [{float(), term()}]
   def rrf(result_lists, opts \\ []) do
+    # RRF is the peace treaty between ranking systems. Nobody has to share a
+    # score scale, which is good because they absolutely would not.
     k = Keyword.get(opts, :k, @default_k)
 
     result_lists

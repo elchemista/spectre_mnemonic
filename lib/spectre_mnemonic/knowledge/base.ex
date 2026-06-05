@@ -24,6 +24,8 @@ defmodule SpectreMnemonic.Knowledge.Base do
     compaction_marker: 10
   }
 
+  @packet_types [:skill, :procedure, :fact, :latest_ingestion]
+
   @doc "Returns the effective knowledge config."
   @spec config(keyword()) :: keyword()
   def config(opts \\ []) do
@@ -47,45 +49,51 @@ defmodule SpectreMnemonic.Knowledge.Base do
   @spec load(keyword()) :: {:ok, Record.t()}
   def load(opts \\ []) do
     cfg = config(opts)
+    load_with_config(cfg)
+  end
 
-    if Keyword.get(cfg, :enabled, true) do
-      {:ok, events} = SMEM.replay(cfg)
-      {:ok, build_packet(events, cfg)}
-    else
-      {:ok, empty_packet(%{disabled?: true})}
-    end
+  @spec load_with_config(keyword()) :: {:ok, Record.t()}
+  defp load_with_config(cfg) do
+    if enabled?(cfg), do: load_enabled(cfg), else: {:ok, empty_packet(%{disabled?: true})}
+  end
+
+  @spec load_enabled(keyword()) :: {:ok, Record.t()}
+  defp load_enabled(cfg) do
+    {:ok, events} = SMEM.replay(cfg)
+    {:ok, build_packet(events, cfg)}
   end
 
   @doc "Searches `knowledge.smem` without loading a full knowledge packet."
   @spec search(term(), keyword()) :: {:ok, [map()]}
   def search(cue, opts \\ []) do
     cfg = config(opts)
+    if enabled?(cfg), do: search_enabled(cue, opts, cfg), else: {:ok, []}
+  end
 
-    if Keyword.get(cfg, :enabled, true) do
-      {:ok, events} = SMEM.replay(cfg)
-      limit = Keyword.get(opts, :limit, 10)
-      query = cue_text(cue)
-      query_terms = query |> terms() |> MapSet.new()
+  @spec search_enabled(term(), keyword(), keyword()) :: {:ok, [map()]}
+  defp search_enabled(cue, opts, cfg) do
+    {:ok, events} = SMEM.replay(cfg)
+    limit = Keyword.get(opts, :limit, 10)
+    query = cue_text(cue)
+    query_terms = query |> terms() |> MapSet.new()
 
-      results =
-        events
-        |> Enum.map(&SMEM.normalize_event/1)
-        |> Enum.map(&score_event(&1, query_terms, query))
-        |> Enum.filter(&(&1.score > 0))
-        |> Enum.sort_by(fn result ->
-          {-result.score, -timestamp(result.event), result.event.id}
-        end)
-        |> Enum.take(limit)
+    results =
+      events
+      |> Enum.map(&SMEM.normalize_event/1)
+      |> Enum.map(&score_event(&1, query_terms, query))
+      |> Enum.filter(&(&1.score > 0))
+      |> Enum.sort_by(&search_sort_key/1)
+      |> Enum.take(limit)
 
-      {:ok, results}
-    else
-      {:ok, []}
-    end
+    {:ok, results}
   end
 
   @doc "Builds a packet from already-loaded events."
   @spec build_packet([map()], keyword()) :: Record.t()
   def build_packet(events, cfg \\ []) do
+    # Compact knowledge is the stuff I am willing to put back in context
+    # without doing a dramatic database pilgrimage. Budget first, poetry later.
+    # Future annoyance: priority is still static and probably too confident.
     cfg = config(cfg)
     max_bytes = Keyword.fetch!(cfg, :max_loaded_bytes)
 
@@ -97,17 +105,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
     {summary, used_bytes} = select_summary(events, max_bytes)
     remaining = max(max_bytes - used_bytes, 0)
 
-    selected =
-      [:skill, :procedure, :fact, :latest_ingestion]
-      |> Enum.reduce(%{bytes: used_bytes, events: %{}}, fn type, acc ->
-        limit = limit_for(type, cfg)
-        candidates = Enum.filter(events, &(&1.type == type))
-
-        {items, bytes} =
-          take_budgeted(candidates, limit, max(remaining - (acc.bytes - used_bytes), 0))
-
-        %{acc | bytes: acc.bytes + bytes, events: Map.put(acc.events, type, items)}
-      end)
+    selected = select_packet_events(events, cfg, used_bytes, remaining)
 
     %Record{
       id: "knowledge_loaded",
@@ -141,6 +139,34 @@ defmodule SpectreMnemonic.Knowledge.Base do
     }
   end
 
+  @spec enabled?(keyword()) :: boolean()
+  defp enabled?(cfg), do: Keyword.get(cfg, :enabled, true)
+
+  @spec select_packet_events([map()], keyword(), non_neg_integer(), non_neg_integer()) :: map()
+  defp select_packet_events(events, cfg, used_bytes, remaining) do
+    Enum.reduce(@packet_types, %{bytes: used_bytes, events: %{}}, fn type, selected ->
+      select_packet_type(type, events, cfg, selected, used_bytes, remaining)
+    end)
+  end
+
+  @spec select_packet_type(
+          atom(),
+          [map()],
+          keyword(),
+          map(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
+          map()
+  defp select_packet_type(type, events, cfg, selected, used_bytes, remaining) do
+    limit = limit_for(type, cfg)
+    candidates = Enum.filter(events, &(&1.type == type))
+    budget = max(remaining - (selected.bytes - used_bytes), 0)
+    {items, bytes} = take_budgeted(candidates, limit, budget)
+
+    %{selected | bytes: selected.bytes + bytes, events: Map.put(selected.events, type, items)}
+  end
+
   @spec rank_events([map()]) :: [map()]
   defp rank_events(events) do
     Enum.sort_by(events, fn event ->
@@ -153,11 +179,12 @@ defmodule SpectreMnemonic.Knowledge.Base do
     events
     |> Enum.filter(&(&1.type == :summary))
     |> take_budgeted(1, max_bytes)
-    |> case do
-      {[], _bytes} -> {nil, 0}
-      {[event], bytes} -> {event.summary || event.text, bytes}
-    end
+    |> selected_summary()
   end
+
+  @spec selected_summary({[map()], non_neg_integer()}) :: {binary() | nil, non_neg_integer()}
+  defp selected_summary({[], _bytes}), do: {nil, 0}
+  defp selected_summary({[event], bytes}), do: {event.summary || event.text, bytes}
 
   @spec take_budgeted([map()], non_neg_integer(), non_neg_integer()) ::
           {[map()], non_neg_integer()}
@@ -178,8 +205,12 @@ defmodule SpectreMnemonic.Knowledge.Base do
           {:cont, {[event | acc], used + size, count + 1}}
       end
     end)
-    |> then(fn {selected, used, _count} -> {Enum.reverse(selected), used} end)
+    |> budget_result()
   end
+
+  @spec budget_result({[map()], non_neg_integer(), non_neg_integer()}) ::
+          {[map()], non_neg_integer()}
+  defp budget_result({selected, used, _count}), do: {Enum.reverse(selected), used}
 
   @spec limit_for(atom(), keyword()) :: non_neg_integer()
   defp limit_for(:skill, cfg), do: Keyword.fetch!(cfg, :max_skills)
@@ -230,9 +261,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
     event_terms = text |> terms() |> MapSet.new()
     overlap = MapSet.size(MapSet.intersection(query_terms, event_terms))
 
-    phrase_bonus =
-      if query != "" and String.contains?(String.downcase(text), query), do: 4, else: 0
-
+    phrase_bonus = phrase_bonus(text, query)
     type_bonus = div(priority(event), 25)
     usage_bonus = min(usage_count(event), 5)
     attention_bonus = event |> attention() |> min(5) |> trunc()
@@ -247,6 +276,16 @@ defmodule SpectreMnemonic.Knowledge.Base do
       event: event,
       text: text
     }
+  end
+
+  @spec search_sort_key(map()) :: {integer(), integer(), binary()}
+  defp search_sort_key(result), do: {-result.score, -timestamp(result.event), result.event.id}
+
+  @spec phrase_bonus(binary(), binary()) :: non_neg_integer()
+  defp phrase_bonus(_text, ""), do: 0
+
+  defp phrase_bonus(text, query) do
+    if String.contains?(String.downcase(text), query), do: 4, else: 0
   end
 
   @spec event_text(map()) :: binary()

@@ -15,6 +15,8 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
   @doc "Produces a packed binary signature from a dense vector."
   @spec quantize(Vector.vector_input(), keyword()) :: binary() | nil
   def quantize(vector, opts \\ []) do
+    # This is not sacred math; it is a cheap recall hint. Store fewer floats,
+    # compare fast, accept that nuance was asked to sit in the hallway.
     values = Vector.to_list(vector)
     bits = Keyword.get(opts, :bits, @default_bits)
 

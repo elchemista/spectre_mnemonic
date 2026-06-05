@@ -88,6 +88,8 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @spec rebuild_state(map(), keyword()) :: map()
   defp rebuild_state(_state, opts) do
+    # The append log is truth; this index is just a fast opinion rebuilt from
+    # truth. If it gets confused, replay wins. Very old-fashioned, very useful.
     {:ok, records} = Manager.replay(opts)
 
     records
@@ -163,6 +165,8 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @spec doc_from_record(Record.t()) :: doc() | nil
   defp doc_from_record(%Record{} = record) do
+    # Not every durable record deserves search surface. Empty envelopes can stay
+    # in the log and enjoy their quiet retirement.
     text = payload_text(record.payload)
     memory_id = payload_memory_id(record)
     vector = payload_vector(record.payload)

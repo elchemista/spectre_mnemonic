@@ -15,6 +15,9 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   @doc "Embeds input using local Model2Vec artifacts."
   @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}
   def embed(input, opts \\ []) do
+    # Local embeddings are nice because no request leaves the machine. They are
+    # also fussy little file creatures, so every step returns shape errors
+    # instead of turning intake into a bonfire.
     with {:ok, model_dir} <- model_dir(opts),
          tokenizer_path <- Path.join(model_dir, "tokenizer.json"),
          {:ok, tokenizer} <- load_json(tokenizer_path),
@@ -132,6 +135,8 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
 
   @spec fallback_token_ids(binary(), map()) :: [integer()]
   defp fallback_token_ids(text, tokenizer) do
+    # Tokenizers NIF unavailable? Fine. The fallback is dumber, but dumber and
+    # working beats clever and unavailable on a Tuesday afternoon.
     text
     |> String.downcase()
     |> String.split(~r/[^[:alnum:]_]+/u, trim: true)

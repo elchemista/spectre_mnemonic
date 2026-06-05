@@ -74,6 +74,8 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
 
   @spec run_once(keyword()) :: map()
   defp run_once(cfg) do
+    # This is opt-in because background memory jobs are helpful until they start
+    # moving furniture while you are still sitting on it. Boring cron energy.
     consolidate_opts = [
       min_attention: Keyword.get(cfg, :min_attention, 1.0),
       graph_depth: Keyword.get(cfg, :graph_depth, 1)

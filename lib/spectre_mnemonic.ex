@@ -164,6 +164,9 @@ defmodule SpectreMnemonic do
   """
   @spec search(cue :: term(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
   def search(cue, opts \\ []) do
+    # Search is the flat "give me candidates" door. Recall is richer, durable
+    # search is wider, and this function glues them without pretending it wrote
+    # the final answer. The model can do prose. The runtime brings receipts.
     with {:ok, packet} <- recall(cue, opts),
          {:ok, durable_results} <- Manager.search(cue, opts) do
       active_results =

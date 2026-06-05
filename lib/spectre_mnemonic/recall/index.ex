@@ -65,6 +65,8 @@ defmodule SpectreMnemonic.Recall.Index do
   @impl GenServer
   @spec handle_call(term(), GenServer.from(), state()) :: {:reply, term(), state()}
   def handle_call({:upsert, moment}, _from, state) do
+    # The active index is a helper, not the source of truth. ETS focus owns the
+    # memory; this process just keeps vector shortcuts warm.
     case indexable(moment) do
       {:ok, entry} ->
         label = existing_label(moment.id) || state.next_label
@@ -112,6 +114,8 @@ defmodule SpectreMnemonic.Recall.Index do
   defp brute_force(_cue, limit) when limit <= 0, do: []
 
   defp brute_force(cue, limit) do
+    # HNSW is nice when available. Brute force is the fallback with work boots.
+    # Small hot sets can survive without a fancy neighbor oracle.
     cue_vector = Map.get(cue, :vector)
     cue_signature = Map.get(cue, :binary_signature)
 
@@ -218,6 +222,8 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec maybe_add_hnsw(state(), map(), pos_integer()) :: state()
   defp maybe_add_hnsw(state, entry, label) do
+    # ANN setup is best-effort. If dimensions disagree or the NIF sulks, ETS
+    # still has every vector. Nobody gets to break recall because an index sneezed.
     with true <- hnsw_enabled?(),
          true <- hnsw_available?(),
          true <- Code.ensure_loaded?(Nx),
