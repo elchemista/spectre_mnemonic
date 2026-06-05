@@ -267,8 +267,6 @@ defmodule SpectreMnemonic.Recall.Index do
   defp ensure_hnsw(_state, _dimensions), do: {:error, :dimension_mismatch}
 
   @spec ensure_hnsw_capacity(state(), pos_integer()) :: :ok | {:error, term()}
-  defp ensure_hnsw_capacity(%{hnsw: nil}, _label), do: :ok
-
   defp ensure_hnsw_capacity(%{hnsw: index, hnsw_max: max_elements}, label)
        when is_integer(max_elements) and label >= max_elements do
     hnsw_resize_index(index, max(max_elements * 2, label + 1))

@@ -66,7 +66,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   defp load_safetensors(path) do
     with :ok <- ensure_file(path),
          {:ok, <<header_size::little-unsigned-integer-64, rest::binary>>} <- File.read(path),
-         <<header_json::binary-size(header_size), tensor_data::binary>> <- rest,
+         <<header_json::binary-size(^header_size), tensor_data::binary>> <- rest,
          {:ok, header} <- Jason.decode(header_json),
          {:ok, tensor_name, tensor} <- find_f32_matrix(header) do
       %{"data_offsets" => [start_offset, end_offset], "shape" => [rows, dimensions]} = tensor
