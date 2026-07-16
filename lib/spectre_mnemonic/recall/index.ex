@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.Recall.Index do
   use GenServer
 
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Memory.Scope
 
   @index_table :mnemonic_embedding_index
   @label_table :mnemonic_embedding_labels
@@ -99,7 +100,11 @@ defmodule SpectreMnemonic.Recall.Index do
 
   def handle_call({:query, cue, opts}, _from, state) do
     limit = Keyword.get(opts, :overfetch) || get_in(index_config(), [:overfetch]) || 40
-    results = query_hnsw(state, cue, limit) || brute_force(cue, limit)
+    results =
+      (query_hnsw(state, cue, indexed_count()) || brute_force(cue, indexed_count()))
+      |> Enum.filter(&Scope.match?(&1, opts))
+      |> Enum.take(limit)
+
     {:reply, {:ok, results}, state}
   end
 
@@ -184,6 +189,8 @@ defmodule SpectreMnemonic.Recall.Index do
 
     %{
       id: moment_id,
+      namespace: Map.get(entry, :namespace),
+      scope: Map.get(entry, :scope),
       score: cosine * 4.0 + hamming_similarity * 4.0,
       cosine: cosine,
       hamming_distance: hamming,
@@ -192,12 +199,16 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   @spec indexable(map()) :: {:ok, map()} | :skip
-  defp indexable(%{id: id, vector: vector, binary_signature: signature, embedding: embedding})
+  defp indexable(
+         %{id: id, vector: vector, binary_signature: signature, embedding: embedding} = moment
+       )
        when is_binary(id) and is_binary(vector) and is_binary(signature) do
     metadata = embedding_metadata(embedding)
 
     {:ok,
      %{
+       namespace: Scope.namespace(moment),
+       scope: Scope.scope(moment),
        vector: vector,
        binary_signature: signature,
        dimensions: Map.get(metadata, :dimensions) || Vector.dimensions(vector),

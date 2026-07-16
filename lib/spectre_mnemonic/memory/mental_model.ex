@@ -5,6 +5,7 @@ defmodule SpectreMnemonic.Memory.MentalModel do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
           title: binary() | nil,
           query: binary(),
           answer: binary(),
@@ -28,6 +29,7 @@ defmodule SpectreMnemonic.Memory.MentalModel do
 
   defstruct [
     :id,
+    :namespace,
     :title,
     :query,
     :answer,

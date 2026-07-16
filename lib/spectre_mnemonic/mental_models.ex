@@ -10,6 +10,7 @@ defmodule SpectreMnemonic.MentalModels do
 
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.MentalModel
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
@@ -37,22 +38,22 @@ defmodule SpectreMnemonic.MentalModels do
   def put(input, opts \\ []) do
     # Mental models are curated on purpose. If everything becomes a principle,
     # nothing is a principle and we are back to prompt soup with nicer labels.
-    now = Keyword.get(opts, :now, DateTime.utc_now())
-    model = build(input, opts, now)
-    :ets.insert(@mental_model_table, {model.id, model})
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      now = Keyword.get(opts, :now, DateTime.utc_now())
+      model = build(input, opts, now)
 
-    result =
       if Keyword.get(opts, :persist?, true) do
-        with {:ok, _result} <-
-               Manager.append(:mental_models, model, Keyword.put(opts, :record_id, model.id)) do
-          Governance.append_state(model.id, model.state, :mental_model_stored, opts)
+        with {:ok, _result} <- Manager.append(:mental_models, model, opts),
+             :ok <-
+               Governance.append_state(model.id, model.state, :mental_model_stored, opts) do
+          :ets.insert(@mental_model_table, {model.id, model})
           {:ok, model}
         end
       else
+        :ets.insert(@mental_model_table, {model.id, model})
         {:ok, model}
       end
-
-    result
+    end
   end
 
   @doc """
@@ -66,24 +67,33 @@ defmodule SpectreMnemonic.MentalModels do
       iex> SpectreMnemonic.MentalModels.search("review PR risks", limit: 3)
       {:ok, _models}
   """
-  @spec search(term(), keyword()) :: {:ok, [MentalModel.t() | map()]}
+  @spec search(term(), keyword()) ::
+          {:ok, [MentalModel.t() | map()]} | {:error, :namespace_required}
   def search(cue, opts \\ []) do
-    active =
-      @mental_model_table
-      |> safe_tab2list()
-      |> Enum.map(fn {_id, model} -> model end)
-      |> Enum.filter(&visible?(&1, opts))
-      |> score_models(cue)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      active =
+        @mental_model_table
+        |> safe_tab2list()
+        |> Enum.map(fn {_id, model} -> model end)
+        |> Enum.filter(&visible?(&1, opts))
+        |> score_models(cue)
 
-    durable = durable_models(cue, opts)
+      durable = durable_models(cue, opts)
 
-    limit = Keyword.get(opts, :limit, 10)
-    {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+      limit = Keyword.get(opts, :limit, 10)
+      {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+    end
   end
 
   @spec durable_models(term(), keyword()) :: [MentalModel.t() | map()]
   defp durable_models(cue, opts) do
-    case safe_manager_search(cue, opts) do
+    result =
+      case Keyword.fetch(opts, :durable_results) do
+        {:ok, results} -> {:ok, results}
+        :error -> safe_manager_search(cue, opts)
+      end
+
+    case result do
       {:ok, results} ->
         results
         |> Enum.filter(&(Map.get(&1, :family) == :mental_models))
@@ -118,11 +128,14 @@ defmodule SpectreMnemonic.MentalModels do
     text = Enum.join(Enum.reject([title, query, answer], &is_nil/1), "\n")
     embedding = Service.embed(text, opts)
     temporal = Temporal.from_opts(temporal_opts(map, opts), now)
+    namespace = Identity.namespace!(opts)
     scope = Keyword.get(opts, :scope, value(map, :scope, nil))
-    id = value(map, :id, Keyword.get(opts, :id) || stable_model_id(scope, query, answer))
+    id =
+      value(map, :id, Keyword.get(opts, :id) || stable_model_id(namespace, scope, query, answer))
 
     %MentalModel{
       id: id,
+      namespace: namespace,
       title: title,
       query: query,
       answer: answer,
@@ -143,7 +156,7 @@ defmodule SpectreMnemonic.MentalModels do
       metadata:
         metadata_value(opts, map)
         |> Map.new()
-        |> Map.put(:scope, scope)
+        |> Identity.put_context(Keyword.put(opts, :scope, scope))
         |> Governance.with_provenance(
           source_ids: List.wrap(value(map, :source_ids, Keyword.get(opts, :source_ids, []))),
           provider: :mental_models,
@@ -222,9 +235,9 @@ defmodule SpectreMnemonic.MentalModels do
   @spec visible?(map(), keyword()) :: boolean()
   defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
 
-  @spec stable_model_id(term(), binary(), binary()) :: binary()
-  defp stable_model_id(scope, query, answer) do
-    hash = :crypto.hash(:sha256, :erlang.term_to_binary({scope, query, answer}))
+  @spec stable_model_id(binary(), term(), binary(), binary()) :: binary()
+  defp stable_model_id(namespace, scope, query, answer) do
+    hash = :crypto.hash(:sha256, :erlang.term_to_binary({namespace, scope, query, answer}))
     "mm_#{Base.encode16(hash, case: :lower) |> binary_part(0, 24)}"
   end
 

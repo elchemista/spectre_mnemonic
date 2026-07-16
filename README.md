@@ -65,6 +65,18 @@ Start it as an OTP application or under your supervision tree. The default
 application starts ETS ownership, persistence, the durable index, stream routing,
 active focus, recall, consolidation, and the opt-in consolidation scheduler.
 
+A stable namespace is mandatory and must not change across deploys. It prevents
+records from another application instance from entering replay or search:
+
+```elixir
+config :spectre_mnemonic,
+  namespace: "my_app_memory",
+  hot_memory: [
+    max_moments_per_scope: 1_000,
+    max_moments_per_namespace: 10_000
+  ]
+```
+
 ## Quick Start
 
 Use `remember/2` for normal application memory:
@@ -117,6 +129,10 @@ Use `search/2` when you want active recall plus durable persisted memory:
 Enum.map(results, &{&1.source, &1.family, &1.id, &1.score})
 ```
 
+Every item is a `%SpectreMnemonic.SearchResult{}`. Recall builds one
+`%SpectreMnemonic.QueryContext{}` per request, computes its embedding once, and
+reuses it across active and durable ranking.
+
 Use `consolidate/1` to promote active memory into durable families:
 
 ```elixir
@@ -126,8 +142,8 @@ Use `consolidate/1` to promote active memory into durable families:
 Use `forget/2` to remove active memories and write tombstones:
 
 ```elixir
-SpectreMnemonic.forget({:task, "alpha"})
-SpectreMnemonic.forget("mom_123")
+SpectreMnemonic.forget({:task, "alpha"}, scope: {:project, "alpha"})
+SpectreMnemonic.forget("mom_123", scope: {:project, "alpha"})
 ```
 
 ## Remember Plug Pipeline
@@ -277,8 +293,9 @@ SpectreMnemonic.remember(text, extract_entities?: false)
 
 Memory can be scoped without changing the existing stream/task model. A scope is
 caller-owned data, such as a user, agent, tenant, or project tuple. Scoped recall
-only searches matching memory; unscoped recall stays broad for backward
-compatibility.
+only searches matching memory. Omitting `scope:` searches only the unscoped
+partition; crossing tenant scopes requires the explicit administrative option
+`scopes: :all`.
 
 ```elixir
 SpectreMnemonic.remember("Payment retry policy is stable",
@@ -350,7 +367,7 @@ config :spectre_mnemonic,
   persistent_memory: [
     write_mode: :all,
     read_mode: :smart,
-    failure_mode: :best_effort,
+    failure_mode: :strict,
     stores: [
       [
         id: :local_file,
@@ -461,8 +478,8 @@ through the same persistence and durable search machinery as other memory.
 
 `reflect/2` gathers mental models first, ranked observations second, then raw
 recall evidence. Observation evidence is ranked as decisions, preferences,
-project state, patterns, then facts. Without an adapter it returns a structured
-packet. With an adapter it normalizes the adapter output into `packet.response`.
+project state, patterns, then facts. It always returns structured evidence;
+natural-language response generation belongs to the calling Spectre layer.
 `max_tokens` is forwarded to recall as a best-effort packet budget and may
 include one oversized primary evidence item when excluding it would make the
 packet empty.
@@ -477,13 +494,14 @@ packet empty.
 packet.mental_models
 packet.observations
 packet.raw_memories
+packet.evidence
 packet.citations
-packet.response
 ```
 
 ### Compaction
 
-Physical compaction writes snapshots for append-only local files:
+Physical compaction writes an atomic live-record snapshot, applies tombstones,
+rotates `active.smem`, and replays the snapshot before the new active segment:
 
 ```elixir
 SpectreMnemonic.Persistence.Manager.compact(mode: :physical)
@@ -628,7 +646,9 @@ SpectreMnemonic.ConsolidationScheduler.status()
 
 `knowledge.smem` is a compact append-only knowledge log stored at
 `data_root/knowledge/knowledge.smem`. It is separate from active ETS memory and
-from the durable persistent-memory families.
+from the durable persistent-memory families. Writes and replacements are
+serialized through one supervised writer and every event is namespace/scope
+filtered.
 
 Supported event types:
 
@@ -826,8 +846,8 @@ mix test
 - `lib/spectre_mnemonic/observations.ex` and
   `lib/spectre_mnemonic/mental_models.ex` own evidence-grounded observations
   and curated mental models.
-- `lib/spectre_mnemonic/reflection*` builds reflection packets and delegates to
-  optional reflection adapters.
+- `lib/spectre_mnemonic/reflection*` builds structured, source-linked reflection
+  evidence packets.
 - `lib/spectre_mnemonic/consolidation_scheduler.ex` owns opt-in background
   consolidation and freshness decay.
 - `lib/spectre_mnemonic/intake*` powers `remember/2`, plugs, extraction, and

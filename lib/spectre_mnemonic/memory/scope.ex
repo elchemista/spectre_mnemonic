@@ -1,6 +1,8 @@
 defmodule SpectreMnemonic.Memory.Scope do
   @moduledoc false
 
+  alias SpectreMnemonic.Identity
+
   @doc "Returns the scope option as-is so tuples, atoms, and binaries remain caller-owned."
   @spec from_opts(keyword()) :: term()
   def from_opts(opts), do: Keyword.get(opts, :scope)
@@ -15,27 +17,53 @@ defmodule SpectreMnemonic.Memory.Scope do
 
   def scope(_memory), do: nil
 
+  @doc "Extracts the mandatory namespace from a memory-like map."
+  @spec namespace(term()) :: binary() | nil
+  def namespace(memory), do: Identity.namespace(memory)
+
+  @doc "Returns the namespace/scope partition key for a memory-like map."
+  @spec partition(term()) :: {binary() | nil, term()}
+  def partition(memory), do: {namespace(memory), scope(memory)}
+
   @doc "Returns true when memory matches the requested scope filters."
   @spec match?(term(), keyword()) :: boolean()
   def match?(memory, opts) do
-    # Scope is a plain runtime filter. No ontology parade. If the caller asks
-    # for this scope, show this scope; otherwise let the memory stay home.
-    scopes = scopes(opts)
-
-    scopes == :all or scope(memory) in scopes
+    with {:ok, namespace} <- Identity.fetch_namespace(opts) do
+      namespace_match?(memory, namespace, opts) and scope_match?(memory, opts)
+    else
+      {:error, _reason} -> false
+    end
   end
 
   @spec scopes(keyword()) :: :all | [term()]
   def scopes(opts) do
     cond do
       Keyword.has_key?(opts, :scopes) ->
-        opts |> Keyword.get(:scopes) |> List.wrap()
+        case Keyword.get(opts, :scopes) do
+          :all -> :all
+          scopes -> List.wrap(scopes)
+        end
 
       Keyword.has_key?(opts, :scope) ->
         [Keyword.get(opts, :scope)]
 
       true ->
-        :all
+        [nil]
     end
+  end
+
+  @spec namespace_match?(term(), binary(), keyword()) :: boolean()
+  defp namespace_match?(memory, namespace, opts) do
+    case Identity.namespace(memory) do
+      ^namespace -> true
+      nil -> Keyword.get(opts, :allow_legacy_namespace?, false)
+      _other -> false
+    end
+  end
+
+  @spec scope_match?(term(), keyword()) :: boolean()
+  defp scope_match?(memory, opts) do
+    requested = scopes(opts)
+    requested == :all or scope(memory) in requested
   end
 end

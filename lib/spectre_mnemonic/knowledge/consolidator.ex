@@ -21,6 +21,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Consolidation
   alias SpectreMnemonic.Knowledge.Record
   alias SpectreMnemonic.Memory.Scope
@@ -66,8 +67,10 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   """
   @spec consolidate(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 30_000)
-    GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      timeout = Keyword.get(opts, :timeout, 30_000)
+      GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
+    end
   end
 
   @impl GenServer
@@ -80,21 +83,23 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   def handle_call({:consolidate, opts}, _from, state) do
     min_attention = Keyword.get(opts, :min_attention, 1.0)
     now = DateTime.utc_now()
-    active_moments = Focus.moments()
-    associations = Focus.associations()
+    active_moments = Focus.moments(opts)
+    associations = Focus.associations(opts)
 
     # Build the boring default first, then let custom policy edit it. I picked
     # this path after seeing adapters rebuild half the runtime just to say
     # "promote these three things". That way lies tiny framework lasagna.
     consolidation =
       active_moments
-      |> candidate_moments(min_attention)
+      |> candidate_moments(min_attention, opts)
       |> graph_expanded_candidates(active_moments, associations, opts)
+      |> Enum.filter(&Governance.consolidatable?(&1, opts))
       |> default_consolidation(associations, now, opts)
 
     with {:ok, consolidation} <- run_consolidation(consolidation, opts),
-         :ok <- persist_consolidation(consolidation) do
-      Manager.compact()
+         :ok <- validate_consolidation(consolidation),
+         :ok <- persist_consolidation(consolidation),
+         :ok <- maybe_compact(consolidation.opts) do
       {:reply, {:ok, consolidation.knowledge}, state}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
@@ -158,7 +163,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   @spec default_consolidation([term()], [term()], DateTime.t(), keyword()) :: Consolidation.t()
   defp default_consolidation(moments, associations, now, opts) do
-    outputs = default_outputs(moments, now)
+    outputs = default_outputs(moments, now, opts)
+    selected_ids = MapSet.new(Enum.map(moments, & &1.id))
+    associations = graph_associations(associations, selected_ids)
 
     %Consolidation{
       moments: moments,
@@ -215,19 +222,144 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     do: {:error, {:invalid_consolidation_plan, other}}
 
   @spec persist_consolidation(Consolidation.t()) :: :ok | {:error, term()}
+  defp persist_consolidation(%Consolidation{} = consolidation)
+       when consolidation.moments == [] and consolidation.knowledge == [] and
+              consolidation.summaries == [] and consolidation.categories == [] and
+              consolidation.embeddings == [] and consolidation.associations == [] and
+              consolidation.records == [] and
+              consolidation.tombstones == [],
+       do: :ok
+
   defp persist_consolidation(%Consolidation{} = consolidation) do
     with :ok <- persist_family_writes(consolidation),
-         :ok <- persist_adapter_records(consolidation.records),
-         :ok <- persist_tombstones(consolidation.tombstones),
-         {:ok, _result} <- Manager.append(:consolidation_jobs, consolidation_job(consolidation)) do
-      Governance.promote_moments(consolidation.moments)
+         :ok <- persist_adapter_records(consolidation.records, consolidation.opts),
+         :ok <- persist_tombstones(consolidation.tombstones, consolidation.opts),
+         {:ok, _result} <-
+           Manager.append(
+             :consolidation_jobs,
+             consolidation_job(consolidation),
+             consolidation.opts
+           ),
+         :ok <- Governance.promote_moments(consolidation.moments, consolidation.opts) do
       :ok
     end
   end
 
-  @spec candidate_moments([term()], number()) :: [term()]
-  defp candidate_moments(moments, min_attention) do
-    Enum.filter(moments, &(&1.attention >= min_attention))
+  @spec validate_consolidation(Consolidation.t()) :: :ok | {:error, term()}
+  defp validate_consolidation(%Consolidation{} = consolidation) do
+    with :ok <- validate_single_partition(consolidation.moments),
+         :ok <- validate_association_partition(consolidation),
+         :ok <- validate_output_partitions(consolidation) do
+      Enum.reduce_while(consolidation.moments, :ok, fn moment, :ok ->
+        cond do
+          not Scope.match?(moment, consolidation.opts) ->
+            {:halt, {:error, {:out_of_scope_consolidation, Map.get(moment, :id)}}}
+
+          not Governance.consolidatable?(moment, consolidation.opts) ->
+            {:halt, {:error, {:invalid_lifecycle_for_consolidation, Map.get(moment, :id)}}}
+
+          true ->
+            {:cont, :ok}
+        end
+      end)
+    end
+  end
+
+  @spec validate_output_partitions(Consolidation.t()) :: :ok | {:error, term()}
+  defp validate_output_partitions(%Consolidation{} = consolidation) do
+    expected =
+      case consolidation.moments do
+        [moment | _] -> Scope.partition(moment)
+        [] -> {Identity.namespace!(consolidation.opts), Keyword.get(consolidation.opts, :scope)}
+      end
+
+    outputs =
+      consolidation.knowledge ++
+        consolidation.summaries ++
+        consolidation.categories ++
+        consolidation.embeddings ++
+        consolidation.records ++ consolidation.tombstones
+
+    Enum.reduce_while(outputs, :ok, fn output, :ok ->
+      if output_partition_matches?(output, expected) do
+        {:cont, :ok}
+      else
+        {:halt, {:error, {:out_of_scope_consolidation_output, output_partition(output), expected}}}
+      end
+    end)
+  end
+
+  @spec output_partition_matches?(term(), {binary(), term()}) :: boolean()
+  defp output_partition_matches?({family, payload}, expected) when is_atom(family),
+    do: output_partition_matches?(payload, expected)
+
+  defp output_partition_matches?(output, {namespace, scope}) when is_map(output) do
+    output_namespace = Identity.namespace(output)
+
+    namespace_matches? = is_nil(output_namespace) or output_namespace == namespace
+    scope_matches? = not explicit_scope?(output) or Scope.scope(output) == scope
+    namespace_matches? and scope_matches?
+  end
+
+  defp output_partition_matches?(_output, _expected), do: true
+
+  @spec explicit_scope?(map()) :: boolean()
+  defp explicit_scope?(output) do
+    Map.has_key?(output, :scope) or Map.has_key?(output, "scope") or
+      case Map.get(output, :metadata, Map.get(output, "metadata")) do
+        metadata when is_map(metadata) ->
+          Map.has_key?(metadata, :scope) or Map.has_key?(metadata, "scope")
+
+        _metadata ->
+          false
+      end
+  end
+
+  @spec output_partition(term()) :: {binary() | nil, term()}
+  defp output_partition({family, payload}) when is_atom(family), do: output_partition(payload)
+  defp output_partition(output) when is_map(output), do: Scope.partition(output)
+  defp output_partition(_output), do: {nil, nil}
+
+  @spec validate_single_partition([term()]) :: :ok | {:error, term()}
+  defp validate_single_partition(moments) do
+    case moments |> Enum.map(&Scope.partition/1) |> Enum.uniq() do
+      [] -> :ok
+      [_partition] -> :ok
+      partitions -> {:error, {:mixed_consolidation_partitions, partitions}}
+    end
+  end
+
+  @spec validate_association_partition(Consolidation.t()) :: :ok | {:error, term()}
+  defp validate_association_partition(%Consolidation{} = consolidation) do
+    partitions = MapSet.new(Enum.map(consolidation.moments, &Scope.partition/1))
+
+    if Enum.all?(consolidation.associations, fn association ->
+         Scope.match?(association, consolidation.opts) and
+           (MapSet.size(partitions) == 0 or MapSet.member?(partitions, Scope.partition(association)))
+       end) do
+      :ok
+    else
+      {:error, :out_of_scope_consolidation_association}
+    end
+  end
+
+  @spec maybe_compact(keyword()) :: :ok | {:error, term()}
+  defp maybe_compact(opts) do
+    if Keyword.get(opts, :compact?, false) do
+      case Manager.compact(opts) do
+        {:ok, _result} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  @spec candidate_moments([term()], number(), keyword()) :: [term()]
+  defp candidate_moments(moments, min_attention, opts) do
+    Enum.filter(moments, fn moment ->
+      moment.attention >= min_attention and Governance.consolidatable?(moment, opts)
+    end)
   end
 
   @spec graph_expanded_candidates([term()], [term()], [term()], keyword()) :: [term()]
@@ -285,25 +417,25 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     end
   end
 
-  @spec default_outputs([term()], DateTime.t()) :: map()
-  defp default_outputs(moments, now) do
+  @spec default_outputs([term()], DateTime.t(), keyword()) :: map()
+  defp default_outputs(moments, now, opts) do
     outputs =
       Enum.reduce(moments, %{knowledge: [], summaries: [], categories: [], embeddings: []}, fn
         %{kind: :memory_summary} = moment, acc ->
           acc
-          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now, opts) | &1])
           |> Map.update!(:summaries, &[moment | &1])
           |> add_embeddings(moment)
 
         %{kind: :memory_category} = moment, acc ->
           acc
-          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now, opts) | &1])
           |> Map.update!(:categories, &[moment | &1])
           |> add_embeddings(moment)
 
         moment, acc ->
           acc
-          |> Map.update!(:knowledge, &[knowledge_record(moment, now) | &1])
+          |> Map.update!(:knowledge, &[knowledge_record(moment, now, opts) | &1])
           |> add_embeddings(moment)
       end)
 
@@ -320,10 +452,15 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     Map.update!(outputs, :embeddings, &Enum.reverse(embedding_record(moment), &1))
   end
 
-  @spec knowledge_record(term(), DateTime.t()) :: Record.t()
-  defp knowledge_record(moment, now) do
+  @spec knowledge_record(term(), DateTime.t(), keyword()) :: Record.t()
+  defp knowledge_record(moment, now, opts) do
+    scope = Scope.scope(moment)
+    context_opts = Keyword.put(opts, :scope, scope)
+
     %Record{
-      id: "know_#{System.unique_integer([:positive, :monotonic])}",
+      id: Identity.derived("know", moment.id, context_opts),
+      namespace: Identity.namespace!(context_opts),
+      scope: scope,
       source_id: moment.id,
       text: moment.text,
       vector: moment.vector,
@@ -335,8 +472,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
             stream: moment.stream,
             task_id: moment.task_id,
             kind: moment.kind,
-            scope: Scope.scope(moment)
+            scope: scope
           }
+          |> Identity.put_context(context_opts)
           |> Temporal.put_metadata(Temporal.temporal_map(moment)),
           source_ids: [moment.id],
           provider: :consolidator,
@@ -361,22 +499,22 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       embeddings: consolidation.embeddings,
       associations: consolidation.associations
     ]
-    |> stop_on_error(fn {family, values} -> persist_values(family, values) end)
+    |> stop_on_error(fn {family, values} -> persist_values(family, values, consolidation.opts) end)
   end
 
-  @spec persist_values(atom(), [term()]) :: :ok | {:error, term()}
-  defp persist_values(family, values) do
-    stop_on_error(values, fn value -> Manager.append(family, value) end)
+  @spec persist_values(atom(), [term()], keyword()) :: :ok | {:error, term()}
+  defp persist_values(family, values, opts) do
+    stop_on_error(values, fn value -> Manager.append(family, value, context_opts(value, opts)) end)
   end
 
-  @spec persist_adapter_records([term()]) :: :ok | {:error, term()}
-  defp persist_adapter_records(records) do
-    stop_on_error(records, &append_record/1)
+  @spec persist_adapter_records([term()], keyword()) :: :ok | {:error, term()}
+  defp persist_adapter_records(records, opts) do
+    stop_on_error(records, &append_record(&1, opts))
   end
 
-  @spec persist_tombstones([term()]) :: :ok | {:error, term()}
-  defp persist_tombstones(tombstones) do
-    stop_on_error(tombstones, &append_tombstone/1)
+  @spec persist_tombstones([term()], keyword()) :: :ok | {:error, term()}
+  defp persist_tombstones(tombstones, opts) do
+    stop_on_error(tombstones, &append_tombstone(&1, opts))
   end
 
   @spec stop_on_error(Enumerable.t(), (term() -> :ok | {:ok, term()} | {:error, term()})) ::
@@ -391,13 +529,24 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     end)
   end
 
-  @spec append_record({atom(), term()}) :: {:ok, term()} | {:error, term()}
-  defp append_record({family, payload}) when is_atom(family), do: Manager.append(family, payload)
-  defp append_record(other), do: {:error, {:invalid_consolidation_record, other}}
+  @spec append_record({atom(), term()}, keyword()) :: {:ok, term()} | {:error, term()}
+  defp append_record({family, payload}, opts) when is_atom(family),
+    do: Manager.append(family, payload, context_opts(payload, opts))
+
+  defp append_record(other, _opts), do: {:error, {:invalid_consolidation_record, other}}
 
   @spec consolidation_job(Consolidation.t()) :: map()
   defp consolidation_job(%Consolidation{} = consolidation) do
+    scope =
+      case consolidation.moments do
+        [%{scope: moment_scope} | _] -> moment_scope
+        _ -> Keyword.get(consolidation.opts, :scope)
+      end
+
     %{
+      id: consolidation_job_id(consolidation),
+      namespace: Identity.namespace!(consolidation.opts),
+      scope: scope,
       count: length(consolidation.knowledge),
       moments: length(consolidation.moments),
       summaries: length(consolidation.summaries),
@@ -413,31 +562,42 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     }
   end
 
-  @spec append_tombstone(term()) :: {:ok, term()} | {:error, term()}
-  defp append_tombstone({family, id}) when is_atom(family) and is_binary(id) do
-    Manager.append(:tombstones, %{family: family, id: id, forgotten_at: DateTime.utc_now()})
+  @spec consolidation_job_id(Consolidation.t()) :: binary()
+  defp consolidation_job_id(%Consolidation{moments: [%{id: source_id} | _], opts: opts}),
+    do: Identity.derived("conjob", source_id, opts)
+
+  defp consolidation_job_id(%Consolidation{opts: opts}), do: Identity.generate("conjob", opts)
+
+  @spec append_tombstone(term(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp append_tombstone({family, id}, opts) when is_atom(family) and is_binary(id) do
+    Manager.append(
+      :tombstones,
+      %{family: family, id: id, forgotten_at: DateTime.utc_now()},
+      opts
+    )
   end
 
-  defp append_tombstone(%{family: family, id: id} = tombstone)
+  defp append_tombstone(%{family: family, id: id} = tombstone, opts)
        when is_atom(family) and is_binary(id) do
     payload = Map.put_new(tombstone, :forgotten_at, DateTime.utc_now())
-    Manager.append(:tombstones, payload)
+    Manager.append(:tombstones, payload, context_opts(tombstone, opts))
   end
 
-  defp append_tombstone(%{"family" => family, "id" => id} = tombstone)
+  defp append_tombstone(%{"family" => family, "id" => id} = tombstone, opts)
        when is_binary(family) and is_binary(id) do
     tombstone
     |> tombstone_payload()
-    |> append_tombstone_payload(family)
+    |> append_tombstone_payload(family, opts)
   end
 
-  defp append_tombstone(other), do: {:error, {:invalid_consolidation_tombstone, other}}
+  defp append_tombstone(other, _opts), do: {:error, {:invalid_consolidation_tombstone, other}}
 
-  @spec append_tombstone_payload({:ok, map()} | :error, binary()) ::
+  @spec append_tombstone_payload({:ok, map()} | :error, binary(), keyword()) ::
           {:ok, term()} | {:error, term()}
-  defp append_tombstone_payload({:ok, payload}, _family), do: Manager.append(:tombstones, payload)
+  defp append_tombstone_payload({:ok, payload}, _family, opts),
+    do: Manager.append(:tombstones, payload, context_opts(payload, opts))
 
-  defp append_tombstone_payload(:error, family),
+  defp append_tombstone_payload(:error, family, _opts),
     do: {:error, {:invalid_consolidation_tombstone_family, family}}
 
   @spec tombstone_payload(map()) :: {:ok, map()} | :error
@@ -456,6 +616,12 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
       {:ok, payload}
     end
+  end
+
+  @spec context_opts(term(), keyword()) :: keyword()
+  defp context_opts(value, opts) do
+    scope = Scope.scope(value) || Keyword.get(opts, :scope)
+    Keyword.put(opts, :scope, scope)
   end
 
   @spec value(map(), atom(), term()) :: term()
@@ -617,11 +783,15 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     [
       %{
         id: "emb_#{moment.id}",
+        namespace: Scope.namespace(moment),
+        scope: Scope.scope(moment),
         source_id: moment.id,
         vector: moment.vector,
         binary_signature: moment.binary_signature,
         embedding: moment.embedding,
         metadata: %{
+          namespace: Scope.namespace(moment),
+          scope: Scope.scope(moment),
           stream: moment.stream,
           task_id: moment.task_id,
           kind: moment.kind,

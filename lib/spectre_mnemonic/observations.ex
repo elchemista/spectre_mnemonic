@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.Observations do
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Observation
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
@@ -36,17 +37,18 @@ defmodule SpectreMnemonic.Observations do
   def consolidate(opts \\ []) do
     # Observations are derived claims, not raw memory wearing a nicer jacket.
     # Group evidence first, then store the belief with counters and scars.
-    now = Keyword.get(opts, :now, DateTime.utc_now())
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      now = Keyword.get(opts, :now, DateTime.utc_now())
 
-    observations =
-      opts
-      |> source_moments()
-      |> Enum.filter(&visible?(&1, opts))
-      |> Enum.flat_map(&observation_entries(&1, opts))
-      |> build_observations(now, opts)
+      observations =
+        opts
+        |> source_moments()
+        |> Enum.filter(&visible?(&1, opts))
+        |> Enum.flat_map(&observation_entries(&1, opts))
+        |> build_observations(now, opts)
 
-    Enum.each(observations, &store_observation(&1, opts))
-    {:ok, observations}
+      persist_observations(observations, opts)
+    end
   end
 
   @doc """
@@ -60,19 +62,22 @@ defmodule SpectreMnemonic.Observations do
       iex> SpectreMnemonic.Observations.search("project owner", scope: {:agent, "planner"})
       {:ok, _observations}
   """
-  @spec search(term(), keyword()) :: {:ok, [Observation.t() | map()]}
+  @spec search(term(), keyword()) ::
+          {:ok, [Observation.t() | map()]} | {:error, :namespace_required}
   def search(cue, opts \\ []) do
-    active =
-      @observation_table
-      |> safe_tab2list()
-      |> Enum.map(fn {_id, observation} -> observation end)
-      |> Enum.filter(&visible?(&1, opts))
-      |> score_observations(cue)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      active =
+        @observation_table
+        |> safe_tab2list()
+        |> Enum.map(fn {_id, observation} -> observation end)
+        |> Enum.filter(&visible?(&1, opts))
+        |> score_observations(cue)
 
-    durable = durable_observations(cue, opts)
+      durable = durable_observations(cue, opts)
 
-    limit = Keyword.get(opts, :limit, 10)
-    {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+      limit = Keyword.get(opts, :limit, 10)
+      {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+    end
   end
 
   @doc """
@@ -91,6 +96,26 @@ defmodule SpectreMnemonic.Observations do
   def verify(observation_or_id, opts \\ [])
 
   def verify(%Observation{} = observation, opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         true <- Scope.match?(observation, opts) do
+      do_verify(observation, opts)
+    else
+      false -> {:error, :not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def verify(id, opts) when is_binary(id) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      case :ets.lookup(@observation_table, id) do
+        [{^id, observation}] -> verify(observation, opts)
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  @spec do_verify(Observation.t(), keyword()) :: {:ok, Observation.t()} | {:error, term()}
+  defp do_verify(observation, opts) do
     # Verification should feel like adding evidence, not editing history. The
     # counters move, confidence moves, and the old trail stays visible.
     now = Keyword.get(opts, :now, DateTime.utc_now())
@@ -122,20 +147,21 @@ defmodule SpectreMnemonic.Observations do
         state: state(proof_count, contradiction_count)
     }
 
-    store_observation(observation, opts)
-    {:ok, observation}
-  end
-
-  def verify(id, opts) when is_binary(id) do
-    case :ets.lookup(@observation_table, id) do
-      [{^id, observation}] -> verify(observation, opts)
-      [] -> {:error, :not_found}
+    case store_observation(observation, opts) do
+      :ok -> {:ok, observation}
+      {:error, _reason} = error -> error
     end
   end
 
   @spec durable_observations(term(), keyword()) :: [Observation.t() | map()]
   defp durable_observations(cue, opts) do
-    case safe_manager_search(cue, opts) do
+    result =
+      case Keyword.fetch(opts, :durable_results) do
+        {:ok, results} -> {:ok, results}
+        :error -> safe_manager_search(cue, opts)
+      end
+
+    case result do
       {:ok, results} ->
         results
         |> Enum.filter(&(Map.get(&1, :family) == :observations))
@@ -147,21 +173,44 @@ defmodule SpectreMnemonic.Observations do
     end
   end
 
-  @spec store_observation(Observation.t(), keyword()) :: :ok
+  @spec store_observation(Observation.t(), keyword()) :: :ok | {:error, term()}
   defp store_observation(%Observation{} = observation, opts) do
-    :ets.insert(@observation_table, {observation.id, observation})
-
     if Keyword.get(opts, :persist?, true) do
-      Manager.append(:observations, observation, Keyword.put(opts, :record_id, observation.id))
-      Governance.append_state(observation.id, observation.state, :observation_consolidated, opts)
+      with {:ok, _result} <- Manager.append(:observations, observation, opts),
+           :ok <-
+             Governance.append_state(
+               observation.id,
+               observation.state,
+               :observation_consolidated,
+               opts
+             ) do
+        :ets.insert(@observation_table, {observation.id, observation})
+        :ok
+      end
+    else
+      :ets.insert(@observation_table, {observation.id, observation})
+      :ok
     end
+  end
 
-    :ok
+  @spec persist_observations([Observation.t()], keyword()) ::
+          {:ok, [Observation.t()]} | {:error, term()}
+  defp persist_observations(observations, opts) do
+    Enum.reduce_while(observations, {:ok, []}, fn observation, {:ok, stored} ->
+      case store_observation(observation, opts) do
+        :ok -> {:cont, {:ok, [observation | stored]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, stored} -> {:ok, Enum.reverse(stored)}
+      {:error, _reason} = error -> error
+    end
   end
 
   @spec source_moments(keyword()) :: [map()]
   defp source_moments(opts) do
-    active = Focus.moments()
+    active = Focus.moments(opts)
 
     durable =
       if Keyword.get(opts, :include_durable?, true) do
@@ -275,6 +324,7 @@ defmodule SpectreMnemonic.Observations do
   @spec build_fact_observation(term(), binary(), map(), [map()], [map()], DateTime.t(), keyword()) ::
           Observation.t()
   defp build_fact_observation(scope, fact_key, fact, supports, weakens, now, opts) do
+    namespace = Identity.namespace!(opts)
     statement = "#{fact.subject} #{fact.attribute} is #{fact.value}"
     source_ids = supports |> Enum.map(& &1.moment.id) |> Enum.uniq()
     contradiction_count = length(weakens)
@@ -284,10 +334,11 @@ defmodule SpectreMnemonic.Observations do
     state = state(proof_count, contradiction_count)
     embedding = Service.embed(statement, opts)
     temporal = observation_temporal(supports, now)
-    id = Keyword.get(opts, :id) || stable_observation_id(scope, fact_key, fact.value)
+    id = Keyword.get(opts, :id) || stable_observation_id(namespace, scope, fact_key, fact.value)
 
     %Observation{
       id: id,
+      namespace: namespace,
       statement: statement,
       scope: scope,
       tags: Keyword.get(opts, :tags, []),
@@ -328,7 +379,7 @@ defmodule SpectreMnemonic.Observations do
             last_verified_at: temporal.last_verified_at || now
           }
         }
-        |> Map.put(:scope, scope)
+        |> Identity.put_context(Keyword.put(opts, :scope, scope))
         |> Temporal.put_metadata(temporal),
       inserted_at: now
     }
@@ -346,6 +397,7 @@ defmodule SpectreMnemonic.Observations do
   @spec build_typed_observation(term(), atom(), binary(), [map()], DateTime.t(), keyword()) ::
           Observation.t()
   defp build_typed_observation(scope, type, key, supports, now, opts) do
+    namespace = Identity.namespace!(opts)
     statement = hd(supports).statement
     source_ids = supports |> Enum.map(& &1.moment.id) |> Enum.uniq()
     proof_count = length(supports)
@@ -355,10 +407,11 @@ defmodule SpectreMnemonic.Observations do
     state = state(proof_count, 0)
     embedding = Service.embed(statement, opts)
     temporal = observation_temporal(supports, now)
-    id = Keyword.get(opts, :id) || stable_observation_id(scope, key, statement)
+    id = Keyword.get(opts, :id) || stable_observation_id(namespace, scope, key, statement)
 
     %Observation{
       id: id,
+      namespace: namespace,
       statement: statement,
       scope: scope,
       tags: Keyword.get(opts, :tags, []),
@@ -391,7 +444,7 @@ defmodule SpectreMnemonic.Observations do
             last_verified_at: temporal.last_verified_at || now
           }
         }
-        |> Map.put(:scope, scope)
+        |> Identity.put_context(Keyword.put(opts, :scope, scope))
         |> Temporal.put_metadata(temporal),
       inserted_at: now
     }
@@ -588,9 +641,9 @@ defmodule SpectreMnemonic.Observations do
   defp verified_trend(:contradicts), do: :contradicted
   defp verified_trend(_relation), do: :stable
 
-  @spec stable_observation_id(term(), binary(), binary()) :: binary()
-  defp stable_observation_id(scope, fact_key, value) do
-    hash = :crypto.hash(:sha256, :erlang.term_to_binary({scope, fact_key, value}))
+  @spec stable_observation_id(binary(), term(), binary(), binary()) :: binary()
+  defp stable_observation_id(namespace, scope, fact_key, value) do
+    hash = :crypto.hash(:sha256, :erlang.term_to_binary({namespace, scope, fact_key, value}))
     "obs_#{Base.encode16(hash, case: :lower) |> binary_part(0, 24)}"
   end
 

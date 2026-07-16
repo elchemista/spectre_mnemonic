@@ -29,6 +29,8 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_action_recipes,
     :mnemonic_observations,
     :mnemonic_mental_models,
+    :mnemonic_governance_states,
+    :mnemonic_governance_facts,
     :mnemonic_embedding_index,
     :mnemonic_embedding_labels
   ]
@@ -54,7 +56,9 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :secret_authorization_adapter)
     Application.delete_env(:spectre_mnemonic, :secret_crypto_adapter)
     Application.delete_env(:spectre_mnemonic, :plugs)
+    Application.delete_env(:spectre_mnemonic, :hot_memory)
     reset_disk_root()
+    SpectreMnemonic.Persistence.Manager.reset_dedupe()
     clear_memory()
 
     on_exit(fn ->
@@ -72,6 +76,7 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :secret_authorization_adapter)
       Application.delete_env(:spectre_mnemonic, :secret_crypto_adapter)
       Application.delete_env(:spectre_mnemonic, :plugs)
+      Application.delete_env(:spectre_mnemonic, :hot_memory)
       clear_memory()
       File.rm_rf!("mnemonic_data")
       File.rm_rf!("mnemonic_data_secondary")

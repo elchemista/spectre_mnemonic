@@ -10,6 +10,7 @@ defmodule SpectreMnemonic.Active.Router do
 
   alias SpectreMnemonic.Active.StreamServer
   alias SpectreMnemonic.Active.StreamSupervisor
+  alias SpectreMnemonic.Identity
 
   @doc "Starts the router process."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -23,7 +24,9 @@ defmodule SpectreMnemonic.Active.Router do
            %{signal: SpectreMnemonic.Memory.Signal.t(), moment: SpectreMnemonic.Memory.Moment.t()}}
           | {:error, term()}
   def signal(input, opts) do
-    GenServer.call(__MODULE__, {:signal, input, opts})
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:signal, input, opts})
+    end
   end
 
   @impl GenServer

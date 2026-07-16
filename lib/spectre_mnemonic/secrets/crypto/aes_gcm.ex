@@ -91,6 +91,8 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   @spec aad(map()) :: binary()
   defp aad(context) do
     [
+      Map.get(context, :namespace),
+      inspect(Map.get(context, :scope)),
       Map.get(context, :secret_id),
       Map.get(context, :memory_id),
       Map.get(context, :label)

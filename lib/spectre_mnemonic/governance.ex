@@ -1,55 +1,49 @@
 defmodule SpectreMnemonic.Governance do
   @moduledoc """
-  Lifecycle, provenance, and structured fact governance for durable memory.
+  Materialized, scoped lifecycle governance for memory.
 
-  Governance is stored as append-only `:memory_states` records so existing
-  memory structs stay backward compatible.
-
-  This module answers questions such as:
-
-    * Is a memory still visible in search?
-    * Which newer fact replaced an older fact?
-    * Where did this fact come from?
-    * Has this memory been promoted, pinned, marked stale, contradicted, or
-      forgotten?
-
-  The key design choice is append-only state. Memory payloads are not mutated
-  when their lifecycle changes; instead, state events are written beside them and
-  readers interpret the latest event.
+  Lifecycle changes remain append-only in persistent memory, while this process
+  owns a rebuildable ETS projection. All transitions pass through one explicit
+  state machine; terminal or pinned memories therefore cannot be silently
+  promoted by a later consolidation run.
   """
 
+  use GenServer
+
+  alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.Manager
 
+  @state_table :mnemonic_governance_states
+  @fact_table :mnemonic_governance_facts
   @states [:candidate, :short_term, :promoted, :pinned, :stale, :contradicted, :forgotten]
+  @terminal_states [:contradicted, :forgotten]
   @fact_attributes ~w(email phone age status birthday deadline owner)
   @default_stale_after_ms 30 * 24 * 60 * 60 * 1_000
+  @repeatable_reasons [:fact_verified, :observation_verified, :manual_verification]
+
+  @transitions %{
+    candidate: [:short_term, :promoted, :pinned, :stale, :contradicted, :forgotten],
+    short_term: [:promoted, :pinned, :stale, :contradicted, :forgotten],
+    promoted: [:pinned, :stale, :contradicted, :forgotten],
+    pinned: [:forgotten],
+    stale: [:promoted, :pinned, :contradicted, :forgotten],
+    contradicted: [:forgotten],
+    forgotten: []
+  }
 
   @type state ::
           :candidate | :short_term | :promoted | :pinned | :stale | :contradicted | :forgotten
 
-  @doc """
-  Returns known lifecycle states.
+  @doc false
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  ## Example
-
-      iex> SpectreMnemonic.Governance.states()
-      [:candidate, :short_term, :promoted, :pinned, :stale, :contradicted, :forgotten]
-  """
-  @spec states :: [state()]
+  @doc "Returns known lifecycle states."
+  @spec states() :: [state()]
   def states, do: @states
 
-  @doc """
-  Merges a normalized provenance map into metadata.
-
-  Existing provenance is preserved and caller-supplied provenance fields are
-  merged in. Use this when building derived records such as summaries,
-  observations, or consolidation outputs.
-
-  ## Example
-
-      iex> SpectreMnemonic.Governance.with_provenance(%{}, source_ids: ["mom_1"], provider: :adapter)
-      %{provenance: %{source_ids: ["mom_1"], provider: :adapter, observed_at: _observed_at}}
-  """
+  @doc "Merges normalized provenance into metadata."
   @spec with_provenance(map(), keyword()) :: map()
   def with_provenance(metadata, opts \\ []) when is_map(metadata) do
     provenance =
@@ -61,124 +55,83 @@ defmodule SpectreMnemonic.Governance do
     Map.put(metadata, :provenance, provenance)
   end
 
-  @doc """
-  Observes a persisted moment and writes state/fact governance events.
-
-  Plain moments get a lifecycle state event. Extracted value moments may also be
-  treated as facts: identical facts verify the current fact, newer conflicting
-  facts contradict the previous one unless it is pinned.
-
-  ## Example
-
-      iex> SpectreMnemonic.Governance.observe_moment(%{id: "mom_1", kind: :text, metadata: %{}})
-      :ok
-  """
-  @spec observe_moment(map(), keyword()) :: :ok
+  @doc "Observes a persisted moment and writes scoped state/fact governance."
+  @spec observe_moment(map(), keyword()) :: :ok | {:error, term()}
   def observe_moment(moment, opts \\ [])
 
   def observe_moment(%{id: id} = moment, opts) when is_binary(id) do
-    # Governance is where memories stop being "whatever got written last".
-    # Facts can verify, contradict, get stale, or be pinned. Annoying? yes.
-    # Better than treating old phone numbers like sacred scripture.
-    state =
-      normalize_state(Keyword.get(opts, :memory_state, Keyword.get(opts, :state, :short_term)))
+    opts = context_opts(moment, opts)
+    state = normalize_state(Keyword.get(opts, :memory_state, Keyword.get(opts, :state, :short_term)))
 
     case fact_claim(moment) do
-      nil ->
-        append_state(id, state, :observed, opts, %{kind: Map.get(moment, :kind)})
-
-      fact ->
-        govern_fact(moment, fact, state, opts)
+      nil -> append_state(id, state, :observed, opts, %{kind: Map.get(moment, :kind)})
+      fact -> govern_fact(moment, fact, state, opts)
     end
-
-    :ok
   end
 
   def observe_moment(_moment, _opts), do: :ok
 
-  @doc """
-  Writes promoted state events for consolidated moments.
-
-  Consolidation calls this after selected active moments have been written to
-  durable memory.
-  """
-  @spec promote_moments([map()], keyword()) :: :ok
+  @doc "Promotes only memories whose current state allows promotion."
+  @spec promote_moments([map()], keyword()) :: :ok | {:error, term()}
   def promote_moments(moments, opts \\ []) do
-    Enum.each(moments, fn
-      %{id: id} = moment when is_binary(id) ->
-        append_state(id, :promoted, :consolidated, opts, %{kind: Map.get(moment, :kind)})
+    Enum.reduce_while(moments, :ok, fn
+      %{id: id} = moment, :ok when is_binary(id) ->
+        event_opts = context_opts(moment, opts)
 
-      _other ->
-        :ok
+        case append_state(id, :promoted, :consolidated, event_opts, %{kind: Map.get(moment, :kind)}) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      _other, :ok ->
+        {:cont, :ok}
     end)
   end
 
-  @doc """
-  Writes forgotten state for a memory id.
-
-  Search hides memories whose latest lifecycle state is `:forgotten`.
-
-  ## Example
-
-      iex> SpectreMnemonic.Governance.forget("mom_1")
-      :ok
-  """
-  @spec forget(binary(), keyword()) :: :ok
-  def forget(id, opts \\ []) when is_binary(id) do
-    append_state(id, :forgotten, :forgotten, opts)
+  @doc "Returns whether consolidation may promote a memory in its scoped lifecycle."
+  @spec consolidatable?(map(), keyword()) :: boolean()
+  def consolidatable?(memory, opts \\ []) do
+    opts = context_opts(memory, opts)
+    state_for(Map.get(memory, :id), opts) in [nil, :candidate, :short_term, :stale]
   end
 
-  @doc """
-  Returns the latest lifecycle state for one memory id.
+  @doc "Writes a durable forgotten transition."
+  @spec forget(binary(), keyword()) :: :ok | {:error, term()}
+  def forget(id, opts \\ []) when is_binary(id),
+    do: append_state(id, :forgotten, :forgotten, opts)
 
-  ## Example
+  @doc "Reads the materialized lifecycle state for a namespace/scope/id key."
+  @spec state_for(binary() | nil, keyword()) :: state() | nil
+  def state_for(nil, _opts), do: nil
 
-      iex> SpectreMnemonic.Governance.state_for("mom_1")
-      :short_term
-  """
-  @spec state_for(binary(), keyword()) :: state() | nil
   def state_for(memory_id, opts \\ []) when is_binary(memory_id) do
-    {:ok, records} = Manager.replay(opts)
+    with {:ok, namespace} <- Identity.fetch_namespace(opts) do
+      key = {namespace, Keyword.get(opts, :scope), memory_id}
 
-    records
-    |> Enum.filter(&(&1.family == :memory_states))
-    |> Enum.map(& &1.payload)
-    |> Enum.filter(&(&1.memory_id == memory_id))
-    |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
-    |> List.first()
-    |> case do
-      nil -> nil
-      %{state: state} -> state
+      case safe_lookup(@state_table, key) do
+        [{^key, event}] -> event.state
+        [] -> nil
+      end
+    else
+      {:error, _reason} -> nil
     end
   end
 
-  @doc """
-  Returns true when a memory should be visible in default search.
-
-  Forgotten and contradicted memories are hidden by default. Stale memories are
-  still visible because they may remain useful with lower confidence.
-  """
+  @doc "Returns true unless the scoped lifecycle is contradicted or forgotten."
   @spec search_visible?(binary(), keyword()) :: boolean()
-  def search_visible?(memory_id, opts \\ []) do
-    state_for(memory_id, opts) not in [:forgotten, :contradicted]
-  end
+  def search_visible?(memory_id, opts \\ []),
+    do: state_for(memory_id, opts) not in @terminal_states
 
-  @doc """
-  Marks old unverified facts as stale unless pinned or already terminal.
-
-  This is a freshness policy for structured facts, not a deletion policy. It
-  appends `:stale` events so future searches and reflections can treat old facts
-  more cautiously while keeping their audit history.
-
-  ## Example
-
-      iex> SpectreMnemonic.Governance.decay(stale_after_ms: 86_400_000)
-      {:ok, %{stale: _count}}
-  """
+  @doc "Marks old verified facts stale without mutating their payloads."
   @spec decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
   def decay(opts \\ []) do
-    # Time matters. I kept seeing agents drag ancient facts into fresh work like
-    # they were still invited. Decay marks doubt without deleting the evidence.
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      do_decay(opts)
+    end
+  end
+
+  @spec do_decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
+  defp do_decay(opts) do
     stale_after_ms =
       opts
       |> Keyword.get(:stale_after_ms, Keyword.get(opts, :freshness_ms, @default_stale_after_ms))
@@ -187,54 +140,44 @@ defmodule SpectreMnemonic.Governance do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     cutoff = DateTime.add(now, -stale_after_ms, :millisecond)
 
-    with {:ok, records} <- Manager.replay(opts) do
-      states = memory_states(records)
-
-      stale_count =
-        records
-        |> Enum.filter(&(&1.family == :memory_states))
-        |> Enum.map(& &1.payload)
-        |> Enum.filter(&fact_state?/1)
-        |> Enum.uniq_by(& &1.memory_id)
-        |> Enum.count(fn state ->
-          should_stale?(state, states, cutoff)
-        end)
-
-      records
-      |> Enum.filter(&(&1.family == :memory_states))
-      |> Enum.map(& &1.payload)
+    candidates =
+      @state_table
+      |> safe_tab2list()
+      |> Enum.map(fn {_key, event} -> event end)
+      |> Enum.filter(&Scope.match?(&1, opts))
       |> Enum.filter(&fact_state?/1)
-      |> Enum.uniq_by(& &1.memory_id)
-      |> Enum.filter(&should_stale?(&1, states, cutoff))
-      |> Enum.each(fn state ->
-        append_state(state.memory_id, :stale, :freshness_decay, opts, %{
-          fact_key: state.metadata.fact_key,
-          fact_value: state.metadata.fact_value
-        })
+      |> Enum.filter(&should_stale?(&1, cutoff))
+
+    result =
+      Enum.reduce_while(candidates, :ok, fn event, :ok ->
+        event_opts = [namespace: event.namespace, scope: event.scope, now: now]
+
+        case append_state(event.memory_id, :stale, :freshness_decay, event_opts, %{
+               fact_key: event.metadata.fact_key,
+               fact_value: event.metadata.fact_value
+             }) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
       end)
 
-      {:ok, %{stale: stale_count}}
+    case result do
+      :ok -> {:ok, %{stale: length(candidates)}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  @doc """
-  Builds a state event payload.
-
-  This pure function is useful for tests and custom adapters that want to inspect
-  or persist state events themselves.
-
-  ## Example
-
-      iex> event = SpectreMnemonic.Governance.state_event("mom_1", :promoted, :manual)
-      iex> event.state
-      :promoted
-  """
+  @doc "Builds a namespaced lifecycle event payload."
   @spec state_event(binary(), state(), atom(), keyword(), map()) :: map()
   def state_event(memory_id, state, reason, opts \\ [], metadata \\ %{}) do
+    namespace = Identity.namespace!(opts)
+    scope = Keyword.get(opts, :scope)
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
     %{
-      id: Keyword.get(opts, :id) || id("mstate"),
+      id: Keyword.get(opts, :id) || Identity.generate("mstate", opts),
+      namespace: namespace,
+      scope: scope,
       memory_id: memory_id,
       state: normalize_state(state),
       reason: reason,
@@ -242,6 +185,7 @@ defmodule SpectreMnemonic.Governance do
       metadata:
         metadata
         |> Map.new()
+        |> Identity.put_context(Keyword.put(opts, :scope, scope))
         |> with_provenance(
           source_ids: [memory_id],
           provider: :spectre_mnemonic,
@@ -252,31 +196,128 @@ defmodule SpectreMnemonic.Governance do
     }
   end
 
-  @doc """
-  Extracts a normalized entity fact claim from a memory-like map.
-
-  Fact claims come from extracted value metadata when present, otherwise from a
-  small text heuristic for common attributes such as email, phone, age, status,
-  birthday, deadline, and owner.
-  """
-  @spec fact_claim(map()) :: map() | nil
-  def fact_claim(%{metadata: metadata} = moment) when is_map(metadata) do
-    from_extracted_value(moment) || from_text(moment)
-  end
-
-  def fact_claim(moment), do: from_text(moment)
-
-  @spec append_state(binary(), state(), atom(), keyword(), map()) :: :ok
+  @doc "Persists one valid transition and updates its materialized projection."
+  @spec append_state(binary(), state(), atom(), keyword(), map()) :: :ok | {:error, term()}
   def append_state(memory_id, state, reason, opts \\ [], metadata \\ %{}) do
-    event = state_event(memory_id, state, reason, opts, metadata)
-
-    case Manager.append(:memory_states, event, Keyword.put(opts, :record_id, event.id)) do
-      {:ok, _result} -> :ok
-      {:error, _reason} -> :ok
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:append_state, memory_id, state, reason, opts, metadata})
     end
   end
 
-  @spec govern_fact(map(), map(), state(), keyword()) :: :ok
+  @doc "Extracts a normalized entity fact claim from a memory-like map."
+  @spec fact_claim(map()) :: map() | nil
+  def fact_claim(%{metadata: metadata} = moment) when is_map(metadata),
+    do: from_extracted_value(moment) || from_text(moment)
+
+  def fact_claim(moment), do: from_text(moment)
+
+  @impl GenServer
+  def init(_opts) do
+    case rebuild_materialized() do
+      :ok -> {:ok, %{}}
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  @impl GenServer
+  def handle_call({:append_state, memory_id, state, reason, opts, metadata}, _from, server_state) do
+    target = normalize_state(state)
+    current = current_event(memory_id, opts)
+
+    reply =
+      cond do
+        repeated_noop?(current, target, reason) ->
+          :ok
+
+        valid_transition?(current, target) ->
+          event = state_event(memory_id, target, reason, opts, metadata)
+
+          case Manager.append(:memory_states, event,
+                 opts
+                 |> Keyword.put(:record_id, event.id)
+                 |> Keyword.put(:scope, event.scope)
+               ) do
+            {:ok, _result} ->
+              materialize(event)
+              :ok
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+
+        true ->
+          {:error, {:invalid_memory_transition, current_state(current), target}}
+      end
+
+    {:reply, reply, server_state}
+  end
+
+  @spec rebuild_materialized() :: :ok | {:error, term()}
+  defp rebuild_materialized do
+    :ets.delete_all_objects(@state_table)
+    :ets.delete_all_objects(@fact_table)
+
+    case Manager.replay(scopes: :all) do
+      {:ok, records} ->
+        records
+        |> Enum.filter(&(&1.family == :memory_states))
+        |> Enum.map(& &1.payload)
+        |> Enum.filter(&is_map/1)
+        |> Enum.sort_by(&event_timestamp/1)
+        |> Enum.each(&materialize_if_valid/1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec materialize_if_valid(map()) :: :ok
+  defp materialize_if_valid(event) do
+    opts = [namespace: Map.get(event, :namespace), scope: Map.get(event, :scope)]
+    current = current_event(Map.get(event, :memory_id), opts)
+
+    if valid_transition?(current, Map.get(event, :state)) or current_state(current) == event.state do
+      materialize(event)
+    end
+
+    :ok
+  end
+
+  @spec materialize(map()) :: :ok
+  defp materialize(event) do
+    key = state_key(event.namespace, event.scope, event.memory_id)
+    :ets.insert(@state_table, {key, event})
+    materialize_fact(event)
+    :ok
+  end
+
+  @spec materialize_fact(map()) :: :ok
+  defp materialize_fact(%{metadata: %{fact_key: fact_key}} = event) when is_binary(fact_key) do
+    key = {event.namespace, event.scope, fact_key}
+
+    cond do
+      event.state in @terminal_states ->
+        case safe_lookup(@fact_table, key) do
+          [{^key, %{memory_id: memory_id}}] when memory_id == event.memory_id ->
+            :ets.delete(@fact_table, key)
+
+          _other ->
+            :ok
+        end
+
+      event.reason == :conflicts_with_pinned_fact ->
+        :ok
+
+      true ->
+        :ets.insert(@fact_table, {key, event})
+    end
+
+    :ok
+  end
+
+  defp materialize_fact(_event), do: :ok
+
+  @spec govern_fact(map(), map(), state(), keyword()) :: :ok | {:error, term()}
   defp govern_fact(moment, fact, state, opts) do
     current = current_fact(fact.key, opts)
 
@@ -284,24 +325,25 @@ defmodule SpectreMnemonic.Governance do
       current == nil ->
         append_fact_state(moment, state, :fact_observed, fact, opts)
 
-      current.value == fact.value ->
+      fact_value(current) == fact.value ->
         append_fact_state(moment, state, :fact_verified, fact, opts)
 
       current.state == :pinned ->
         append_fact_state(moment, :candidate, :conflicts_with_pinned_fact, fact, opts)
 
       true ->
-        append_state(current.memory_id, :contradicted, :replaced_by_newer_fact, opts, %{
-          fact_key: fact.key,
-          fact_value: current.value,
-          replaced_by: moment.id
-        })
-
-        append_fact_state(moment, :promoted, :fact_replaced_previous, fact, opts)
+        with :ok <-
+               append_state(current.memory_id, :contradicted, :replaced_by_newer_fact, opts, %{
+                 fact_key: fact.key,
+                 fact_value: fact_value(current),
+                 replaced_by: moment.id
+               }) do
+          append_fact_state(moment, :promoted, :fact_replaced_previous, fact, opts)
+        end
     end
   end
 
-  @spec append_fact_state(map(), state(), atom(), map(), keyword()) :: :ok
+  @spec append_fact_state(map(), state(), atom(), map(), keyword()) :: :ok | {:error, term()}
   defp append_fact_state(moment, state, reason, fact, opts) do
     append_state(moment.id, state, reason, opts, %{
       kind: Map.get(moment, :kind),
@@ -314,69 +356,74 @@ defmodule SpectreMnemonic.Governance do
   end
 
   @spec current_fact(binary(), keyword()) :: map() | nil
-  defp current_fact(key, opts) do
-    {:ok, records} = Manager.replay(opts)
+  defp current_fact(fact_key, opts) do
+    namespace = Identity.namespace!(opts)
+    key = {namespace, Keyword.get(opts, :scope), fact_key}
 
-    records
-    |> Enum.filter(&(&1.family == :memory_states))
-    |> Enum.map(& &1.payload)
-    |> Enum.filter(fn state ->
-      get_in(state, [:metadata, :fact_key]) == key and
-        state.state in [:promoted, :pinned, :short_term, :candidate]
-    end)
-    |> Enum.reject(fn state ->
-      terminal_state?(state.memory_id, records)
-    end)
-    |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
-    |> List.first()
-    |> case do
-      nil ->
-        nil
-
-      state ->
-        %{
-          memory_id: state.memory_id,
-          state: state.state,
-          value: get_in(state, [:metadata, :fact_value])
-        }
+    case safe_lookup(@fact_table, key) do
+      [{^key, event}] -> event
+      [] -> nil
     end
   end
 
-  @spec terminal_state?(binary(), [map()]) :: boolean()
-  defp terminal_state?(memory_id, records) do
-    latest =
-      records
-      |> Enum.filter(&(&1.family == :memory_states))
-      |> Enum.map(& &1.payload)
-      |> Enum.filter(&(&1.memory_id == memory_id))
-      |> Enum.sort_by(&DateTime.to_unix(&1.inserted_at, :microsecond), :desc)
-      |> List.first()
+  @spec current_event(binary() | nil, keyword()) :: map() | nil
+  defp current_event(nil, _opts), do: nil
 
-    match?(%{state: state} when state in [:contradicted, :forgotten], latest)
+  defp current_event(memory_id, opts) do
+    key = state_key(Identity.namespace!(opts), Keyword.get(opts, :scope), memory_id)
+
+    case safe_lookup(@state_table, key) do
+      [{^key, event}] -> event
+      [] -> nil
+    end
   end
 
-  @spec memory_states([map()]) :: map()
-  defp memory_states(records) do
-    records
-    |> Enum.filter(&(&1.family == :memory_states))
-    |> Enum.map(& &1.payload)
-    |> Enum.group_by(& &1.memory_id)
-    |> Map.new(fn {memory_id, states} ->
-      latest =
-        Enum.max_by(states, &DateTime.to_unix(&1.inserted_at, :microsecond), fn -> nil end)
+  @spec state_key(binary(), term(), binary()) :: tuple()
+  defp state_key(namespace, scope, memory_id), do: {namespace, scope, memory_id}
 
-      {memory_id, latest}
-    end)
+  @spec valid_transition?(map() | nil, state()) :: boolean()
+  defp valid_transition?(nil, target), do: target in @states
+
+  defp valid_transition?(current, target) do
+    current.state == target or target in Map.fetch!(@transitions, current.state)
   end
 
-  @spec should_stale?(map(), map(), DateTime.t()) :: boolean()
-  defp should_stale?(state, states, cutoff) do
-    latest = Map.get(states, state.memory_id)
-    last_verified = get_in(state, [:metadata, :provenance, :last_verified_at])
-    observed = get_in(state, [:metadata, :provenance, :observed_at]) || state.inserted_at
+  @spec repeated_noop?(map() | nil, state(), atom()) :: boolean()
+  defp repeated_noop?(nil, _target, _reason), do: false
+
+  defp repeated_noop?(current, target, reason),
+    do: current.state == target and reason not in @repeatable_reasons
+
+  @spec current_state(map() | nil) :: state() | nil
+  defp current_state(nil), do: nil
+  defp current_state(event), do: event.state
+
+  @spec fact_value(map()) :: term()
+  defp fact_value(event), do: get_in(event, [:metadata, :fact_value])
+
+  @spec context_opts(map(), keyword()) :: keyword()
+  defp context_opts(memory, opts) do
+    namespace = Identity.namespace(memory) || Identity.namespace!(opts)
+
+    scope =
+      cond do
+        is_map(memory) and Map.has_key?(memory, :scope) -> Map.get(memory, :scope)
+        is_map(memory) and Map.has_key?(memory, "scope") -> Map.get(memory, "scope")
+        true -> Scope.scope(memory) || Keyword.get(opts, :scope)
+      end
+
+    opts
+    |> Keyword.put(:namespace, namespace)
+    |> Keyword.put(:scope, scope)
+  end
+
+  @spec should_stale?(map(), DateTime.t()) :: boolean()
+  defp should_stale?(event, cutoff) do
+    last_verified = get_in(event, [:metadata, :provenance, :last_verified_at])
+    observed = get_in(event, [:metadata, :provenance, :observed_at]) || event.inserted_at
     reference = last_verified || observed
 
-    latest.state not in [:pinned, :stale, :contradicted, :forgotten] and
+    event.state not in [:pinned, :stale, :contradicted, :forgotten] and
       match?(%DateTime{}, reference) and DateTime.compare(reference, cutoff) == :lt
   end
 
@@ -468,13 +515,25 @@ defmodule SpectreMnemonic.Governance do
   defp normalize_state(_state), do: :short_term
 
   @spec normalize_text(term()) :: binary()
-  defp normalize_text(value) do
-    value
-    |> to_string()
-    |> String.trim()
-    |> String.downcase()
+  defp normalize_text(value), do: value |> to_string() |> String.trim() |> String.downcase()
+
+  @spec event_timestamp(map()) :: integer()
+  defp event_timestamp(%{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp event_timestamp(_event), do: 0
+
+  @spec safe_lookup(atom(), term()) :: list()
+  defp safe_lookup(table, key) do
+    :ets.lookup(table, key)
+  rescue
+    ArgumentError -> []
   end
 
-  @spec id(binary()) :: binary()
-  defp id(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+  @spec safe_tab2list(atom()) :: list()
+  defp safe_tab2list(table) do
+    :ets.tab2list(table)
+  rescue
+    ArgumentError -> []
+  end
 end

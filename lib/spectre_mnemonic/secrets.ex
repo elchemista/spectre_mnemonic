@@ -11,6 +11,8 @@ defmodule SpectreMnemonic.Secrets do
   so adapters and lower-level tests can exercise the secret boundary directly.
   """
 
+  alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Secrets.Crypto.AESGCM
 
@@ -43,9 +45,20 @@ defmodule SpectreMnemonic.Secrets do
       {:ok, %SpectreMnemonic.Memory.Secret{locked?: false, revealed?: true}}
   """
   @spec reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
-  def reveal(%Secret{locked?: false} = secret, _opts), do: {:ok, secret}
-
   def reveal(%Secret{} = secret, opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         true <- Scope.match?(secret, opts) do
+      do_reveal(secret, opts)
+    else
+      false -> {:error, :secret_out_of_scope}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec do_reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
+  defp do_reveal(%Secret{locked?: false} = secret, _opts), do: {:ok, secret}
+
+  defp do_reveal(%Secret{} = secret, opts) do
     # Recall can show that a secret exists. Plaintext needs authorization first.
     # The model does not get to wink and say it had a good reason.
     request = authorization_request(secret, opts)
@@ -132,6 +145,8 @@ defmodule SpectreMnemonic.Secrets do
   defp authorization_request(secret, opts) do
     %{
       operation: :recall,
+      namespace: secret.namespace,
+      scope: secret.scope,
       secret_id: secret.secret_id,
       memory_id: secret.id,
       signal_id: secret.signal_id,

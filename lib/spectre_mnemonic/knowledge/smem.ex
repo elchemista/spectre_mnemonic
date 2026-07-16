@@ -7,16 +7,20 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   timestamp, payload length, CRC32, and compressed Erlang term payload.
   """
 
+  use GenServer
+
   @magic "SKNW"
   @version 1
   @header_bytes byte_size(@magic) + 1 + 8 + 8 + 4 + 4
   @max_text_graphemes 2_000
 
+  alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Result
 
   @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
   @event_type_by_string Map.new(@event_types, &{Atom.to_string(&1), &1})
-  @event_keys ~w(id type text summary name steps value source_id usage metadata inserted_at)a
+  @event_keys ~w(id namespace scope type text summary name steps value source_id usage metadata inserted_at)a
   @event_key_by_string Map.new(@event_keys, &{Atom.to_string(&1), &1})
 
   @type event_type ::
@@ -24,6 +28,8 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @type event :: %{
           optional(:id) => binary(),
+          optional(:namespace) => binary(),
+          optional(:scope) => term(),
           optional(:type) => event_type(),
           optional(:text) => binary(),
           optional(:summary) => binary(),
@@ -36,26 +42,45 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
           optional(:inserted_at) => DateTime.t()
         }
 
+  @doc false
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @impl GenServer
+  def init(_opts), do: {:ok, %{}}
+
   @doc "Appends one compact knowledge event."
   @spec append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
   def append(event, opts \\ []) when is_map(event) do
-    root = data_root(opts)
-    ensure_root!(root)
-    path = active_path(root)
-    write_event(path, event, next_seq(path))
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- validate_event_context(event, opts) do
+      call_writer({:append, event, opts})
+    end
   end
 
   @doc "Appends several compact knowledge events."
   @spec append_many([event()], keyword()) :: {:ok, [pos_integer()]} | {:error, term()}
   def append_many(events, opts \\ []) when is_list(events) do
-    Result.collect_ok(events, &append(&1, opts))
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- validate_event_contexts(events, opts) do
+      call_writer({:append_many, events, opts})
+    end
   end
 
   @doc "Replays complete events from `knowledge.smem`."
   @spec replay(keyword()) :: {:ok, [event()]}
   def replay(opts \\ []) do
-    root = data_root(opts)
-    {:ok, replay_path(active_path(root))}
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      root = data_root(opts)
+
+      events =
+        root
+        |> active_path()
+        |> replay_path()
+        |> Enum.filter(&Scope.match?(&1, opts))
+
+      {:ok, events}
+    end
   end
 
   @doc "Reduces complete framed events from `knowledge.smem` without loading the whole file."
@@ -63,22 +88,59 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
           {:ok, acc} | {:error, term()}
         when acc: term()
   def reduce(opts \\ [], acc, fun) when is_function(fun, 2) do
-    root = data_root(opts)
-    reduce_path(active_path(root), acc, fun)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      root = data_root(opts)
+
+      reduce_path(active_path(root), acc, fn {_seq, _timestamp, event} = frame, acc ->
+        if Scope.match?(event, opts), do: fun.(frame, acc), else: {:cont, acc}
+      end)
+    end
   end
 
   @doc "Rewrites `knowledge.smem` with a compact replacement event set."
   @spec replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def replace(events, opts \\ []) when is_list(events) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- validate_event_contexts(events, opts) do
+      call_writer({:replace, events, opts})
+    end
+  end
+
+  @impl GenServer
+  def handle_call({:append, event, opts}, _from, state) do
+    {:reply, do_append(event, opts), state}
+  end
+
+  def handle_call({:append_many, events, opts}, _from, state) do
+    result = Result.collect_ok(events, &do_append(&1, opts))
+    {:reply, result, state}
+  end
+
+  def handle_call({:replace, events, opts}, _from, state) do
+    {:reply, do_replace(events, opts), state}
+  end
+
+  @spec do_append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
+  defp do_append(event, opts) do
+    root = data_root(opts)
+    ensure_root!(root)
+    path = active_path(root)
+    write_event(path, event, next_seq(path), opts)
+  end
+
+  @spec do_replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  defp do_replace(events, opts) do
     # Replace writes a temp file first because compact knowledge should not
     # vanish halfway through a rewrite. I like boring file moves. They pay rent.
     root = data_root(opts)
     ensure_root!(root)
     path = active_path(root)
     tmp_path = path <> ".tmp"
+    preserved = path |> replay_path() |> Enum.reject(&Scope.match?(&1, opts))
+    replacement = preserved ++ Enum.map(events, &normalize_event(&1, opts))
 
     with :ok <- File.write(tmp_path, "", [:binary]),
-         {:ok, _seqs} <- append_many_to_path(tmp_path, events),
+         {:ok, _seqs} <- append_many_to_path(tmp_path, replacement),
          :ok <- File.rename(tmp_path, path) do
       reset_seq(path)
       {:ok, length(events)}
@@ -106,16 +168,26 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec event_types :: [event_type()]
   def event_types, do: @event_types
 
-  @spec normalize_event(map()) :: event()
-  def normalize_event(event) do
+  @spec normalize_event(map(), keyword()) :: event()
+  def normalize_event(event, opts \\ []) do
     # Compact events come from people, adapters, and tests with opinions. Clamp
     # the shape here before the tiny knowledge log becomes a junk drawer.
     event = atomize_known_keys(event)
     now = DateTime.utc_now()
     type = event |> Map.get(:type, :fact) |> normalize_type()
+    namespace = Identity.namespace!(opts)
+    scope = if Keyword.has_key?(opts, :scope), do: Keyword.get(opts, :scope), else: Map.get(event, :scope)
+    event_namespace = Map.get(event, :namespace)
+
+    if event_namespace not in [nil, namespace] do
+      raise ArgumentError,
+            "knowledge event namespace #{inspect(event_namespace)} does not match #{inspect(namespace)}"
+    end
 
     %{
-      id: Map.get(event, :id) || id("know_evt"),
+      id: Map.get(event, :id) || Identity.generate("know_evt", opts),
+      namespace: namespace,
+      scope: scope,
       type: type,
       text:
         compact_text(Map.get(event, :text) || Map.get(event, :summary) || Map.get(event, :name)),
@@ -125,20 +197,33 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
       value: Map.get(event, :value),
       source_id: Map.get(event, :source_id),
       usage: Map.new(Map.get(event, :usage, %{})),
-      metadata: Map.new(Map.get(event, :metadata, %{})),
+      metadata:
+        event
+        |> Map.get(:metadata, %{})
+        |> Map.new()
+        |> Identity.put_context(Keyword.put(opts, :scope, scope)),
       inserted_at: Map.get(event, :inserted_at) || now
     }
   end
 
-  @spec append_many_to_path(Path.t(), [event()]) :: {:ok, [pos_integer()]} | {:error, term()}
+  @spec append_many_to_path(Path.t(), [event()]) ::
+          {:ok, [pos_integer()]} | {:error, term()}
   defp append_many_to_path(path, events) do
     events
     |> Enum.with_index(1)
-    |> Result.collect_ok(fn {event, seq} -> write_event(path, event, seq) end)
+    |> Result.collect_ok(fn {event, seq} -> write_normalized_event(path, event, seq) end)
   end
 
-  @spec write_event(Path.t(), event(), pos_integer()) :: {:ok, pos_integer()} | {:error, term()}
-  defp write_event(path, event, seq) do
+  @spec write_event(Path.t(), event(), pos_integer(), keyword()) ::
+          {:ok, pos_integer()} | {:error, term()}
+  defp write_event(path, event, seq, opts) do
+    event = normalize_event(event, opts)
+    write_normalized_event(path, event, seq)
+  end
+
+  @spec write_normalized_event(Path.t(), event(), pos_integer()) ::
+          {:ok, pos_integer()} | {:error, term()}
+  defp write_normalized_event(path, event, seq) do
     case File.write(path, frame(seq, event), [:append, :binary]) do
       :ok -> {:ok, seq}
       {:error, reason} -> {:error, reason}
@@ -147,7 +232,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @spec frame(pos_integer(), event()) :: binary()
   defp frame(seq, event) do
-    payload = event |> normalize_event() |> :erlang.term_to_binary([:compressed])
+    payload = :erlang.term_to_binary(event, [:compressed])
     crc = :erlang.crc32(payload)
     timestamp = System.system_time(:millisecond)
 
@@ -266,11 +351,20 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
         when acc: term()
   defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun) do
     if :erlang.crc32(payload) == crc do
-      frame = {seq, timestamp, :erlang.binary_to_term(payload)}
-      continue_frame(io, frame, acc, fun)
+      case decode_payload(payload) do
+        {:ok, event} -> continue_frame(io, {seq, timestamp, event}, acc, fun)
+        :error -> acc
+      end
     else
       acc
     end
+  end
+
+  @spec decode_payload(binary()) :: {:ok, term()} | :error
+  defp decode_payload(payload) do
+    {:ok, :erlang.binary_to_term(payload, [:safe])}
+  rescue
+    _exception -> :error
   end
 
   @spec continue_frame(File.io_device(), tuple(), acc, (tuple(), acc ->
@@ -310,6 +404,41 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   defp normalize_type(_type), do: :fact
 
+  @spec validate_event_contexts([event()], keyword()) :: :ok | {:error, term()}
+  defp validate_event_contexts(events, opts) do
+    Enum.reduce_while(events, :ok, fn event, :ok ->
+      case validate_event_context(event, opts) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  @spec validate_event_context(event(), keyword()) :: :ok | {:error, term()}
+  defp validate_event_context(event, opts) when is_map(event) do
+    namespace = Identity.namespace!(opts)
+    event = atomize_known_keys(event)
+    event_namespace = Map.get(event, :namespace)
+    event_scope = Map.get(event, :scope)
+
+    cond do
+      event_namespace not in [nil, namespace] ->
+        {:error, {:namespace_mismatch, namespace, event_namespace}}
+
+      Keyword.has_key?(opts, :scope) and event_scope not in [nil, Keyword.get(opts, :scope)] ->
+        {:error, {:scope_mismatch, Keyword.get(opts, :scope), event_scope}}
+
+      Keyword.has_key?(opts, :scopes) and Keyword.get(opts, :scopes) != :all and
+          not is_nil(event_scope) and event_scope not in List.wrap(Keyword.get(opts, :scopes)) ->
+        {:error, {:scope_mismatch, Keyword.get(opts, :scopes), event_scope}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_event_context(_event, _opts), do: {:error, :invalid_knowledge_event}
+
   @spec compact_text(term()) :: binary() | nil
   defp compact_text(nil), do: nil
 
@@ -325,6 +454,11 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     |> compact_text()
   end
 
-  @spec id(binary()) :: binary()
-  defp id(prefix), do: "#{prefix}_#{System.unique_integer([:positive, :monotonic])}"
+  @spec call_writer(term()) :: term()
+  defp call_writer(message) do
+    case Process.whereis(__MODULE__) do
+      nil -> {:error, :knowledge_writer_not_started}
+      _pid -> GenServer.call(__MODULE__, message, 30_000)
+    end
+  end
 end

@@ -9,6 +9,7 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   """
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Base
   alias SpectreMnemonic.Knowledge.SMEM
 
@@ -33,21 +34,23 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   @spec compact_knowledge(keyword()) ::
           {:ok, %{events: [map()], count: non_neg_integer()}} | {:error, term()}
   def compact_knowledge(opts \\ []) do
-    cfg = Base.config(opts)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      cfg = Base.config(opts)
 
-    with {:ok, existing_events} <- SMEM.replay(cfg),
-         input <- build_input(existing_events, cfg, opts),
-         {:ok, compacted} <- run_adapter(input, opts),
-         {:ok, events} <- normalize_output(compacted),
-         events <- add_marker(events),
-         {:ok, count} <- SMEM.replace(events, cfg) do
-      {:ok, %{events: events, count: count}}
+      with {:ok, existing_events} <- SMEM.replay(cfg),
+           input <- build_input(existing_events, cfg, opts),
+           {:ok, compacted} <- run_adapter(input, opts),
+           {:ok, events} <- normalize_output(compacted, cfg),
+           events <- add_marker(events, cfg),
+           {:ok, count} <- SMEM.replace(events, cfg) do
+        {:ok, %{events: events, count: count}}
+      end
     end
   end
 
   @spec build_input([map()], keyword(), keyword()) :: map()
   defp build_input(existing_events, cfg, opts) do
-    moments = Focus.moments()
+    moments = Focus.moments(cfg)
 
     # The adapter gets a bounded bundle, not the keys to the basement. I wanted
     # model-shaped intent here, while the application still decides consequences.
@@ -121,20 +124,22 @@ defmodule SpectreMnemonic.Knowledge.Compact do
     dedupe_events(events)
   end
 
-  @spec normalize_output(term()) :: {:ok, [map()]} | {:error, term()}
-  defp normalize_output({:ok, output}), do: normalize_output(output)
-  defp normalize_output({:error, reason}), do: {:error, reason}
-  defp normalize_output(output) when is_list(output), do: {:ok, normalize_events(output)}
+  @spec normalize_output(term(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp normalize_output({:ok, output}, opts), do: normalize_output(output, opts)
+  defp normalize_output({:error, reason}, _opts), do: {:error, reason}
 
-  defp normalize_output(output) when is_map(output) do
+  defp normalize_output(output, opts) when is_list(output),
+    do: {:ok, normalize_events(output, opts)}
+
+  defp normalize_output(output, opts) when is_map(output) do
     events =
       @output_types
       |> Enum.flat_map(&events_from_output(output, &1))
 
-    {:ok, normalize_events(events)}
+    {:ok, normalize_events(events, opts)}
   end
 
-  defp normalize_output(other), do: {:error, {:invalid_compact_output, other}}
+  defp normalize_output(other, _opts), do: {:error, {:invalid_compact_output, other}}
 
   @spec events_from_output(map(), atom()) :: [map()]
   defp events_from_output(output, :summary) do
@@ -152,16 +157,16 @@ defmodule SpectreMnemonic.Knowledge.Compact do
     |> Enum.map(&event_from_output(&1, type))
   end
 
-  @spec normalize_events([term()]) :: [map()]
-  defp normalize_events(events) do
+  @spec normalize_events([term()], keyword()) :: [map()]
+  defp normalize_events(events, opts) do
     events
     |> Enum.filter(&is_map/1)
-    |> Enum.map(&SMEM.normalize_event/1)
+    |> Enum.map(&SMEM.normalize_event(&1, opts))
     |> dedupe_events()
   end
 
-  @spec add_marker([map()]) :: [map()]
-  defp add_marker(events) do
+  @spec add_marker([map()], keyword()) :: [map()]
+  defp add_marker(events, opts) do
     marker = %{
       type: :compaction_marker,
       text: "knowledge compacted",
@@ -169,12 +174,14 @@ defmodule SpectreMnemonic.Knowledge.Compact do
       inserted_at: DateTime.utc_now()
     }
 
-    events ++ [SMEM.normalize_event(marker)]
+    events ++ [SMEM.normalize_event(marker, opts)]
   end
 
   @spec event_from_moment(map(), atom()) :: map()
   defp event_from_moment(moment, type) do
     %{
+      namespace: Map.get(moment, :namespace),
+      scope: Map.get(moment, :scope),
       type: type,
       text: compact_moment_text(moment.text),
       source_id: moment.id,

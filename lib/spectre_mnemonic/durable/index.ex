@@ -15,6 +15,8 @@ defmodule SpectreMnemonic.Durable.Index do
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
+  alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.SearchResult
 
   @indexed_families [
     :moments,
@@ -43,7 +45,7 @@ defmodule SpectreMnemonic.Durable.Index do
   def upsert(_record), do: :ok
 
   @doc "Searches durable memory with local hybrid scoring."
-  @spec search(term(), keyword()) :: {:ok, [map()]}
+  @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]}
   def search(cue, opts \\ []), do: call_if_running({:search, cue, opts}, {:ok, []})
 
   @doc "Rebuilds the index from persistent replay."
@@ -90,7 +92,7 @@ defmodule SpectreMnemonic.Durable.Index do
   defp rebuild_state(_state, opts) do
     # The append log is truth; this index is just a fast opinion rebuilt from
     # truth. If it gets confused, replay wins. Very old-fashioned, very useful.
-    {:ok, records} = Manager.replay(opts)
+    {:ok, records} = Manager.replay(Keyword.put(opts, :scopes, :all))
 
     records
     |> Enum.reduce(empty_state(), &absorb_record/2)
@@ -104,24 +106,26 @@ defmodule SpectreMnemonic.Durable.Index do
   end
 
   @spec absorb_record(Record.t(), map()) :: map()
-  defp absorb_record(%Record{family: :memory_states, payload: payload}, state)
+  defp absorb_record(%Record{family: :memory_states, payload: payload} = record, state)
        when is_map(payload) do
     memory_id = Map.get(payload, :memory_id)
 
     if is_binary(memory_id) do
+      state_key = {record.namespace, record.scope, memory_id}
+
       Map.update!(state, :states, fn states ->
-        Map.update(states, memory_id, [payload], &[payload | &1])
+        Map.update(states, state_key, [payload], &[payload | &1])
       end)
     else
       state
     end
   end
 
-  defp absorb_record(%Record{family: :tombstones, payload: payload}, state)
+  defp absorb_record(%Record{family: :tombstones, payload: payload} = record, state)
        when is_map(payload) do
     payload
     |> Map.get(:id)
-    |> absorb_tombstone(payload, state)
+    |> absorb_tombstone(record, payload, state)
   end
 
   defp absorb_record(%Record{family: family} = record, state) when family in @indexed_families do
@@ -133,17 +137,20 @@ defmodule SpectreMnemonic.Durable.Index do
 
   defp absorb_record(_record, state), do: state
 
-  @spec absorb_tombstone(term(), map(), map()) :: map()
-  defp absorb_tombstone(memory_id, payload, state) when is_binary(memory_id) do
+  @spec absorb_tombstone(term(), Record.t(), map(), map()) :: map()
+  defp absorb_tombstone(memory_id, record, payload, state) when is_binary(memory_id) do
+    state_key = {record.namespace, record.scope, memory_id}
+    doc_key = {record.namespace, record.scope, Map.get(payload, :family), memory_id}
+
     state
-    |> Map.update!(:states, &put_tombstone_state(&1, memory_id, payload))
-    |> Map.update!(:docs, &remove_docs_for_memory(&1, memory_id))
+    |> Map.update!(:states, &put_tombstone_state(&1, state_key, payload))
+    |> Map.update!(:docs, &Map.delete(&1, doc_key))
   end
 
-  defp absorb_tombstone(_memory_id, _payload, state), do: state
+  defp absorb_tombstone(_memory_id, _record, _payload, state), do: state
 
-  @spec put_tombstone_state(map(), binary(), map()) :: map()
-  defp put_tombstone_state(states, memory_id, payload) do
+  @spec put_tombstone_state(map(), {binary(), term(), binary()}, map()) :: map()
+  defp put_tombstone_state(states, {_namespace, _scope, memory_id} = state_key, payload) do
     tombstone = %{
       id: "mstate_tombstone_#{memory_id}",
       memory_id: memory_id,
@@ -153,14 +160,7 @@ defmodule SpectreMnemonic.Durable.Index do
       inserted_at: Map.get(payload, :forgotten_at, DateTime.utc_now())
     }
 
-    Map.update(states, memory_id, [tombstone], &[tombstone | &1])
-  end
-
-  @spec remove_docs_for_memory(map(), binary()) :: map()
-  defp remove_docs_for_memory(docs, memory_id) do
-    docs
-    |> Enum.reject(fn {_key, doc} -> doc.memory_id == memory_id end)
-    |> Map.new()
+    Map.update(states, state_key, [tombstone], &[tombstone | &1])
   end
 
   @spec doc_from_record(Record.t()) :: doc() | nil
@@ -181,11 +181,15 @@ defmodule SpectreMnemonic.Durable.Index do
 
       true ->
         terms = terms(text)
+        state_key = {record.namespace, record.scope, payload_lifecycle_id(record, memory_id)}
 
         %{
-          key: "#{record.family}:#{memory_id}",
+          key: {record.namespace, record.scope, record.family, memory_id},
           id: record.id,
           memory_id: memory_id,
+          state_key: state_key,
+          namespace: record.namespace,
+          scope: record.scope,
           family: record.family,
           record: record,
           text: text,
@@ -223,37 +227,47 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec apply_hidden_states(map(), map()) :: map()
   defp apply_hidden_states(docs, states) do
     Enum.reject(docs, fn {_key, doc} ->
-      latest_state(doc.memory_id, states) in @hidden_states
+      latest_state(doc.state_key, states) in @hidden_states
     end)
     |> Map.new()
   end
 
-  @spec search_state(map(), term(), keyword()) :: [map()]
+  @spec search_state(map(), term(), keyword()) :: [SearchResult.t()]
   defp search_state(%{docs: docs, total_docs: total_docs} = state, cue, opts) do
     limit = Keyword.get(opts, :limit, 10)
     query = cue_text(cue)
     query_terms = terms(query)
     query_entities = entities(query)
-    embedding = Service.embed(cue, opts)
+    embedding = query_embedding(cue, opts)
 
     docs
     |> Map.values()
-    |> Enum.filter(&visible?(&1.record.payload, opts))
+    |> Enum.filter(&visible?(&1.record, opts))
     |> Enum.map(fn doc ->
       score_doc(doc, query, query_terms, query_entities, embedding, state)
     end)
     |> Enum.filter(&(&1.score > 0 and total_docs > 0))
     |> Enum.sort_by(fn result ->
-      {-result.score, -DateTime.to_unix(result.inserted_at, :microsecond), result.id}
+      {-result.score, -result_timestamp(result), result.id}
     end)
     |> Enum.take(limit)
-    |> Enum.map(&Map.drop(&1, [:inserted_at]))
   end
 
-  @spec visible?(map(), keyword()) :: boolean()
-  defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
+  @spec query_embedding(term(), keyword()) :: map()
+  defp query_embedding(%QueryContext{embedding: embedding}, _opts), do: embedding || %{}
+  defp query_embedding(cue, opts), do: Service.embed(cue, opts)
 
-  @spec score_doc(doc(), binary(), [binary()], [binary()], map(), map()) :: map()
+  @spec result_timestamp(SearchResult.t()) :: integer()
+  defp result_timestamp(%SearchResult{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp result_timestamp(_result), do: 0
+
+  @spec visible?(Record.t(), keyword()) :: boolean()
+  defp visible?(%Record{} = record, opts),
+    do: Scope.match?(record, opts) and Temporal.match?(record.payload, opts)
+
+  @spec score_doc(doc(), binary(), [binary()], [binary()], map(), map()) :: SearchResult.t()
   defp score_doc(doc, query, query_terms, query_entities, embedding, state) do
     bm25 = bm25_score(doc, query_terms, state)
 
@@ -263,23 +277,24 @@ defmodule SpectreMnemonic.Durable.Index do
     exact = exact_score(doc, query_terms)
     entity = entity_score(doc.entities, query_entities)
     vector = vector_score(doc, embedding)
-    lifecycle = lifecycle_score(doc.memory_id, state.states)
+    lifecycle = lifecycle_score(doc.state_key, state.states)
     score = bm25 + phrase + exact + entity + vector + lifecycle
 
-    %{
+    %SearchResult{
       source: :persistent,
+      namespace: doc.namespace,
+      scope: doc.scope,
       family: doc.family,
       id: doc.memory_id,
       record_id: doc.id,
       score: score,
-      bm25_score: bm25,
-      vector_score: vector,
-      lifecycle_score: lifecycle,
-      state: latest_state(doc.memory_id, state.states),
-      text: doc.text,
+      state: latest_state(doc.state_key, state.states),
       record: doc.record.payload,
+      text: doc.text,
       provenance: doc.provenance,
-      inserted_at: doc.inserted_at
+      inserted_at: doc.inserted_at,
+      scores: %{bm25: bm25, vector: vector, lifecycle: lifecycle},
+      metadata: %{namespace: doc.namespace, scope: doc.scope}
     }
   end
 
@@ -332,9 +347,9 @@ defmodule SpectreMnemonic.Durable.Index do
 
   defp vector_score(_doc, _embedding), do: 0.0
 
-  @spec lifecycle_score(binary(), map()) :: float()
-  defp lifecycle_score(memory_id, states) do
-    case latest_state(memory_id, states) do
+  @spec lifecycle_score(term(), map()) :: float()
+  defp lifecycle_score(state_key, states) do
+    case latest_state(state_key, states) do
       :pinned -> 5.0
       :promoted -> 2.0
       :stale -> -2.0
@@ -344,10 +359,10 @@ defmodule SpectreMnemonic.Durable.Index do
     end
   end
 
-  @spec latest_state(binary(), map()) :: atom() | nil
-  defp latest_state(memory_id, states) do
+  @spec latest_state(term(), map()) :: atom() | nil
+  defp latest_state(state_key, states) do
     states
-    |> Map.get(memory_id, [])
+    |> Map.get(state_key, [])
     |> Enum.max_by(&DateTime.to_unix(&1.inserted_at, :microsecond), fn -> nil end)
     |> case do
       nil -> nil
@@ -376,6 +391,16 @@ defmodule SpectreMnemonic.Durable.Index do
   defp payload_memory_id(%Record{source_event_id: id}) when is_binary(id), do: id
   defp payload_memory_id(%Record{id: id}) when is_binary(id), do: id
   defp payload_memory_id(_record), do: nil
+
+  @spec payload_lifecycle_id(Record.t(), binary()) :: binary()
+  defp payload_lifecycle_id(
+         %Record{family: family, payload: %{source_id: source_id}},
+         _memory_id
+       )
+       when family in [:knowledge, :embeddings] and is_binary(source_id),
+       do: source_id
+
+  defp payload_lifecycle_id(_record, memory_id), do: memory_id
 
   @spec payload_vector(term()) :: binary() | nil
   defp payload_vector(%{vector: vector}) when is_binary(vector), do: vector
@@ -407,6 +432,7 @@ defmodule SpectreMnemonic.Durable.Index do
   end
 
   @spec cue_text(term()) :: binary()
+  defp cue_text(%QueryContext{text: text}), do: String.downcase(text)
   defp cue_text(cue) when is_binary(cue), do: String.downcase(cue)
   defp cue_text(cue), do: cue |> inspect() |> String.downcase()
 

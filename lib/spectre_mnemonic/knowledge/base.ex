@@ -5,6 +5,9 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
   alias SpectreMnemonic.Knowledge.Record
   alias SpectreMnemonic.Knowledge.SMEM
+  alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.SearchResult
 
   @default_config [
     enabled: true,
@@ -34,7 +37,13 @@ defmodule SpectreMnemonic.Knowledge.Base do
     @default_config
     |> Keyword.merge(configured)
     |> Keyword.merge(Keyword.get(opts, :knowledge, []))
-    |> Keyword.merge(Keyword.take(opts, Keyword.keys(@default_config) ++ [:data_root]))
+    |> Keyword.merge(
+      Keyword.take(
+        opts,
+        Keyword.keys(@default_config) ++
+          [:data_root, :namespace, :scope, :scopes, :allow_legacy_namespace?]
+      )
+    )
   end
 
   @doc "Appends one compact knowledge event."
@@ -48,13 +57,15 @@ defmodule SpectreMnemonic.Knowledge.Base do
   @doc "Loads a compact, budgeted knowledge packet."
   @spec load(keyword()) :: {:ok, Record.t()}
   def load(opts \\ []) do
-    cfg = config(opts)
-    load_with_config(cfg)
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      cfg = config(opts)
+      load_with_config(cfg)
+    end
   end
 
   @spec load_with_config(keyword()) :: {:ok, Record.t()}
   defp load_with_config(cfg) do
-    if enabled?(cfg), do: load_enabled(cfg), else: {:ok, empty_packet(%{disabled?: true})}
+    if enabled?(cfg), do: load_enabled(cfg), else: {:ok, empty_packet(%{disabled?: true}, cfg)}
   end
 
   @spec load_enabled(keyword()) :: {:ok, Record.t()}
@@ -64,13 +75,15 @@ defmodule SpectreMnemonic.Knowledge.Base do
   end
 
   @doc "Searches `knowledge.smem` without loading a full knowledge packet."
-  @spec search(term(), keyword()) :: {:ok, [map()]}
+  @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]} | {:error, term()}
   def search(cue, opts \\ []) do
-    cfg = config(opts)
-    if enabled?(cfg), do: search_enabled(cue, opts, cfg), else: {:ok, []}
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      cfg = config(opts)
+      if enabled?(cfg), do: search_enabled(cue, opts, cfg), else: {:ok, []}
+    end
   end
 
-  @spec search_enabled(term(), keyword(), keyword()) :: {:ok, [map()]}
+  @spec search_enabled(term(), keyword(), keyword()) :: {:ok, [SearchResult.t()]}
   defp search_enabled(cue, opts, cfg) do
     {:ok, events} = SMEM.replay(cfg)
     limit = Keyword.get(opts, :limit, 10)
@@ -109,6 +122,8 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
     %Record{
       id: "knowledge_loaded",
+      namespace: Identity.namespace!(cfg),
+      scope: Keyword.get(cfg, :scope),
       source_id: "knowledge.smem",
       text: summary || "",
       summary: summary,
@@ -119,6 +134,8 @@ defmodule SpectreMnemonic.Knowledge.Base do
       usage: usage(events),
       metadata: %{
         source: :knowledge_smem,
+        namespace: Identity.namespace!(cfg),
+        scope: Keyword.get(cfg, :scope),
         loaded_events: length(events),
         loaded_bytes: selected.bytes,
         max_loaded_bytes: max_bytes
@@ -127,14 +144,24 @@ defmodule SpectreMnemonic.Knowledge.Base do
     }
   end
 
-  @spec empty_packet(map()) :: Record.t()
-  defp empty_packet(metadata) do
+  @spec empty_packet(map(), keyword()) :: Record.t()
+  defp empty_packet(metadata, cfg) do
     %Record{
       id: "knowledge_empty",
+      namespace: Identity.namespace!(cfg),
+      scope: Keyword.get(cfg, :scope),
       source_id: "knowledge.smem",
       text: "",
       summary: nil,
-      metadata: Map.merge(%{source: :knowledge_smem}, metadata),
+      metadata:
+        Map.merge(
+          %{
+            source: :knowledge_smem,
+            namespace: Identity.namespace!(cfg),
+            scope: Keyword.get(cfg, :scope)
+          },
+          metadata
+        ),
       inserted_at: DateTime.utc_now()
     }
   end
@@ -255,7 +282,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
     }
   end
 
-  @spec score_event(map(), MapSet.t(binary()), binary()) :: map()
+  @spec score_event(map(), MapSet.t(binary()), binary()) :: SearchResult.t()
   defp score_event(event, query_terms, query) do
     text = event_text(event)
     event_terms = text |> terms() |> MapSet.new()
@@ -267,18 +294,23 @@ defmodule SpectreMnemonic.Knowledge.Base do
     attention_bonus = event |> attention() |> min(5) |> trunc()
     score = overlap * 3 + phrase_bonus + type_bonus + usage_bonus + attention_bonus
 
-    %{
+    %SearchResult{
       source: :knowledge_smem,
+      namespace: event.namespace,
+      scope: event.scope,
       family: :knowledge,
       id: event.id,
       type: event.type,
       score: score,
       event: event,
-      text: text
+      text: text,
+      record: event,
+      inserted_at: event.inserted_at,
+      metadata: %{namespace: event.namespace, scope: event.scope}
     }
   end
 
-  @spec search_sort_key(map()) :: {integer(), integer(), binary()}
+  @spec search_sort_key(SearchResult.t()) :: {integer(), integer(), binary()}
   defp search_sort_key(result), do: {-result.score, -timestamp(result.event), result.event.id}
 
   @spec phrase_bonus(binary(), binary()) :: non_neg_integer()
@@ -304,6 +336,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
   end
 
   @spec cue_text(term()) :: binary()
+  defp cue_text(%QueryContext{text: text}), do: String.downcase(String.trim(text))
   defp cue_text(cue) when is_binary(cue), do: String.downcase(String.trim(cue))
   defp cue_text(cue), do: cue |> inspect(limit: 50) |> cue_text()
 

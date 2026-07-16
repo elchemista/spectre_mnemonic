@@ -378,7 +378,13 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
           send_to: self(),
           id: :queryable,
           capabilities: [:lookup],
-          lookup: %{{:moments, "mom_1"} => %{id: "mom_1"}}
+          lookup: %{
+            {:moments, "mom_1"} => %{
+              id: "mom_1",
+              namespace: "spectre_mnemonic_test",
+              scope: nil
+            }
+          }
         ]
       ]
     ])
@@ -398,7 +404,14 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
           send_to: self(),
           id: :searchable,
           capabilities: [:search],
-          search_results: [%{id: "mom_1", score: 0.9}]
+          search_results: [
+            %{
+              id: "mom_1",
+              score: 0.9,
+              namespace: "spectre_mnemonic_test",
+              scope: nil
+            }
+          ]
         ]
       ]
     ])
@@ -488,13 +501,15 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     %Record{
       id: Keyword.get(opts, :id, "pmem_#{payload_id}"),
+      namespace: "spectre_mnemonic_test",
+      scope: Map.get(payload, :scope),
       family: family,
       operation: :put,
       payload: payload,
       dedupe_key: Keyword.get(opts, :dedupe_key, "#{family}:put:#{payload_id}"),
       inserted_at: DateTime.utc_now(),
       source_event_id: payload_id,
-      metadata: %{}
+      metadata: %{namespace: "spectre_mnemonic_test", scope: Map.get(payload, :scope)}
     }
   end
 

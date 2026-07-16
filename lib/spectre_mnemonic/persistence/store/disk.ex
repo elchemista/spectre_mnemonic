@@ -6,6 +6,7 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   `SpectreMnemonic.Persistence.Store.File` directly.
   """
 
+  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File
 
   @doc "No-op compatibility start function for older supervision trees."
@@ -15,22 +16,11 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   end
 
   @doc "Appends a family-tagged record to the default file store."
-  @spec append(atom(), term()) :: {:ok, pos_integer()} | {:error, term()}
+  @spec append(atom(), term()) :: {:ok, term()} | {:error, term()}
   def append(family, record) do
     # Compatibility layer for older callers. It is not the shiny path, but
     # breaking old supervision trees for elegance would be peak nonsense.
-    payload = %SpectreMnemonic.Persistence.Store.Record{
-      id: "pmem_#{System.unique_integer([:positive, :monotonic])}",
-      family: family,
-      operation: :put,
-      payload: record,
-      dedupe_key: "#{family}:put:#{payload_id(record)}",
-      inserted_at: DateTime.utc_now(),
-      source_event_id: payload_id(record),
-      metadata: %{}
-    }
-
-    File.put(payload, data_root: data_root())
+    Manager.append(family, record)
   end
 
   @doc "Replays all complete frames from the default file store."
@@ -43,7 +33,11 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   @doc "Compacts current replayable records into a snapshot file."
   @spec compact :: {:ok, Path.t()} | {:error, term()}
   def compact do
-    File.compact(data_root: data_root())
+    case Manager.compact(mode: :physical) do
+      {:ok, [{_store, {:ok, path}} | _]} -> {:ok, path}
+      {:ok, results} -> {:error, {:unexpected_compaction_result, results}}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc "Returns the configured data root."
@@ -51,11 +45,6 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   def data_root do
     File.data_root()
   end
-
-  @spec payload_id(term()) :: binary() | nil
-  defp payload_id(%{id: id}) when is_binary(id), do: id
-  defp payload_id(%{id: id}) when is_atom(id), do: Atom.to_string(id)
-  defp payload_id(_record), do: nil
 
   @spec legacy_frame(term()) :: term()
   defp legacy_frame({seq, timestamp, %SpectreMnemonic.Persistence.Store.Record{} = record}) do

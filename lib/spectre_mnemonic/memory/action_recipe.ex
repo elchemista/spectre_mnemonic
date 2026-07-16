@@ -11,6 +11,8 @@ defmodule SpectreMnemonic.Memory.ActionRecipe do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
+          scope: term(),
           memory_id: binary(),
           language: atom(),
           text: binary(),
@@ -22,6 +24,8 @@ defmodule SpectreMnemonic.Memory.ActionRecipe do
 
   defstruct [
     :id,
+    :namespace,
+    :scope,
     :memory_id,
     language: :spectre_al,
     text: "",

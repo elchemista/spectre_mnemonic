@@ -4,7 +4,9 @@ defmodule SpectreMnemonic.Recall.Packet do
   """
 
   @type t :: %__MODULE__{
-          cue: SpectreMnemonic.Recall.Cue.t() | term(),
+          cue: SpectreMnemonic.QueryContext.t(),
+          query_context: SpectreMnemonic.QueryContext.t(),
+          search_results: [SpectreMnemonic.SearchResult.t()],
           active_status: [map()],
           moments: [SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t()],
           observations: [SpectreMnemonic.Memory.Observation.t()],
@@ -20,6 +22,8 @@ defmodule SpectreMnemonic.Recall.Packet do
 
   defstruct [
     :cue,
+    :query_context,
+    search_results: [],
     active_status: [],
     moments: [],
     observations: [],

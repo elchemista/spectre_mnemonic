@@ -50,7 +50,7 @@ defmodule SpectreMnemonic.Knowledge.Learning do
       text ->
         text
         |> skill_from_text(opts)
-        |> validate()
+        |> validate(opts)
     end
   end
 
@@ -65,7 +65,7 @@ defmodule SpectreMnemonic.Knowledge.Learning do
   defp normalize(input, opts) when is_map(input) do
     input
     |> skill_from_map(opts)
-    |> validate()
+    |> validate(opts)
   end
 
   defp normalize(_input, _opts), do: {:error, {:invalid_skill, :unsupported_input}}
@@ -131,8 +131,8 @@ defmodule SpectreMnemonic.Knowledge.Learning do
     })
   end
 
-  @spec validate(map()) :: {:ok, SMEM.event()} | {:error, term()}
-  defp validate(skill) do
+  @spec validate(map(), keyword()) :: {:ok, SMEM.event()} | {:error, term()}
+  defp validate(skill, opts) do
     # A skill without a name or content is just a sticky note that fell behind
     # the desk. Reject it now so recall does not find mystery lint later.
     cond do
@@ -146,7 +146,7 @@ defmodule SpectreMnemonic.Knowledge.Learning do
         {:ok,
          skill
          |> Map.update!(:steps, &reject_blank/1)
-         |> SMEM.normalize_event()}
+         |> SMEM.normalize_event(opts)}
     end
   end
 

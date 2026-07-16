@@ -11,7 +11,7 @@ defmodule SpectreMnemonic.Reflection do
     fact: 4
   }
 
-  @doc "Builds an evidence packet and optionally lets an adapter respond."
+  @doc "Builds a structured evidence packet without generating an answer."
   @spec reflect(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def reflect(query, opts \\ []) do
     # Reflection is a packet builder before it is an adapter call. I want sources
@@ -19,15 +19,17 @@ defmodule SpectreMnemonic.Reflection do
     model_limit = Keyword.get(opts, :mental_model_limit, Keyword.get(opts, :limit, 5))
     observation_limit = Keyword.get(opts, :observation_limit, Keyword.get(opts, :limit, 5))
 
-    with {:ok, mental_models} <-
-           SpectreMnemonic.search_mental_models(query, Keyword.put(opts, :limit, model_limit)),
-         {:ok, observations} <-
-           SpectreMnemonic.search_observations(
-             query,
-             Keyword.put(opts, :limit, observation_limit)
-           ),
-         {:ok, recall} <- SpectreMnemonic.recall(query, opts) do
-      observations = rank_observations(observations)
+    recall_opts =
+      opts
+      |> Keyword.put(:mental_model_limit, model_limit)
+      |> Keyword.put(:observation_limit, observation_limit)
+      |> Keyword.put(:include_mental_models, true)
+      |> Keyword.put(:include_observations, true)
+
+    with {:ok, recall} <- SpectreMnemonic.recall(query, recall_opts) do
+      mental_models = Enum.take(recall.mental_models, model_limit)
+      observations = recall.observations |> rank_observations() |> Enum.take(observation_limit)
+      evidence = evidence(mental_models, observations, recall.moments)
 
       packet =
         %Packet{
@@ -36,53 +38,75 @@ defmodule SpectreMnemonic.Reflection do
           observations: observations,
           raw_memories: recall.moments,
           knowledge: recall.knowledge,
+          evidence: evidence,
           citations: citations(mental_models, observations, recall.moments),
           directives: Keyword.get(opts, :directives),
           disposition: Keyword.get(opts, :disposition),
           confidence: confidence(mental_models, observations, recall.moments),
           usage: Map.get(recall, :usage, %{}),
-          metadata: %{adapter?: not is_nil(reflection_adapter(opts))}
+          metadata: %{
+            query_context: recall.query_context,
+            response_generation: :spectre
+          }
         }
 
-      run_adapter(packet, opts)
+      {:ok, packet}
     end
   end
 
-  @spec run_adapter(Packet.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
-  defp run_adapter(packet, opts) do
-    # Adapter output is allowed to be prose or a packet, but it is not allowed
-    # to erase the evidence shape. Future me will thank current me, probably.
-    case reflection_adapter(opts) do
-      nil ->
-        {:ok, packet}
+  @spec evidence([term()], [term()], [term()]) :: [map()]
+  defp evidence(mental_models, observations, raw_memories) do
+    model_evidence =
+      Enum.map(mental_models, fn model ->
+        %{
+          type: :mental_model,
+          id: Map.get(model, :id),
+          claim: Map.get(model, :answer),
+          query: Map.get(model, :query),
+          source_ids: Map.get(model, :source_ids, []),
+          citations: Map.get(model, :citations, []),
+          state: Map.get(model, :state),
+          provenance: provenance(model)
+        }
+      end)
 
-      adapter ->
-        if Code.ensure_loaded?(adapter) and function_exported?(adapter, :reflect, 2) do
-          adapter.reflect(packet, opts)
-          |> normalize_response(packet)
-        else
-          {:error, {:invalid_reflection_adapter, adapter}}
-        end
+    observation_evidence =
+      Enum.map(observations, fn observation ->
+        %{
+          type: :observation,
+          id: Map.get(observation, :id),
+          claim: Map.get(observation, :statement),
+          source_ids: Map.get(observation, :source_ids, []),
+          evidence: Map.get(observation, :evidence, []),
+          confidence: Map.get(observation, :confidence),
+          state: Map.get(observation, :state),
+          provenance: provenance(observation)
+        }
+      end)
+
+    memory_evidence =
+      Enum.map(raw_memories, fn memory ->
+        %{
+          type: :moment,
+          id: Map.get(memory, :id),
+          claim: Map.get(memory, :text),
+          source_ids: [Map.get(memory, :id)],
+          occurred_at: Map.get(memory, :occurred_at),
+          observed_at: Map.get(memory, :observed_at),
+          provenance: provenance(memory)
+        }
+      end)
+
+    model_evidence ++ observation_evidence ++ memory_evidence
+  end
+
+  @spec provenance(term()) :: map()
+  defp provenance(memory) do
+    case Map.get(memory, :metadata, %{}) do
+      metadata when is_map(metadata) -> Map.get(metadata, :provenance, %{})
+      _metadata -> %{}
     end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
   end
-
-  @spec reflection_adapter(keyword()) :: module() | nil
-  defp reflection_adapter(opts) do
-    Keyword.get(opts, :adapter) ||
-      Keyword.get(opts, :reflection_adapter) ||
-      Application.get_env(:spectre_mnemonic, :reflection_adapter)
-  end
-
-  @spec normalize_response(term(), Packet.t()) :: {:ok, Packet.t()} | {:error, term()}
-  defp normalize_response({:ok, %Packet{} = packet}, _default), do: {:ok, packet}
-  defp normalize_response({:ok, response}, packet), do: {:ok, %{packet | response: response}}
-  defp normalize_response({:error, reason}, _packet), do: {:error, reason}
-  defp normalize_response(%Packet{} = packet, _default), do: {:ok, packet}
-  defp normalize_response(response, packet), do: {:ok, %{packet | response: response}}
 
   @spec citations([term()], [term()], [term()]) :: [map()]
   defp citations(mental_models, observations, raw_memories) do
