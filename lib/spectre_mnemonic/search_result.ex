@@ -48,7 +48,26 @@ defmodule SpectreMnemonic.SearchResult do
     metadata: %{}
   ]
 
-  @known_keys MapSet.new(Map.keys(%__MODULE__{}) -- [:__struct__])
+  @known_keys MapSet.new([
+                :source,
+                :namespace,
+                :scope,
+                :store,
+                :family,
+                :id,
+                :record_id,
+                :rank,
+                :score,
+                :state,
+                :record,
+                :event,
+                :text,
+                :type,
+                :provenance,
+                :inserted_at,
+                :scores,
+                :metadata
+              ])
 
   @doc "Normalizes a map or arbitrary adapter value into one result shape."
   @spec new(term(), keyword()) :: t()

@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.MemoryCase do
   use ExUnit.CaseTemplate
 
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
+  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Index
 
   @tables [
@@ -58,7 +59,7 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :plugs)
     Application.delete_env(:spectre_mnemonic, :hot_memory)
     reset_disk_root()
-    SpectreMnemonic.Persistence.Manager.reset_dedupe()
+    Manager.reset_dedupe()
     clear_memory()
 
     on_exit(fn ->

@@ -90,11 +90,14 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   def reduce(opts \\ [], acc, fun) when is_function(fun, 2) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       root = data_root(opts)
-
-      reduce_path(active_path(root), acc, fn {_seq, _timestamp, event} = frame, acc ->
-        if Scope.match?(event, opts), do: fun.(frame, acc), else: {:cont, acc}
-      end)
+      reduce_path(active_path(root), acc, &reduce_scoped_frame(&1, &2, opts, fun))
     end
+  end
+
+  @spec reduce_scoped_frame(tuple(), term(), keyword(), function()) ::
+          {:cont, term()} | {:halt, term()}
+  defp reduce_scoped_frame({_seq, _timestamp, event} = frame, acc, opts, fun) do
+    if Scope.match?(event, opts), do: fun.(frame, acc), else: {:cont, acc}
   end
 
   @doc "Rewrites `knowledge.smem` with a compact replacement event set."

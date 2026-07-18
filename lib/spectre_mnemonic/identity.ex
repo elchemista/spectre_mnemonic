@@ -22,20 +22,32 @@ defmodule SpectreMnemonic.Identity do
   @spec fetch_namespace(keyword()) ::
           {:ok, namespace()} | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
   def fetch_namespace(opts \\ []) do
-    with {:ok, configured} <- configured_namespace() do
-      case Keyword.fetch(opts, :namespace) do
-        :error ->
-          {:ok, configured}
-
-        {:ok, namespace} ->
-          with {:ok, requested} <- normalize_namespace(namespace) do
-            if requested == configured,
-              do: {:ok, configured},
-              else: {:error, {:namespace_mismatch, configured, requested}}
-          end
-      end
+    case configured_namespace() do
+      {:ok, configured} -> fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
+      {:error, _reason} = error -> error
     end
   end
+
+  @spec fetch_requested_namespace(:error | {:ok, term()}, namespace()) ::
+          {:ok, namespace()}
+          | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+  defp fetch_requested_namespace(:error, configured), do: {:ok, configured}
+
+  defp fetch_requested_namespace({:ok, namespace}, configured) do
+    namespace
+    |> normalize_namespace()
+    |> compare_namespace(configured)
+  end
+
+  @spec compare_namespace({:ok, namespace()} | {:error, :namespace_required}, namespace()) ::
+          {:ok, namespace()}
+          | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+  defp compare_namespace({:ok, configured}, configured), do: {:ok, configured}
+
+  defp compare_namespace({:ok, requested}, configured),
+    do: {:error, {:namespace_mismatch, configured, requested}}
+
+  defp compare_namespace({:error, _reason} = error, _configured), do: error
 
   @doc "Resolves a namespace and raises when none was configured."
   @spec namespace!(keyword()) :: namespace()

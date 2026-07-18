@@ -317,21 +317,27 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec active_status([recall_moment()], keyword()) :: [map()]
   defp active_status(moments, opts) do
     moments
-    |> Enum.flat_map(fn moment ->
-      status_opts = Keyword.put(opts, :scope, Scope.scope(moment))
-
-      [moment.stream, moment.task_id]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.flat_map(fn key ->
-        case Focus.status(key, status_opts) do
-          {:ok, status} -> [status]
-          {:error, _reason} -> []
-        end
-      end)
-    end)
+    |> Enum.flat_map(&statuses_for_moment(&1, opts))
     |> Enum.uniq_by(fn status ->
       {status.namespace, status.scope, status.stream, status.task_id}
     end)
+  end
+
+  @spec statuses_for_moment(recall_moment(), keyword()) :: [map()]
+  defp statuses_for_moment(moment, opts) do
+    status_opts = Keyword.put(opts, :scope, Scope.scope(moment))
+
+    [moment.stream, moment.task_id]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.flat_map(&status_for_key(&1, status_opts))
+  end
+
+  @spec status_for_key(term(), keyword()) :: [map()]
+  defp status_for_key(key, opts) do
+    case Focus.status(key, opts) do
+      {:ok, status} -> [status]
+      {:error, _reason} -> []
+    end
   end
 
   @spec artifacts_for([recall_moment()], [Association.t()], keyword()) :: [Artifact.t()]

@@ -28,10 +28,12 @@ defmodule SpectreMnemonic.Memory.Scope do
   @doc "Returns true when memory matches the requested scope filters."
   @spec match?(term(), keyword()) :: boolean()
   def match?(memory, opts) do
-    with {:ok, namespace} <- Identity.fetch_namespace(opts) do
-      namespace_match?(memory, namespace, opts) and scope_match?(memory, opts)
-    else
-      {:error, _reason} -> false
+    case Identity.fetch_namespace(opts) do
+      {:ok, namespace} ->
+        namespace_match?(memory, namespace, opts) and scope_match?(memory, opts)
+
+      {:error, _reason} ->
+        false
     end
   end
 

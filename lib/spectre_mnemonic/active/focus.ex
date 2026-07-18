@@ -61,15 +61,17 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec status(stream_or_task_id :: term(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def status(stream_or_task_id, opts \\ []) do
-    with {:ok, namespace} <- Identity.fetch_namespace(opts) do
-      key = {{namespace, Keyword.get(opts, :scope)}, stream_or_task_id}
+    case Identity.fetch_namespace(opts) do
+      {:ok, namespace} ->
+        key = {{namespace, Keyword.get(opts, :scope)}, stream_or_task_id}
 
-      case :ets.lookup(:mnemonic_status, key) do
-        [{^key, status}] -> {:ok, status}
-        [] -> {:error, :not_found}
-      end
-    else
-      {:error, reason} -> {:error, reason}
+        case :ets.lookup(:mnemonic_status, key) do
+          [{^key, status}] -> {:ok, status}
+          [] -> {:error, :not_found}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -122,9 +124,7 @@ defmodule SpectreMnemonic.Active.Focus do
     case Scope.scopes(opts) do
       :all ->
         :ets.foldl(
-          fn {_id, moment}, acc ->
-            if Scope.match?(moment, opts), do: fun.(moment, acc), else: acc
-          end,
+          &fold_scoped_moment(&1, &2, opts, fun),
           acc,
           :mnemonic_moments
         )
@@ -137,6 +137,12 @@ defmodule SpectreMnemonic.Active.Focus do
         |> moments_by_ids(opts)
         |> Enum.reduce(acc, fun)
     end
+  end
+
+  @spec fold_scoped_moment({term(), Moment.t() | Secret.t()}, term(), keyword(), function()) ::
+          term()
+  defp fold_scoped_moment({_id, moment}, acc, opts, fun) do
+    if Scope.match?(moment, opts), do: fun.(moment, acc), else: acc
   end
 
   @doc false
@@ -831,7 +837,9 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec provenance_source_ids(map()) :: [term()]
   defp provenance_source_ids(payload) do
     payload
-    |> get_in([:metadata, :provenance, :source_ids])
+    |> Map.get(:metadata, %{})
+    |> Map.get(:provenance, %{})
+    |> Map.get(:source_ids, [])
     |> List.wrap()
   end
 
@@ -876,12 +884,15 @@ defmodule SpectreMnemonic.Active.Focus do
     Enum.each([:mnemonic_observations, :mnemonic_mental_models], fn table ->
       table
       |> :ets.tab2list()
-      |> Enum.each(fn {id, record} ->
-        if record_references?(record, moment_ids), do: :ets.delete(table, id)
-      end)
+      |> Enum.each(&delete_referencing_record(&1, table, moment_ids))
     end)
 
     :ok
+  end
+
+  @spec delete_referencing_record({term(), map()}, atom(), MapSet.t()) :: true | nil
+  defp delete_referencing_record({id, record}, table, moment_ids) do
+    if record_references?(record, moment_ids), do: :ets.delete(table, id)
   end
 
   @spec delete_association(Association.t()) :: true

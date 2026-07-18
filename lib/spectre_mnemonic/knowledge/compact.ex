@@ -91,9 +91,7 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   @spec compact_with_adapter(module(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp compact_with_adapter(module, input, opts) do
     if Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
-      module
-      |> apply(:compact, [input, opts])
-      |> normalize_adapter_result()
+      module.compact(input, opts) |> normalize_adapter_result()
     else
       {:error, {:invalid_compact_adapter, module}}
     end

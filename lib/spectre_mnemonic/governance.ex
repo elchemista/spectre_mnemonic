@@ -102,18 +102,22 @@ defmodule SpectreMnemonic.Governance do
 
   @doc "Reads the materialized lifecycle state for a namespace/scope/id key."
   @spec state_for(binary() | nil, keyword()) :: state() | nil
+  def state_for(memory_id, opts \\ [])
+
   def state_for(nil, _opts), do: nil
 
-  def state_for(memory_id, opts \\ []) when is_binary(memory_id) do
-    with {:ok, namespace} <- Identity.fetch_namespace(opts) do
-      key = {namespace, Keyword.get(opts, :scope), memory_id}
+  def state_for(memory_id, opts) when is_binary(memory_id) do
+    case Identity.fetch_namespace(opts) do
+      {:ok, namespace} ->
+        key = {namespace, Keyword.get(opts, :scope), memory_id}
 
-      case safe_lookup(@state_table, key) do
-        [{^key, event}] -> event.state
-        [] -> nil
-      end
-    else
-      {:error, _reason} -> nil
+        case safe_lookup(@state_table, key) do
+          [{^key, event}] -> event.state
+          [] -> nil
+        end
+
+      {:error, _reason} ->
+        nil
     end
   end
 
@@ -144,9 +148,9 @@ defmodule SpectreMnemonic.Governance do
       @state_table
       |> safe_tab2list()
       |> Enum.map(fn {_key, event} -> event end)
-      |> Enum.filter(&Scope.match?(&1, opts))
-      |> Enum.filter(&fact_state?/1)
-      |> Enum.filter(&should_stale?(&1, cutoff))
+      |> Enum.filter(fn event ->
+        Scope.match?(event, opts) and fact_state?(event) and should_stale?(event, cutoff)
+      end)
 
     result =
       Enum.reduce_while(candidates, :ok, fn event, :ok ->
@@ -230,7 +234,14 @@ defmodule SpectreMnemonic.Governance do
           :ok
 
         valid_transition?(current, target) ->
-          event = state_event(memory_id, target, reason, opts, metadata)
+          event =
+            state_event(
+              memory_id,
+              target,
+              reason,
+              opts,
+              transition_metadata(current, metadata)
+            )
 
           case Manager.append(:memory_states, event,
                  opts
@@ -316,6 +327,15 @@ defmodule SpectreMnemonic.Governance do
   end
 
   defp materialize_fact(_event), do: :ok
+
+  @spec transition_metadata(map() | nil, map()) :: map()
+  defp transition_metadata(nil, metadata), do: Map.new(metadata)
+
+  defp transition_metadata(current, metadata) do
+    current
+    |> Map.get(:metadata, %{})
+    |> Map.merge(Map.new(metadata))
+  end
 
   @spec govern_fact(map(), map(), state(), keyword()) :: :ok | {:error, term()}
   defp govern_fact(moment, fact, state, opts) do

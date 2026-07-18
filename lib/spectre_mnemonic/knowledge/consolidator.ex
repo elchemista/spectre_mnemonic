@@ -239,9 +239,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
              :consolidation_jobs,
              consolidation_job(consolidation),
              consolidation.opts
-           ),
-         :ok <- Governance.promote_moments(consolidation.moments, consolidation.opts) do
-      :ok
+           ) do
+      Governance.promote_moments(consolidation.moments, consolidation.opts)
     end
   end
 
@@ -250,18 +249,26 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     with :ok <- validate_single_partition(consolidation.moments),
          :ok <- validate_association_partition(consolidation),
          :ok <- validate_output_partitions(consolidation) do
-      Enum.reduce_while(consolidation.moments, :ok, fn moment, :ok ->
-        cond do
-          not Scope.match?(moment, consolidation.opts) ->
-            {:halt, {:error, {:out_of_scope_consolidation, Map.get(moment, :id)}}}
+      Enum.reduce_while(
+        consolidation.moments,
+        :ok,
+        &validate_consolidation_moment(&1, &2, consolidation.opts)
+      )
+    end
+  end
 
-          not Governance.consolidatable?(moment, consolidation.opts) ->
-            {:halt, {:error, {:invalid_lifecycle_for_consolidation, Map.get(moment, :id)}}}
+  @spec validate_consolidation_moment(map(), :ok, keyword()) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_consolidation_moment(moment, :ok, opts) do
+    cond do
+      not Scope.match?(moment, opts) ->
+        {:halt, {:error, {:out_of_scope_consolidation, Map.get(moment, :id)}}}
 
-          true ->
-            {:cont, :ok}
-        end
-      end)
+      not Governance.consolidatable?(moment, opts) ->
+        {:halt, {:error, {:invalid_lifecycle_for_consolidation, Map.get(moment, :id)}}}
+
+      true ->
+        {:cont, :ok}
     end
   end
 

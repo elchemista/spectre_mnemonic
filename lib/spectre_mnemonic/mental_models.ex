@@ -41,19 +41,30 @@ defmodule SpectreMnemonic.MentalModels do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       now = Keyword.get(opts, :now, DateTime.utc_now())
       model = build(input, opts, now)
-
-      if Keyword.get(opts, :persist?, true) do
-        with {:ok, _result} <- Manager.append(:mental_models, model, opts),
-             :ok <-
-               Governance.append_state(model.id, model.state, :mental_model_stored, opts) do
-          :ets.insert(@mental_model_table, {model.id, model})
-          {:ok, model}
-        end
-      else
-        :ets.insert(@mental_model_table, {model.id, model})
-        {:ok, model}
-      end
+      put_model(model, opts)
     end
+  end
+
+  @spec put_model(MentalModel.t(), keyword()) :: {:ok, MentalModel.t()} | {:error, term()}
+  defp put_model(model, opts) do
+    if Keyword.get(opts, :persist?, true),
+      do: persist_model(model, opts),
+      else: store_model(model)
+  end
+
+  @spec persist_model(MentalModel.t(), keyword()) ::
+          {:ok, MentalModel.t()} | {:error, term()}
+  defp persist_model(model, opts) do
+    with {:ok, _result} <- Manager.append(:mental_models, model, opts),
+         :ok <- Governance.append_state(model.id, model.state, :mental_model_stored, opts) do
+      store_model(model)
+    end
+  end
+
+  @spec store_model(MentalModel.t()) :: {:ok, MentalModel.t()}
+  defp store_model(model) do
+    :ets.insert(@mental_model_table, {model.id, model})
+    {:ok, model}
   end
 
   @doc """

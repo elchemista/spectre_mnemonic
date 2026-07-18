@@ -194,9 +194,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     previous = Path.join(Path.dirname(snapshot), "previous.term")
 
     with :ok <- remove_if_present(previous),
-         :ok <- move_current_to_previous(snapshot, previous),
-         :ok <- File.rename(temporary, snapshot) do
-      :ok
+         :ok <- move_current_to_previous(snapshot, previous) do
+      File.rename(temporary, snapshot)
     end
   end
 

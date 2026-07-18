@@ -3,9 +3,9 @@ defmodule SpectreMnemonic.Knowledge.Base do
   Budgeted progressive knowledge loader backed by `knowledge.smem`.
   """
 
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Record
   alias SpectreMnemonic.Knowledge.SMEM
-  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.QueryContext
   alias SpectreMnemonic.SearchResult
 

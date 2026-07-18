@@ -25,7 +25,6 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Observations
-  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Engine
   alias SpectreMnemonic.Recall.Packet
   alias SpectreMnemonic.Reflection
