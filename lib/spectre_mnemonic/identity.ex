@@ -20,11 +20,19 @@ defmodule SpectreMnemonic.Identity do
 
   @doc "Resolves an explicit namespace or the configured application namespace."
   @spec fetch_namespace(keyword()) ::
-          {:ok, namespace()} | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+          {:ok, namespace()}
+          | {:error,
+             :namespace_required
+             | :multiple_scopes_not_allowed
+             | {:namespace_mismatch, binary(), binary()}}
   def fetch_namespace(opts \\ []) do
-    case configured_namespace() do
-      {:ok, configured} -> fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
-      {:error, _reason} = error -> error
+    if Keyword.has_key?(opts, :scopes) do
+      {:error, :multiple_scopes_not_allowed}
+    else
+      case configured_namespace() do
+        {:ok, configured} -> fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
+        {:error, _reason} = error -> error
+      end
     end
   end
 
@@ -59,6 +67,10 @@ defmodule SpectreMnemonic.Identity do
         raise ArgumentError,
               "SpectreMnemonic requires config :spectre_mnemonic, namespace: \"stable-name\""
 
+      {:error, :multiple_scopes_not_allowed} ->
+        raise ArgumentError,
+              "SpectreMnemonic accepts exactly one :scope per operation; :scopes is not supported"
+
       {:error, {:namespace_mismatch, configured, requested}} ->
         raise ArgumentError,
               "namespace #{inspect(requested)} does not match configured namespace #{inspect(configured)}"
@@ -76,6 +88,7 @@ defmodule SpectreMnemonic.Identity do
   @doc "Extracts a namespace from a record or its metadata."
   @spec namespace(term()) :: namespace() | nil
   def namespace(%{namespace: namespace}) when is_binary(namespace), do: namespace
+  def namespace(%{"namespace" => namespace}) when is_binary(namespace), do: namespace
 
   def namespace(%{metadata: metadata}) when is_map(metadata) do
     Map.get(metadata, :namespace) || Map.get(metadata, "namespace")

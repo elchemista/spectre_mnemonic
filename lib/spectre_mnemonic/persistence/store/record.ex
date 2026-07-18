@@ -27,7 +27,7 @@ defmodule SpectreMnemonic.Persistence.Store.Record do
           family: atom(),
           operation: atom(),
           payload: term(),
-          dedupe_key: binary(),
+          dedupe_key: binary() | nil,
           inserted_at: DateTime.t(),
           source_event_id: binary() | nil,
           metadata: map()

@@ -127,6 +127,14 @@ defmodule SpectreMnemonic.Persistence.Manager do
     end
   end
 
+  @doc false
+  @spec replay_all(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
+  def replay_all(opts \\ []) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:replay_all, opts})
+    end
+  end
+
   @doc """
   Looks up one durable record from stores that advertise lookup.
 
@@ -232,8 +240,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec handle_call(term(), GenServer.from(), manager_state()) ::
           {:reply, term(), manager_state()}
   def handle_call({:append, family, payload, opts}, _from, state) do
-    case validate_payload_namespace(payload, opts) do
-      :ok ->
+    case prepare_payload_context(payload, opts) do
+      {:ok, payload} ->
         record = build_record(family, :put, payload, opts)
         {reply, state} = persist_once(record, opts, state)
         {:reply, reply, state}
@@ -262,6 +270,20 @@ defmodule SpectreMnemonic.Persistence.Manager do
       |> replay_records_checked()
       |> case do
         {:ok, records} -> {:ok, Enum.filter(records, &Scope.match?(&1, opts))}
+        {:error, failures} -> {:error, {:persistent_memory_replay_failed, failures}}
+      end
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:replay_all, opts}, _from, state) do
+    reply =
+      opts
+      |> effective_config()
+      |> replayable_stores()
+      |> replay_records_checked()
+      |> case do
+        {:ok, records} -> {:ok, Enum.filter(records, &Scope.match_namespace?(&1, opts))}
         {:error, failures} -> {:error, {:persistent_memory_replay_failed, failures}}
       end
 
@@ -414,14 +436,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
     }
   end
 
-  @spec validate_payload_namespace(term(), keyword()) :: :ok | {:error, term()}
-  defp validate_payload_namespace(payload, opts) do
-    expected = Identity.namespace!(opts)
+  @spec prepare_payload_context(term(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp prepare_payload_context(payload, opts) do
+    namespace = Identity.namespace!(opts)
+    scope = context_scope(payload, opts)
 
-    case Identity.namespace(payload) do
-      nil -> :ok
-      ^expected -> :ok
-      actual -> {:error, {:namespace_mismatch, expected, actual}}
+    with :ok <- Scope.validate_assignable_context(payload, namespace, scope) do
+      {:ok, put_payload_context(payload, namespace, scope)}
     end
   end
 
@@ -429,10 +450,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
   defp normalize_record_context(%Record{} = record, opts) do
     expected = Identity.namespace!(opts)
 
-    if record.namespace in [nil, expected] do
-      scope = record.scope || context_scope(record.payload, opts)
+    with :ok <- validate_record_namespace(record, expected),
+         {:ok, scope} <- record_scope(record, opts),
+         :ok <- Scope.validate_assignable_context(record.metadata, expected, scope),
+         :ok <- Scope.validate_assignable_context(record.payload, expected, scope) do
+      payload = put_payload_context(record.payload, expected, scope)
       source_event_id = record.source_event_id || payload_id(record.payload) || record.id
-      dedupe_source = dedupe_source(record.family, record.payload, source_event_id)
+      dedupe_source = dedupe_source(record.family, payload, source_event_id)
 
       dedupe_key =
         record.dedupe_key ||
@@ -448,13 +472,55 @@ defmodule SpectreMnemonic.Persistence.Manager do
          record
          | namespace: expected,
            scope: scope,
+           payload: payload,
            source_event_id: source_event_id,
            dedupe_key: dedupe_key,
            metadata: metadata
        }}
-    else
-      {:error, {:namespace_mismatch, expected, record.namespace}}
     end
+  end
+
+  @spec validate_record_namespace(Record.t(), binary()) :: :ok | {:error, term()}
+  defp validate_record_namespace(%Record{namespace: namespace}, expected)
+       when namespace in [nil, expected],
+       do: :ok
+
+  defp validate_record_namespace(%Record{namespace: namespace}, expected),
+    do: {:error, {:namespace_mismatch, expected, namespace}}
+
+  @spec record_scope(Record.t(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp record_scope(record, opts) do
+    requested = Keyword.get(opts, :scope)
+
+    cond do
+      Keyword.has_key?(opts, :scope) and not is_nil(record.scope) and record.scope != requested ->
+        {:error, {:scope_mismatch, requested, record.scope}}
+
+      Keyword.has_key?(opts, :scope) ->
+        {:ok, requested}
+
+      not is_nil(record.scope) ->
+        {:ok, record.scope}
+
+      true ->
+        {:ok, Scope.scope(record.payload)}
+    end
+  end
+
+  @spec put_payload_context(term(), binary(), term()) :: term()
+  defp put_payload_context(payload, namespace, scope) when is_map(payload) do
+    payload
+    |> put_context_field(:namespace, namespace)
+    |> put_context_field(:scope, scope)
+  end
+
+  defp put_payload_context(payload, _namespace, _scope), do: payload
+
+  @spec put_context_field(map(), atom(), term()) :: map()
+  defp put_context_field(payload, key, value) do
+    if is_struct(payload) and not Map.has_key?(payload, key),
+      do: payload,
+      else: Map.put(payload, key, value)
   end
 
   @spec context_scope(term(), keyword()) :: term()

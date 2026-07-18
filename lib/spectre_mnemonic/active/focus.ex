@@ -121,28 +121,12 @@ defmodule SpectreMnemonic.Active.Focus do
   @doc false
   @spec fold_moments(term(), (Moment.t() | Secret.t(), term() -> term()), keyword()) :: term()
   def fold_moments(acc, fun, opts \\ []) when is_function(fun, 2) do
-    case Scope.scopes(opts) do
-      :all ->
-        :ets.foldl(
-          &fold_scoped_moment(&1, &2, opts, fun),
-          acc,
-          :mnemonic_moments
-        )
+    namespace = Identity.namespace!(opts)
 
-      scopes ->
-        namespace = Identity.namespace!(opts)
-
-        scopes
-        |> Enum.flat_map(&indexed_ids(:mnemonic_moments_by_scope, {namespace, &1}))
-        |> moments_by_ids(opts)
-        |> Enum.reduce(acc, fun)
-    end
-  end
-
-  @spec fold_scoped_moment({term(), Moment.t() | Secret.t()}, term(), keyword(), function()) ::
-          term()
-  defp fold_scoped_moment({_id, moment}, acc, opts, fun) do
-    if Scope.match?(moment, opts), do: fun.(moment, acc), else: acc
+    :mnemonic_moments_by_scope
+    |> indexed_ids({namespace, Scope.from_opts(opts)})
+    |> moments_by_ids(opts)
+    |> Enum.reduce(acc, fun)
   end
 
   @doc false
@@ -182,21 +166,13 @@ defmodule SpectreMnemonic.Active.Focus do
     namespace = Identity.namespace!(opts)
 
     association_ids =
-      case Scope.scopes(opts) do
-        :all ->
-          associations(opts)
-          |> Enum.filter(fn association ->
-            MapSet.member?(ids, association.source_id) or MapSet.member?(ids, association.target_id)
-          end)
-          |> Enum.map(& &1.id)
-
-        scopes ->
-          for scope <- scopes,
-              id <- ids,
-              association_id <-
-                indexed_ids(:mnemonic_associations_by_memory, {{namespace, scope}, id}),
-              do: association_id
-      end
+      for id <- ids,
+          association_id <-
+            indexed_ids(
+              :mnemonic_associations_by_memory,
+              {{namespace, Scope.from_opts(opts)}, id}
+            ),
+          do: association_id
 
     association_ids
     |> Enum.uniq()

@@ -614,7 +614,12 @@ defmodule SpectreMnemonic.Intake do
 
     planned_edges
     |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
-      link_memory(source, relation, target, Keyword.put_new(edge_opts, :persist?, persist?))
+      link_opts =
+        opts
+        |> Keyword.merge(edge_opts)
+        |> Keyword.put_new(:persist?, persist?)
+
+      link_memory(source, relation, target, link_opts)
     end)
   end
 
@@ -836,7 +841,7 @@ defmodule SpectreMnemonic.Intake do
       |> Enum.sort_by(fn {_source, _target, score} -> -score end)
       |> Enum.take(max_edges)
       |> Enum.map(fn {source, target, score} ->
-        metadata = %{similarity: score, scope: :cross_memory}
+        metadata = %{similarity: score, relationship_scope: :cross_memory}
         {source, :related_memory, target, [weight: score, metadata: metadata]}
       end)
     else
@@ -874,13 +879,7 @@ defmodule SpectreMnemonic.Intake do
   defp linkable_memory?(_moment), do: true
 
   @spec same_scope?(Moment.t(), Moment.t(), keyword()) :: boolean()
-  defp same_scope?(left, right, opts) do
-    cond do
-      Keyword.has_key?(opts, :scopes) -> Scope.match?(right, opts)
-      is_nil(Scope.scope(left)) -> is_nil(Scope.scope(right))
-      true -> Scope.scope(left) == Scope.scope(right)
-    end
-  end
+  defp same_scope?(left, right, _opts), do: Scope.partition(left) == Scope.partition(right)
 
   @spec relationship_score(Moment.t(), Moment.t()) :: float()
   defp relationship_score(left, right) do

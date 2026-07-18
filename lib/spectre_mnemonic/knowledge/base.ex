@@ -41,7 +41,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
       Keyword.take(
         opts,
         Keyword.keys(@default_config) ++
-          [:data_root, :namespace, :scope, :scopes, :allow_legacy_namespace?]
+          [:data_root, :namespace, :scope]
       )
     )
   end

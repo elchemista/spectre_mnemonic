@@ -16,7 +16,7 @@ defmodule SpectreMnemonic.QueryContext do
           text: binary(),
           namespace: binary(),
           scope: term(),
-          scopes: :all | [term()],
+          scopes: [term()],
           keywords: [binary()],
           entities: [binary()],
           vector: binary() | [number()] | nil,
@@ -84,15 +84,8 @@ defmodule SpectreMnemonic.QueryContext do
   def text(input) when is_binary(input), do: input
   def text(input), do: inspect(input)
 
-  @spec requested_scopes(keyword()) :: :all | [term()]
-  defp requested_scopes(opts) do
-    cond do
-      Keyword.get(opts, :scopes) == :all -> :all
-      Keyword.has_key?(opts, :scopes) -> List.wrap(Keyword.get(opts, :scopes))
-      Keyword.has_key?(opts, :scope) -> [Keyword.get(opts, :scope)]
-      true -> [nil]
-    end
-  end
+  @spec requested_scopes(keyword()) :: [term()]
+  defp requested_scopes(opts), do: [Keyword.get(opts, :scope)]
 
   @spec validate_namespace(t(), keyword()) :: :ok | {:error, term()}
   defp validate_namespace(context, opts) do

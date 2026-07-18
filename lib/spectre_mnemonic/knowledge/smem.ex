@@ -421,23 +421,11 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   defp validate_event_context(event, opts) when is_map(event) do
     namespace = Identity.namespace!(opts)
     event = atomize_known_keys(event)
-    event_namespace = Map.get(event, :namespace)
-    event_scope = Map.get(event, :scope)
 
-    cond do
-      event_namespace not in [nil, namespace] ->
-        {:error, {:namespace_mismatch, namespace, event_namespace}}
+    scope =
+      if Keyword.has_key?(opts, :scope), do: Keyword.get(opts, :scope), else: Scope.scope(event)
 
-      Keyword.has_key?(opts, :scope) and event_scope not in [nil, Keyword.get(opts, :scope)] ->
-        {:error, {:scope_mismatch, Keyword.get(opts, :scope), event_scope}}
-
-      Keyword.has_key?(opts, :scopes) and Keyword.get(opts, :scopes) != :all and
-          not is_nil(event_scope) and event_scope not in List.wrap(Keyword.get(opts, :scopes)) ->
-        {:error, {:scope_mismatch, Keyword.get(opts, :scopes), event_scope}}
-
-      true ->
-        :ok
-    end
+    Scope.validate_context(event, namespace, scope)
   end
 
   defp validate_event_context(_event, _opts), do: {:error, :invalid_knowledge_event}

@@ -3,6 +3,7 @@ defmodule SpectreMnemonic.Integration.HardeningTest do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.QueryContext
   alias SpectreMnemonic.SearchResult
@@ -55,6 +56,140 @@ defmodule SpectreMnemonic.Integration.HardeningTest do
     assert {:ok, alpha_records} = Manager.replay(scope: alpha_scope)
     assert alpha_records != []
     assert Enum.all?(alpha_records, &(&1.scope == alpha_scope))
+  end
+
+  test "scope isolates every recall component including knowledge and skills" do
+    alpha_scope = {:tenant, "complete-alpha"}
+    beta_scope = {:tenant, "complete-beta"}
+    shared_text = "isolation sentinel deployment protocol"
+
+    assert {:ok, %{moment: alpha_moment}} =
+             SpectreMnemonic.signal(shared_text, scope: alpha_scope, persist?: true)
+
+    assert {:ok, %{moment: beta_moment}} =
+             SpectreMnemonic.signal(shared_text, scope: beta_scope, persist?: true)
+
+    assert {:ok, _alpha_fact} =
+             SpectreMnemonic.signal("IsolationSentinel status is alpha-private",
+               scope: alpha_scope
+             )
+
+    assert {:ok, _beta_fact} =
+             SpectreMnemonic.signal("IsolationSentinel status is beta-private", scope: beta_scope)
+
+    assert {:ok, alpha_observations} =
+             SpectreMnemonic.consolidate_observations(
+               scope: alpha_scope,
+               include_durable?: false
+             )
+
+    assert {:ok, beta_observations} =
+             SpectreMnemonic.consolidate_observations(
+               scope: beta_scope,
+               include_durable?: false
+             )
+
+    assert {:ok, %{event: alpha_skill}} =
+             SpectreMnemonic.learn("Isolation sentinel skill\n- alpha procedure",
+               scope: alpha_scope
+             )
+
+    assert {:ok, %{event: beta_skill}} =
+             SpectreMnemonic.learn("Isolation sentinel skill\n- beta procedure",
+               scope: beta_scope
+             )
+
+    assert {:ok, alpha_model} =
+             SpectreMnemonic.put_mental_model(
+               %{query: "isolation sentinel", answer: "alpha guidance"},
+               scope: alpha_scope
+             )
+
+    assert {:ok, beta_model} =
+             SpectreMnemonic.put_mental_model(
+               %{query: "isolation sentinel", answer: "beta guidance"},
+               scope: beta_scope
+             )
+
+    alpha_observation_ids = MapSet.new(alpha_observations, & &1.id)
+    beta_observation_ids = MapSet.new(beta_observations, & &1.id)
+
+    assert {:ok, alpha_packet} =
+             SpectreMnemonic.recall(
+               "isolation sentinel isolationsentinel",
+               scope: alpha_scope,
+               limit: 20
+             )
+
+    assert Enum.any?(alpha_packet.moments, &(&1.id == alpha_moment.id))
+    refute Enum.any?(alpha_packet.moments, &(&1.id == beta_moment.id))
+    assert Enum.all?(alpha_packet.moments, &Scope.match?(&1, scope: alpha_scope))
+    assert Enum.all?(alpha_packet.associations, &Scope.match?(&1, scope: alpha_scope))
+    assert Enum.all?(alpha_packet.search_results, &Scope.match?(&1, scope: alpha_scope))
+    assert Enum.any?(alpha_packet.mental_models, &(&1.id == alpha_model.id))
+    refute Enum.any?(alpha_packet.mental_models, &(&1.id == beta_model.id))
+    assert Enum.any?(alpha_packet.observations, &MapSet.member?(alpha_observation_ids, &1.id))
+    refute Enum.any?(alpha_packet.observations, &MapSet.member?(beta_observation_ids, &1.id))
+    assert Enum.all?(alpha_packet.observations, &Scope.match?(&1, scope: alpha_scope))
+
+    assert [%{skills: alpha_skills}] = alpha_packet.knowledge
+    assert Enum.any?(alpha_skills, &(&1.id == alpha_skill.id))
+    refute Enum.any?(alpha_skills, &(&1.id == beta_skill.id))
+    assert Enum.all?(alpha_skills, &Scope.match?(&1, scope: alpha_scope))
+
+    assert {:ok, unscoped} =
+             SpectreMnemonic.recall("isolation sentinel isolationsentinel", limit: 20)
+
+    assert unscoped.moments == []
+    assert unscoped.observations == []
+    assert unscoped.mental_models == []
+    assert unscoped.knowledge == []
+    assert unscoped.search_results == []
+
+    assert {:error, :multiple_scopes_not_allowed} =
+             SpectreMnemonic.recall(
+               "isolation sentinel isolationsentinel",
+               scopes: :all,
+               limit: 20
+             )
+  end
+
+  test "durable and compact knowledge writes reject conflicting scope declarations" do
+    alpha_scope = {:tenant, "write-alpha"}
+    beta_scope = {:tenant, "write-beta"}
+
+    assert {:error, {:scope_mismatch, ^alpha_scope, ^beta_scope}} =
+             Manager.append(
+               :knowledge,
+               %{id: "wrong-scope", namespace: @namespace, scope: beta_scope, text: "private"},
+               scope: alpha_scope
+             )
+
+    assert {:error, :inconsistent_memory_context} =
+             Manager.append(
+               :knowledge,
+               %{
+                 id: "conflicting-context",
+                 namespace: @namespace,
+                 scope: alpha_scope,
+                 text: "private",
+                 metadata: %{namespace: @namespace, scope: beta_scope}
+               },
+               scope: alpha_scope
+             )
+
+    assert {:error, {:scope_mismatch, ^alpha_scope, ^beta_scope}} =
+             SpectreMnemonic.Knowledge.Base.append(
+               %{type: :skill, name: "wrong", text: "private", scope: beta_scope},
+               scope: alpha_scope
+             )
+
+    assert {:ok, alpha_records} = Manager.replay(scope: alpha_scope)
+
+    refute Enum.any?(
+             alpha_records,
+             &(&1.source_event_id in ["wrong-scope", "conflicting-context"])
+           )
   end
 
   test "governance blocks repeated and terminal-state consolidation" do

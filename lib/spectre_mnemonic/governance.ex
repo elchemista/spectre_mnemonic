@@ -268,7 +268,7 @@ defmodule SpectreMnemonic.Governance do
     :ets.delete_all_objects(@state_table)
     :ets.delete_all_objects(@fact_table)
 
-    case Manager.replay(scopes: :all) do
+    case Manager.replay_all() do
       {:ok, records} ->
         records
         |> Enum.filter(&(&1.family == :memory_states))

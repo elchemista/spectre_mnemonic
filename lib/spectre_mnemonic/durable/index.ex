@@ -92,7 +92,7 @@ defmodule SpectreMnemonic.Durable.Index do
   defp rebuild_state(_state, opts) do
     # The append log is truth; this index is just a fast opinion rebuilt from
     # truth. If it gets confused, replay wins. Very old-fashioned, very useful.
-    {:ok, records} = Manager.replay(Keyword.put(opts, :scopes, :all))
+    {:ok, records} = Manager.replay_all(opts)
 
     records
     |> Enum.reduce(empty_state(), &absorb_record/2)

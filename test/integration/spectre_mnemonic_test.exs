@@ -143,7 +143,7 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert Enum.any?(packet.associations, fn association ->
              association.relation == :related_memory and association.target_id == prior.id and
-               association.metadata.scope == :cross_memory
+               association.metadata.relationship_scope == :cross_memory
            end)
 
     assert {:ok, recalled} = SpectreMnemonic.recall("fix migration rollback invoice", limit: 20)
@@ -839,7 +839,14 @@ defmodule SpectreMnemonic.IntegrationTest do
           duplicate: true,
           opts: [
             send_to: self(),
-            search_results: [%{id: "durable_1", score: 0.9}]
+            search_results: [
+              %{
+                id: "durable_1",
+                namespace: "spectre_mnemonic_test",
+                scope: nil,
+                score: 0.9
+              }
+            ]
           ]
         ]
       ]
@@ -916,6 +923,9 @@ defmodule SpectreMnemonic.IntegrationTest do
       :consolidation_adapter,
       __MODULE__.ConsolidationAdapter
     )
+
+    {:ok, _adapter_input} =
+      SpectreMnemonic.signal("configured adapter consolidation should keep this memory")
 
     assert {:ok, adapter_knowledge} = SpectreMnemonic.consolidate(test_pid: self())
     assert Enum.any?(adapter_knowledge, &(&1.metadata.strategy == :adapter))

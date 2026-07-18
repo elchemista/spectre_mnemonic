@@ -590,7 +590,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert observation.metadata.observation_type == :project_state
   end
 
-  test "scope filters recall while scopes allows explicit cross-scope recall" do
+  test "scope filters recall and multi-scope reads fail closed" do
     {:ok, %{moment: alpha}} =
       SpectreMnemonic.signal("shared invoice retry strategy",
         scope: {:project, "alpha"},
@@ -608,18 +608,14 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert MapSet.member?(scoped_ids, alpha.id)
     refute MapSet.member?(scoped_ids, beta.id)
 
-    assert {:ok, crossed} =
+    assert {:error, :multiple_scopes_not_allowed} =
              SpectreMnemonic.recall("invoice retry",
                scopes: [{:project, "alpha"}, {:project, "beta"}],
                limit: 5
              )
-
-    crossed_ids = MapSet.new(Enum.map(crossed.moments, & &1.id))
-    assert MapSet.member?(crossed_ids, alpha.id)
-    assert MapSet.member?(crossed_ids, beta.id)
   end
 
-  test "unscoped recall stays broad for backward compatibility" do
+  test "unscoped recall stays inside the nil partition" do
     {:ok, %{moment: alpha}} =
       SpectreMnemonic.signal("compatibility scope broad query",
         scope: {:workspace, "alpha"},
@@ -634,8 +630,8 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
 
     assert {:ok, packet} = SpectreMnemonic.recall("compatibility scope broad", limit: 10)
     ids = MapSet.new(Enum.map(packet.moments, & &1.id))
-    assert MapSet.member?(ids, alpha.id)
-    assert MapSet.member?(ids, beta.id)
+    refute MapSet.member?(ids, alpha.id)
+    refute MapSet.member?(ids, beta.id)
   end
 
   test "temporal filters distinguish occurred observed and valid windows" do
