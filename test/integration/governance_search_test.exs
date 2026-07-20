@@ -119,10 +119,11 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
   end
 
   defp restart_scheduler do
-    if pid = Process.whereis(ConsolidationScheduler) do
-      Process.exit(pid, :kill)
-      eventually(fn -> Process.whereis(ConsolidationScheduler) != pid end)
-    end
+    supervisor = SpectreMnemonic.Supervisor
+
+    :ok = Supervisor.terminate_child(supervisor, ConsolidationScheduler)
+    {:ok, _pid} = Supervisor.restart_child(supervisor, ConsolidationScheduler)
+    :ok
   end
 
   defp eventually(fun, attempts \\ 50)

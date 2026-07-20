@@ -529,8 +529,12 @@ defmodule SpectreMnemonic.Persistence.Manager do
   end
 
   @spec dedupe_source(atom(), term(), term()) :: binary()
-  defp dedupe_source(:tombstones, %{family: family, id: id}, _source_event_id),
-    do: "#{family}:#{id}"
+  defp dedupe_source(:tombstones, payload, source_event_id) do
+    case tombstone_target(payload) do
+      {:ok, {family, id}} -> "#{family}:#{id}"
+      :error -> to_string(source_event_id)
+    end
+  end
 
   defp dedupe_source(_family, _payload, source_event_id), do: to_string(source_event_id)
 
@@ -613,6 +617,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
       :stores, _base, configured -> configured
       _key, _base, configured -> configured
     end)
+    |> ensure_stores()
     |> normalize_config()
   end
 
@@ -915,19 +920,21 @@ defmodule SpectreMnemonic.Persistence.Manager do
     # I dont want every store adapter learning three dialects of tombstone.
     strategy = Map.get(output, :strategy, Map.get(output, "strategy", :custom))
 
-    records =
-      output
-      |> semantic_values(:records)
-      |> Enum.map(&semantic_record(&1, opts))
-      |> Enum.reject(&is_nil/1)
-
-    tombstones =
-      [semantic_values(output, :tombstones), replace_id_tombstones(output, selected)]
-      |> List.flatten()
-      |> Enum.map(&semantic_tombstone(&1, opts))
-      |> Enum.reject(&is_nil/1)
-
-    {:ok, %{strategy: strategy, records: records, tombstones: tombstones}}
+    with {:ok, records} <-
+           normalize_semantic_values(
+             semantic_values(output, :records),
+             &semantic_record(&1, opts)
+           ),
+         {:ok, tombstones} <-
+           normalize_semantic_values(
+             List.flatten([
+               semantic_values(output, :tombstones),
+               replace_id_tombstones(output, selected)
+             ]),
+             &semantic_tombstone(&1, opts)
+           ) do
+      {:ok, %{strategy: strategy, records: records, tombstones: tombstones}}
+    end
   rescue
     exception -> {:error, {exception.__struct__, Exception.message(exception)}}
   catch
@@ -936,6 +943,23 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   defp normalize_semantic_output(other, _selected, _opts),
     do: {:error, {:invalid_semantic_compact_output, other}}
+
+  @spec normalize_semantic_values([term()], (term() ->
+                                               {:ok, Record.t()} | :skip | {:error, term()})) ::
+          {:ok, [Record.t()]} | {:error, term()}
+  defp normalize_semantic_values(values, normalizer) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, records} ->
+      case normalizer.(value) do
+        {:ok, record} -> {:cont, {:ok, [record | records]}}
+        :skip -> {:cont, {:ok, records}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, records} -> {:ok, Enum.reverse(records)}
+      {:error, _reason} = error -> error
+    end
+  end
 
   @spec write_semantic_plan(store(), map()) :: {:ok, map()} | {:error, term()}
   defp write_semantic_plan(store, plan) do
@@ -946,6 +970,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
                                                                                       acc ->
         case write_store(store, record) do
           %{result: :ok} ->
+            DurableIndex.upsert(record)
             {:cont, semantic_write_summary(acc, record)}
 
           %{result: {:error, reason}} ->
@@ -972,16 +997,20 @@ defmodule SpectreMnemonic.Persistence.Manager do
     |> List.wrap()
   end
 
-  @spec semantic_record(term(), keyword()) :: Record.t() | nil
-  defp semantic_record(%Record{} = record, opts) do
-    case normalize_record_context(record, opts) do
-      {:ok, record} -> record
-      {:error, _reason} -> nil
+  @spec semantic_record(term(), keyword()) :: {:ok, Record.t()} | :skip | {:error, term()}
+  defp semantic_record(%Record{} = record, opts), do: normalize_record_context(record, opts)
+
+  defp semantic_record({family, payload}, opts) when is_atom(family) do
+    with {:ok, payload} <- prepare_payload_context(payload, opts) do
+      {:ok,
+       build_record(
+         family,
+         :put,
+         payload,
+         Keyword.put(opts, :metadata, %{semantic_compacted?: true})
+       )}
     end
   end
-
-  defp semantic_record({family, payload}, opts) when is_atom(family),
-    do: build_record(family, :put, payload, Keyword.put(opts, :metadata, %{semantic_compacted?: true}))
 
   defp semantic_record(%{family: family, payload: payload}, opts) when is_atom(family),
     do: semantic_record({family, payload}, opts)
@@ -990,16 +1019,25 @@ defmodule SpectreMnemonic.Persistence.Manager do
        when is_binary(family) do
     case Family.from_string(family) do
       {:ok, family} -> semantic_record({family, payload}, opts)
-      :error -> nil
+      :error -> :skip
     end
   end
 
-  @spec semantic_tombstone(term(), keyword()) :: Record.t() | nil
-  defp semantic_tombstone(%Record{} = record, opts), do: semantic_record(record, opts)
+  defp semantic_record(_other, _opts), do: :skip
+
+  @spec semantic_tombstone(term(), keyword()) :: {:ok, Record.t()} | :skip | {:error, term()}
+  defp semantic_tombstone(%Record{} = record, opts) do
+    case semantic_record(record, opts) do
+      {:ok, %Record{family: :tombstones} = record} -> {:ok, record}
+      {:ok, %Record{family: family}} -> {:error, {:invalid_tombstone_family, family}}
+      other -> other
+    end
+  end
 
   defp semantic_tombstone({family, id}, opts) when is_atom(family) and is_binary(id) do
-    build_record(:tombstones, :put, %{family: family, id: id, forgotten_at: DateTime.utc_now()},
-      Keyword.put(opts, :metadata, %{semantic_compacted?: true})
+    semantic_record(
+      {:tombstones, %{family: family, id: id, forgotten_at: DateTime.utc_now()}},
+      opts
     )
   end
 
@@ -1011,11 +1049,11 @@ defmodule SpectreMnemonic.Persistence.Manager do
        when is_binary(family) and is_binary(id) do
     case Family.from_string(family) do
       {:ok, family} -> semantic_tombstone({family, id}, opts)
-      :error -> nil
+      :error -> :skip
     end
   end
 
-  defp semantic_tombstone(_other, _opts), do: nil
+  defp semantic_tombstone(_other, _opts), do: :skip
 
   @spec replace_id_tombstones(map(), [Record.t()]) :: [term()]
   defp replace_id_tombstones(output, selected) do
@@ -1160,11 +1198,20 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   defp find_record([store | rest], family, id, opts) do
     if function_exported?(store.adapter, :get, 3) do
-      store.adapter.get(family, id, store.opts)
+      safe_store_get(store, family, id)
       |> find_record_result(rest, family, id, opts)
     else
       find_record(rest, family, id, opts)
     end
+  end
+
+  @spec safe_store_get(store(), atom(), binary()) :: term()
+  defp safe_store_get(store, family, id) do
+    store.adapter.get(family, id, store.opts)
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   @spec find_record_result(term(), [store()], atom(), binary(), keyword()) ::
@@ -1354,7 +1401,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
           |> Enum.map(&tag_search_result(&1, store.id))
           |> Enum.filter(&search_result_visible?(&1, opts))
 
-        {:error, _reason} -> []
+        {:error, _reason} ->
+          []
       end
     else
       []
@@ -1414,9 +1462,9 @@ defmodule SpectreMnemonic.Persistence.Manager do
       records
       |> Enum.filter(&(&1.family == :tombstones))
       |> Enum.flat_map(fn record ->
-        case record.payload do
-          %{family: family, id: id} -> [{record.namespace, record.scope, family, id}]
-          _other -> []
+        case tombstone_target(record.payload) do
+          {:ok, {family, id}} -> [{record.namespace, record.scope, family, id}]
+          :error -> []
         end
       end)
       |> MapSet.new()
@@ -1429,9 +1477,14 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec safe_capabilities(store()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
   defp safe_capabilities(store) do
-    store.adapter.capabilities(store.opts)
+    case store.adapter.capabilities(store.opts) do
+      capabilities when is_list(capabilities) -> capabilities
+      _invalid -> []
+    end
   rescue
     _exception -> []
+  catch
+    _kind, _reason -> []
   end
 
   @spec emit_write_event(store(), Record.t(), term(), integer()) :: :ok | term()
@@ -1446,8 +1499,38 @@ defmodule SpectreMnemonic.Persistence.Manager do
   end
 
   @spec payload_id(term()) :: binary() | nil
-  defp payload_id(%{id: id}) when is_binary(id), do: id
-  defp payload_id(%{id: id}) when is_atom(id), do: Atom.to_string(id)
+  defp payload_id(payload) when is_map(payload) do
+    case map_value(payload, :id) do
+      id when is_binary(id) -> id
+      id when is_atom(id) -> Atom.to_string(id)
+      _other -> nil
+    end
+  end
+
   defp payload_id(_payload), do: nil
 
+  @spec tombstone_target(term()) :: {:ok, {atom(), binary()}} | :error
+  defp tombstone_target(payload) when is_map(payload) do
+    with {:ok, family} <- normalize_family(map_value(payload, :family)),
+         id when is_binary(id) <- payload_id(payload) do
+      {:ok, {family, id}}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp tombstone_target(_payload), do: :error
+
+  @spec normalize_family(term()) :: {:ok, atom()} | :error
+  defp normalize_family(family) when is_atom(family), do: {:ok, family}
+  defp normalize_family(family) when is_binary(family), do: Family.from_string(family)
+  defp normalize_family(_family), do: :error
+
+  @spec map_value(map(), atom()) :: term()
+  defp map_value(map, key) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, Atom.to_string(key))
+    end
+  end
 end

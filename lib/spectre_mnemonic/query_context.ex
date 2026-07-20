@@ -99,10 +99,18 @@ defmodule SpectreMnemonic.QueryContext do
   @spec validate_partition(t(), keyword()) :: :ok | {:error, term()}
   defp validate_partition(context, opts) do
     requested = requested_scopes(opts)
+    requested_scope = Keyword.get(opts, :scope)
 
-    if context.scopes == requested,
-      do: :ok,
-      else: {:error, {:query_context_scope_mismatch, context.scopes, requested}}
+    cond do
+      context.scope != requested_scope ->
+        {:error, {:query_context_scope_mismatch, [context.scope], requested}}
+
+      context.scopes != requested ->
+        {:error, {:query_context_scope_mismatch, context.scopes, requested}}
+
+      true ->
+        :ok
+    end
   end
 
   @spec keywords(binary()) :: [binary()]

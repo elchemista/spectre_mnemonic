@@ -179,7 +179,12 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     now = DateTime.utc_now()
     type = event |> Map.get(:type, :fact) |> normalize_type()
     namespace = Identity.namespace!(opts)
-    scope = if Keyword.has_key?(opts, :scope), do: Keyword.get(opts, :scope), else: Map.get(event, :scope)
+
+    scope =
+      if Keyword.has_key?(opts, :scope),
+        do: Keyword.get(opts, :scope),
+        else: Map.get(event, :scope)
+
     event_namespace = Map.get(event, :namespace)
 
     if event_namespace not in [nil, namespace] do

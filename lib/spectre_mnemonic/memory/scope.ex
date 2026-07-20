@@ -121,8 +121,14 @@ defmodule SpectreMnemonic.Memory.Scope do
   defp validate_nested(memory, validator) do
     Enum.reduce_while([:payload, :record], :ok, fn key, :ok ->
       memory
-      |> declared_value(key)
-      |> validate_nested_value(validator)
+      |> direct_values(key)
+      |> Enum.reduce_while(:ok, fn nested, :ok ->
+        validate_nested_value({:ok, nested}, validator)
+      end)
+      |> case do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
     end)
   end
 
@@ -167,38 +173,36 @@ defmodule SpectreMnemonic.Memory.Scope do
 
   @spec declared_values(map(), atom()) :: [term()]
   defp declared_values(memory, key) do
-    top = optional_value(memory, key)
-
     nested =
-      case declared_value(memory, :metadata) do
-        {:ok, metadata} when is_map(metadata) -> optional_value(metadata, key)
-        _missing -> []
-      end
+      memory
+      |> direct_values(:metadata)
+      |> Enum.filter(&is_map/1)
+      |> Enum.flat_map(&direct_values(&1, key))
 
-    top ++ nested
+    direct_values(memory, key) ++ nested
   end
 
-  @spec optional_value(map(), atom()) :: [term()]
-  defp optional_value(map, key) do
-    case declared_value(map, key) do
-      {:ok, value} -> [value]
-      :error -> []
-    end
+  @spec direct_values(map(), atom()) :: [term()]
+  defp direct_values(map, key) do
+    string_key = Atom.to_string(key)
+
+    []
+    |> maybe_prepend(Map.has_key?(map, string_key), Map.get(map, string_key))
+    |> maybe_prepend(Map.has_key?(map, key), Map.get(map, key))
   end
 
   @spec metadata_value(map(), atom()) :: term()
   defp metadata_value(memory, key) do
-    case declared_value(memory, :metadata) do
-      {:ok, metadata} when is_map(metadata) ->
-        case declared_value(metadata, key) do
-          {:ok, value} -> value
-          :error -> nil
-        end
-
-      _missing ->
-        nil
-    end
+    memory
+    |> direct_values(:metadata)
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(&direct_values(&1, key))
+    |> List.first()
   end
+
+  @spec maybe_prepend([term()], boolean(), term()) :: [term()]
+  defp maybe_prepend(values, true, value), do: [value | values]
+  defp maybe_prepend(values, false, _value), do: values
 
   @spec declared_value(map(), atom()) :: {:ok, term()} | :error
   defp declared_value(map, key) do

@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Persistence.ManagerTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.Codec
@@ -77,6 +78,21 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
              Manager.append(:moments, %{id: "mom_1"})
 
     assert [%{store: :secondary, result: {:error, :secondary_down}}] = failures
+  end
+
+  test "append rejects conflicting atom and string scope declarations" do
+    configure_stores([store(:primary, role: :primary)])
+    alpha = {:tenant, "alpha"}
+    beta = {:tenant, "beta"}
+
+    assert {:error, :inconsistent_memory_context} =
+             Manager.append(
+               :moments,
+               %{"scope" => beta, id: "mixed-scope", scope: alpha},
+               scope: alpha
+             )
+
+    refute_receive {:fake_put, :primary, _record}
   end
 
   test "file replay deduplicates records by dedupe key" do
@@ -185,6 +201,42 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert Enum.any?(records, &(&1.family == :tombstones))
   end
 
+  test "string-keyed tombstones survive replay and physical compaction" do
+    configure_file_store()
+    scope = {:tenant, "string-tombstone"}
+
+    assert {:ok, _} =
+             Manager.append(
+               :moments,
+               %{"id" => "mom_string", "text" => "string tombstone target"},
+               scope: scope
+             )
+
+    assert {:ok, before_tombstone} =
+             DurableIndex.search("string tombstone target", scope: scope)
+
+    assert Enum.any?(before_tombstone, &(&1.id == "mom_string"))
+
+    assert {:ok, _} =
+             Manager.append(
+               :tombstones,
+               %{"family" => "moments", "id" => "mom_string"},
+               scope: scope
+             )
+
+    assert {:ok, records} = Manager.replay(scope: scope)
+    refute Enum.any?(records, &(&1.family == :moments))
+
+    assert {:ok, after_tombstone} =
+             DurableIndex.search("string tombstone target", scope: scope)
+
+    refute Enum.any?(after_tombstone, &(&1.id == "mom_string"))
+
+    assert {:ok, [{:local_file, {:ok, _snapshot}}]} = Manager.compact(mode: :physical)
+    assert {:ok, compacted} = Manager.replay(scope: scope)
+    refute Enum.any?(compacted, &(&1.family == :moments))
+  end
+
   test "compact defaults to physical file snapshot mode" do
     configure_file_store()
 
@@ -248,6 +300,9 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert result.tombstones == 1
     assert_receive {:fake_put, :semantic_replay, %Record{family: :knowledge}}
     assert_receive {:fake_put, :semantic_replay, %Record{family: :tombstones}}
+
+    assert {:ok, indexed} = DurableIndex.search("compact mom_source")
+    assert Enum.any?(indexed, &(&1.id == "know_compact"))
   end
 
   test "semantic compaction skips unknown string families without creating atoms" do
@@ -276,6 +331,44 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert result.strategy == :custom
     assert result.written == 0
+  end
+
+  test "semantic compaction rejects adapter output from another scope" do
+    alpha = {:tenant, "semantic-alpha"}
+    beta = {:tenant, "semantic-beta"}
+    source = record(:moments, %{id: "mom_source", scope: alpha, attention: 4.0})
+
+    configure_stores([
+      [
+        id: :semantic_replay,
+        adapter: __MODULE__.FakeAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :semantic_replay,
+          capabilities: [:append, :replay],
+          frames: [source]
+        ]
+      ]
+    ])
+
+    assert {:ok,
+            %{
+              results: [
+                {:semantic_replay, {:error, {:scope_mismatch, ^alpha, ^beta}}}
+              ],
+              written: 0,
+              tombstones: 0
+            }} =
+             Manager.compact(
+               mode: :semantic,
+               scope: alpha,
+               semantic_compact_adapter: __MODULE__.ConflictingScopeAdapter,
+               conflicting_scope: beta
+             )
+
+    refute_receive {:fake_put, :semantic_replay, _record}
   end
 
   test "semantic compaction builds adapter input from replay_fold when available" do
@@ -393,6 +486,79 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert {:error, :not_found} = Manager.get(:moments, "missing")
   end
 
+  test "manager lookup skips crashing adapters and continues to the next store" do
+    configure_stores([
+      [
+        id: :crashing_lookup,
+        adapter: __MODULE__.CrashingLookupAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: []
+      ],
+      [
+        id: :fallback_lookup,
+        adapter: __MODULE__.FakeAdapter,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :fallback_lookup,
+          capabilities: [:lookup],
+          lookup: %{
+            {:moments, "mom_safe"} => %{
+              id: "mom_safe",
+              namespace: "spectre_mnemonic_test",
+              scope: nil
+            }
+          }
+        ]
+      ]
+    ])
+
+    assert {:ok, %{id: "mom_safe"}} = Manager.get(:moments, "mom_safe")
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
+  test "invalid and throwing capability callbacks are treated as unsupported" do
+    configure_stores([
+      [
+        id: :invalid_capabilities,
+        adapter: __MODULE__.InvalidCapabilitiesAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: []
+      ],
+      [
+        id: :throwing_capabilities,
+        adapter: __MODULE__.ThrowingCapabilitiesAdapter,
+        duplicate: true,
+        opts: []
+      ]
+    ])
+
+    assert {:ok, []} = Manager.replay()
+    assert {:ok, []} = Manager.search("unsupported adapters")
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
+  test "write adapter exceptions become store failures without crashing the manager" do
+    configure_stores([
+      [
+        id: :crashing_write,
+        adapter: __MODULE__.CrashingWriteAdapter,
+        role: :primary,
+        duplicate: true,
+        opts: []
+      ]
+    ])
+
+    assert {:error, {:primary_persistent_memory_failed, [failure]}} =
+             Manager.append(:moments, %{id: "crash-safe"})
+
+    assert failure.store == :crashing_write
+    assert match?({:error, {RuntimeError, _message}}, failure.result)
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
   test "manager search uses stores that advertise query capability" do
     configure_stores([
       [
@@ -418,6 +584,209 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert {:ok, [%{id: "mom_1", score: 0.9, store: :searchable}]} =
              Manager.search("memory")
+  end
+
+  test "configuration fallback, automatic primary role, scalar payloads, and idempotency agree" do
+    assert {:error, {:already_started, pid}} = Manager.start_link()
+    assert is_pid(pid)
+
+    Application.put_env(:spectre_mnemonic, :persistent_memory, stores: [])
+    assert [default_store] = Keyword.fetch!(Manager.config(), :stores)
+    assert Keyword.fetch!(default_store, :id) == :local_file
+
+    configure_stores(
+      [
+        store(:automatic_primary),
+        store(:secondary)
+      ],
+      write_mode: :primary_only
+    )
+
+    assert {:ok, %{record: first, stores: [%{store: :automatic_primary}]}} =
+             Manager.append(:knowledge, :scalar_payload,
+               dedupe_key: "scalar-dedupe",
+               source_event_id: "scalar-source"
+             )
+
+    assert first.payload == :scalar_payload
+    assert first.source_event_id == "scalar-source"
+    assert_receive {:fake_put, :automatic_primary, ^first}
+    refute_receive {:fake_put, :secondary, _record}
+
+    assert {:ok, %{record: ^first, stores: [], idempotent?: true}} =
+             Manager.append(:knowledge, :scalar_payload,
+               dedupe_key: "scalar-dedupe",
+               source_event_id: "scalar-source"
+             )
+
+    refute_receive {:fake_put, _store, _record}
+
+    assert {:ok, %{stores: [%{store: :automatic_primary}, %{store: :secondary}]}} =
+             Manager.append(:knowledge, %{id: :atom_id},
+               persistent_memory: [write_mode: :unknown_mode],
+               dedupe_key: "unknown-routing"
+             )
+
+    assert {:ok, %{stores: [%{store: :local_file}]}} =
+             Manager.append(:knowledge, %{id: "fallback-store"},
+               persistent_memory: [stores: []],
+               dedupe_key: "fallback-store"
+             )
+  end
+
+  test "put rejects namespace and scope conflicts while normalizing assignable records" do
+    configure_stores([store(:primary, role: :primary)])
+
+    foreign = %{record(:moments, %{id: "foreign"}) | namespace: "another_namespace"}
+
+    assert {:error, {:namespace_mismatch, "spectre_mnemonic_test", "another_namespace"}} =
+             Manager.put(foreign)
+
+    scoped = %{record(:moments, %{id: "scoped", scope: :beta}) | scope: :beta}
+    assert {:error, {:scope_mismatch, :alpha, :beta}} = Manager.put(scoped, scope: :alpha)
+
+    assignable = %Record{
+      id: "record-assignable",
+      family: :knowledge,
+      operation: :put,
+      payload: %Date{year: 2026, month: 7, day: 20},
+      metadata: %{},
+      inserted_at: DateTime.utc_now()
+    }
+
+    assert {:ok, %{record: normalized}} = Manager.put(assignable)
+    assert normalized.namespace == "spectre_mnemonic_test"
+    assert normalized.payload == assignable.payload
+    assert is_binary(normalized.dedupe_key)
+  end
+
+  test "checked list and fold replay report every adapter failure mode" do
+    for replay_result <- [
+          {:error, :replay_down},
+          :unexpected_replay,
+          {:raise, "replay raised"},
+          {:throw, :replay_threw},
+          {:exit, :replay_exited}
+        ] do
+      configure_chaos_store([:replay], replay_result: replay_result)
+
+      assert {:error, {:persistent_memory_replay_failed, [%{store: :chaos, reason: _reason}]}} =
+               Manager.replay()
+    end
+
+    for fold_result <- [
+          {:error, :fold_down},
+          :unexpected_fold,
+          {:raise, "fold raised"},
+          {:throw, :fold_threw},
+          {:exit, :fold_exited}
+        ] do
+      configure_chaos_store([:replay_fold], fold_result: fold_result)
+
+      assert {:error, {:persistent_memory_replay_failed, [%{store: :chaos, reason: _reason}]}} =
+               Manager.replay_all()
+    end
+
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
+  test "lookup and search skip malformed, out-of-scope, and crashing adapters" do
+    alpha = {:tenant, "lookup-alpha"}
+    beta = {:tenant, "lookup-beta"}
+
+    configure_stores([
+      chaos_store([:lookup], get_result: {:ok, %{id: "target", scope: beta}}),
+      [
+        id: :fallback,
+        adapter: __MODULE__.FakeAdapter,
+        duplicate: true,
+        opts: [
+          send_to: self(),
+          id: :fallback,
+          capabilities: [:lookup],
+          lookup: %{
+            {:moments, "target"} => %{
+              id: "target",
+              namespace: "spectre_mnemonic_test",
+              scope: alpha
+            }
+          }
+        ]
+      ]
+    ])
+
+    assert {:ok, %{scope: ^alpha}} = Manager.get(:moments, "target", scope: alpha)
+
+    for get_result <- [:unexpected, {:throw, :lookup_threw}, {:exit, :lookup_exited}] do
+      configure_chaos_store([:lookup], get_result: get_result)
+      assert {:error, :not_found} = Manager.get(:moments, "missing")
+    end
+
+    for search_result <- [
+          {:error, :search_down},
+          :unexpected,
+          {:raise, "search raised"},
+          {:throw, :search_threw},
+          {:exit, :search_exited}
+        ] do
+      configure_chaos_store([:fulltext_search], search_result: search_result)
+      assert {:ok, []} = Manager.search("chaos search")
+    end
+
+    configure_chaos_store([:search], search_result: {:ok, [:raw_adapter_result]})
+
+    assert {:ok, []} = Manager.search("raw result")
+
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
+  test "write normalization handles ok values, unexpected values, throws, and exits" do
+    configure_chaos_store([:append], put_result: {:ok, :stored})
+    assert {:ok, _result} = Manager.append(:moments, %{id: "ok-value"})
+
+    for put_result <- [:unexpected, {:throw, :write_threw}, {:exit, :write_exited}] do
+      configure_chaos_store([:append], put_result: put_result)
+      Manager.reset_dedupe()
+
+      assert {:error, {:primary_persistent_memory_failed, [failure]}} =
+               Manager.append(:moments, %{id: inspect(put_result)})
+
+      assert match?({:error, _reason}, failure.result)
+    end
+
+    assert Process.alive?(Process.whereis(Manager))
+  end
+
+  test "semantic adapters and native compaction contain malformed and exceptional results" do
+    source = record(:moments, %{id: "semantic-chaos", attention: 1.0})
+
+    for adapter <- [
+          __MODULE__.ErrorSemanticAdapter,
+          __MODULE__.UnexpectedSemanticAdapter,
+          __MODULE__.InvalidOutputSemanticAdapter,
+          __MODULE__.RaisingSemanticAdapter,
+          __MODULE__.ThrowingSemanticAdapter
+        ] do
+      configure_stores([
+        chaos_store([:replay], replay_result: {:ok, [source]})
+      ])
+
+      assert {:ok, %{results: [{:chaos, {:error, _reason}}]}} =
+               Manager.compact(mode: :semantic, semantic_compact_adapter: adapter)
+    end
+
+    for native_result <- [
+          {:ok, :native_value},
+          {:error, :native_down},
+          {:raise, "native raised"},
+          {:throw, :native_threw},
+          {:exit, :native_exited}
+        ] do
+      configure_chaos_store([:semantic_compact], semantic_result: native_result)
+      assert {:ok, %{results: [{:chaos, _result}]}} = Manager.compact(mode: :semantic)
+    end
+
+    assert Process.alive?(Process.whereis(Manager))
   end
 
   test "built-in adapter capabilities describe sql document and object styles" do
@@ -484,6 +853,20 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
         opts
       )
     )
+  end
+
+  defp configure_chaos_store(capabilities, opts) do
+    configure_stores([chaos_store(capabilities, opts)])
+  end
+
+  defp chaos_store(capabilities, opts) do
+    [
+      id: :chaos,
+      adapter: __MODULE__.ChaosAdapter,
+      role: :primary,
+      duplicate: true,
+      opts: Keyword.put(opts, :capabilities, capabilities)
+    ]
   end
 
   defp store(id, opts \\ []) do
@@ -590,6 +973,25 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     end
   end
 
+  defmodule ConflictingScopeAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+
+    @impl SpectreMnemonic.Persistence.Compact.Adapter
+    def compact(_input, opts) do
+      {:ok,
+       %{
+         records: [
+           {:knowledge,
+            %{
+              id: "cross-scope-output",
+              scope: Keyword.fetch!(opts, :conflicting_scope),
+              text: "must not be written"
+            }}
+         ]
+       }}
+    end
+  end
+
   defmodule NativeSemanticAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
@@ -604,5 +1006,112 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       send(Keyword.fetch!(opts, :send_to), {:native_semantic_compact, input})
       {:ok, %{strategy: :native_test, written: 3, tombstones: 1}}
     end
+  end
+
+  defmodule CrashingLookupAdapter do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(_opts), do: [:lookup]
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, _opts), do: :ok
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def get(_family, _id, _opts), do: raise("lookup unavailable")
+  end
+
+  defmodule InvalidCapabilitiesAdapter do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(_opts), do: :invalid
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, _opts), do: :ok
+  end
+
+  defmodule ThrowingCapabilitiesAdapter do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(_opts), do: throw(:capability_failure)
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, _opts), do: :ok
+  end
+
+  defmodule CrashingWriteAdapter do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(_opts), do: [:append]
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, _opts), do: raise("write unavailable")
+  end
+
+  defmodule ChaosAdapter do
+    @behaviour SpectreMnemonic.Persistence.Store.Adapter
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def capabilities(opts), do: Keyword.get(opts, :capabilities, [])
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def put(_record, opts), do: resolve(Keyword.get(opts, :put_result, :ok))
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def replay(opts), do: resolve(Keyword.get(opts, :replay_result, {:ok, []}))
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def replay_fold(opts, _acc, _fun),
+      do: resolve(Keyword.get(opts, :fold_result, {:error, :missing_fold_result}))
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def get(_family, _id, opts),
+      do: resolve(Keyword.get(opts, :get_result, {:error, :not_found}))
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def search(_cue, opts),
+      do: resolve(Keyword.get(opts, :search_result, {:ok, []}))
+
+    @impl SpectreMnemonic.Persistence.Store.Adapter
+    def semantic_compact(_input, opts),
+      do: resolve(Keyword.get(opts, :semantic_result, {:ok, %{}}))
+
+    defp resolve({:raise, message}), do: raise(message)
+    defp resolve({:throw, reason}), do: throw(reason)
+    defp resolve({:exit, reason}), do: exit(reason)
+    defp resolve(result), do: result
+  end
+
+  defmodule ErrorSemanticAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+    @impl true
+    def compact(_input, _opts), do: {:error, :semantic_rejected}
+  end
+
+  defmodule UnexpectedSemanticAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+    @impl true
+    def compact(_input, _opts), do: :unexpected
+  end
+
+  defmodule InvalidOutputSemanticAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+    @impl true
+    def compact(_input, _opts), do: {:ok, :invalid_output}
+  end
+
+  defmodule RaisingSemanticAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+    @impl true
+    def compact(_input, _opts), do: raise("semantic raised")
+  end
+
+  defmodule ThrowingSemanticAdapter do
+    @behaviour SpectreMnemonic.Persistence.Compact.Adapter
+    @impl true
+    def compact(_input, _opts), do: throw(:semantic_threw)
   end
 end

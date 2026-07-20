@@ -61,7 +61,9 @@ defmodule SpectreMnemonic.Governance do
 
   def observe_moment(%{id: id} = moment, opts) when is_binary(id) do
     opts = context_opts(moment, opts)
-    state = normalize_state(Keyword.get(opts, :memory_state, Keyword.get(opts, :state, :short_term)))
+
+    state =
+      normalize_state(Keyword.get(opts, :memory_state, Keyword.get(opts, :state, :short_term)))
 
     case fact_claim(moment) do
       nil -> append_state(id, state, :observed, opts, %{kind: Map.get(moment, :kind)})
@@ -78,7 +80,9 @@ defmodule SpectreMnemonic.Governance do
       %{id: id} = moment, :ok when is_binary(id) ->
         event_opts = context_opts(moment, opts)
 
-        case append_state(id, :promoted, :consolidated, event_opts, %{kind: Map.get(moment, :kind)}) do
+        case append_state(id, :promoted, :consolidated, event_opts, %{
+               kind: Map.get(moment, :kind)
+             }) do
           :ok -> {:cont, :ok}
           {:error, reason} -> {:halt, {:error, reason}}
         end
@@ -243,7 +247,9 @@ defmodule SpectreMnemonic.Governance do
               transition_metadata(current, metadata)
             )
 
-          case Manager.append(:memory_states, event,
+          case Manager.append(
+                 :memory_states,
+                 event,
                  opts
                  |> Keyword.put(:record_id, event.id)
                  |> Keyword.put(:scope, event.scope)

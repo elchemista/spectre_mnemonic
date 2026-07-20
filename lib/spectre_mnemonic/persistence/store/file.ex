@@ -9,8 +9,11 @@ defmodule SpectreMnemonic.Persistence.Store.File do
 
   @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
+  alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Store.FileFrame
   alias SpectreMnemonic.Persistence.Store.Record
+
+  @typep fold_result(acc) :: {:ok, acc} | {:halted, acc} | {:error, term()}
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
   @spec capabilities(keyword()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
@@ -35,7 +38,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
-  @spec replay(keyword()) :: {:ok, [tuple()]}
+  @spec replay(keyword()) :: {:ok, [tuple()]} | {:error, term()}
   def replay(opts) do
     with {:ok, frames} <- replay_fold(opts, [], fn frame, acc -> {:cont, [frame | acc]} end) do
       {:ok, Enum.reverse(frames)}
@@ -49,8 +52,10 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   def replay_fold(opts, acc, fun) when is_function(fun, 2) do
     root = data_root(opts)
 
-    with {:ok, acc} <- replay_snapshot_fold(root, acc, fun) do
-      replay_path_fold(active_path(root), acc, fun)
+    case replay_snapshot_fold(root, acc, fun) do
+      {:ok, acc} -> normalize_fold_result(replay_path_fold(active_path(root), acc, fun))
+      {:halted, acc} -> {:ok, acc}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -66,6 +71,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     records = supplied_records || compactable_records(root)
     snapshot = snapshot_path(root)
     temporary = snapshot <> ".tmp"
+    retain = Keyword.get(opts, :retain_compacted_segments, 1)
 
     payload = %{
       version: 1,
@@ -73,10 +79,11 @@ defmodule SpectreMnemonic.Persistence.Store.File do
       records: records
     }
 
-    with :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
+    with :ok <- validate_retention(retain),
+         :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
          :ok <- install_snapshot(snapshot, temporary),
          :ok <- rotate_active_segment(root),
-         :ok <- prune_rotated_segments(root, Keyword.get(opts, :retain_compacted_segments, 1)) do
+         :ok <- prune_rotated_segments(root, retain) do
       {:ok, snapshot}
     else
       {:error, reason} ->
@@ -109,7 +116,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   defp previous_snapshot_path(root), do: Path.join([root, "snapshots", "previous.term"])
 
   @spec replay_snapshot_fold(Path.t(), acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc} | {:error, term()}
+          fold_result(acc)
         when acc: term()
   defp replay_snapshot_fold(root, acc, fun) do
     case read_snapshot(snapshot_path(root)) do
@@ -119,16 +126,17 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   @spec replay_previous_and_latest_rotated(Path.t(), acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc} | {:error, term()}
+          fold_result(acc)
         when acc: term()
   defp replay_previous_and_latest_rotated(root, acc, fun) do
-    with {:ok, acc} <- replay_previous_snapshot(root, acc, fun) do
-      replay_latest_rotated(root, acc, fun)
+    case replay_previous_snapshot(root, acc, fun) do
+      {:ok, acc} -> replay_latest_rotated(root, acc, fun)
+      {:halted, acc} -> {:halted, acc}
     end
   end
 
   @spec replay_previous_snapshot(Path.t(), acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc}
+          {:ok, acc} | {:halted, acc}
         when acc: term()
   defp replay_previous_snapshot(root, acc, fun) do
     case read_snapshot(previous_snapshot_path(root)) do
@@ -152,22 +160,22 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   @spec fold_snapshot_records([Record.t()], acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc}
+          {:ok, acc} | {:halted, acc}
         when acc: term()
   defp fold_snapshot_records(records, acc, fun) do
     result =
       records
       |> Enum.with_index(1)
-      |> Enum.reduce_while(acc, fn {record, seq}, acc ->
+      |> Enum.reduce_while({:ok, acc}, fn {record, seq}, {:ok, acc} ->
         timestamp = snapshot_timestamp(record)
 
         case fun.({seq, timestamp, record}, acc) do
-          {:cont, acc} -> {:cont, acc}
-          {:halt, acc} -> {:halt, acc}
+          {:cont, acc} -> {:cont, {:ok, acc}}
+          {:halt, acc} -> {:halt, {:halted, acc}}
         end
       end)
 
-    {:ok, result}
+    result
   end
 
   @spec snapshot_timestamp(term()) :: integer()
@@ -177,7 +185,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   defp snapshot_timestamp(_record), do: 0
 
   @spec replay_latest_rotated(Path.t(), acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc} | {:error, term()}
+          fold_result(acc)
         when acc: term()
   defp replay_latest_rotated(root, acc, fun) do
     root
@@ -254,6 +262,10 @@ defmodule SpectreMnemonic.Persistence.Store.File do
 
   defp prune_rotated_segments(_root, _retain), do: {:error, :invalid_retention}
 
+  @spec validate_retention(term()) :: :ok | {:error, :invalid_retention}
+  defp validate_retention(retain) when is_integer(retain) and retain >= 0, do: :ok
+  defp validate_retention(_retain), do: {:error, :invalid_retention}
+
   @spec rotated_paths(Path.t()) :: [Path.t()]
   defp rotated_paths(root) do
     [root, "segments", "compacted-*.smem"]
@@ -328,9 +340,9 @@ defmodule SpectreMnemonic.Persistence.Store.File do
       records
       |> Enum.filter(&(&1.family == :tombstones))
       |> Enum.flat_map(fn record ->
-        case record.payload do
-          %{family: family, id: id} -> [{record.namespace, record.scope, family, id}]
-          _other -> []
+        case tombstone_target(record.payload) do
+          {:ok, {family, id}} -> [{record.namespace, record.scope, family, id}]
+          :error -> []
         end
       end)
       |> MapSet.new()
@@ -345,8 +357,31 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   @spec payload_id(term()) :: term()
-  defp payload_id(%{id: id}), do: id
+  defp payload_id(payload) when is_map(payload) do
+    Map.get(payload, :id) || Map.get(payload, "id")
+  end
+
   defp payload_id(_payload), do: nil
+
+  @spec tombstone_target(term()) :: {:ok, {atom(), binary()}} | :error
+  defp tombstone_target(payload) when is_map(payload) do
+    family = Map.get(payload, :family) || Map.get(payload, "family")
+    id = payload_id(payload)
+
+    with {:ok, family} <- normalize_family(family),
+         true <- is_binary(id) do
+      {:ok, {family, id}}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp tombstone_target(_payload), do: :error
+
+  @spec normalize_family(term()) :: {:ok, atom()} | :error
+  defp normalize_family(family) when is_atom(family), do: {:ok, family}
+  defp normalize_family(family) when is_binary(family), do: Family.from_string(family)
+  defp normalize_family(_family), do: :error
 
   @spec next_seq(Path.t()) :: pos_integer()
   defp next_seq(path) do
@@ -378,13 +413,18 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   @spec replay_path_fold(Path.t(), acc, FileFrame.fold_fun(acc)) ::
-          {:ok, acc} | {:error, term()}
+          fold_result(acc)
         when acc: term()
   defp replay_path_fold(path, acc, fun) do
     case File.open(path, [:read, :binary]) do
       {:ok, io} ->
         try do
-          {:ok, FileFrame.read_frames(io, acc, fun)}
+          FileFrame.read_frames(io, {:ok, acc}, fn frame, {:ok, acc} ->
+            case fun.(frame, acc) do
+              {:cont, acc} -> {:cont, {:ok, acc}}
+              {:halt, acc} -> {:halt, {:halted, acc}}
+            end
+          end)
         after
           File.close(io)
         end
@@ -396,4 +436,9 @@ defmodule SpectreMnemonic.Persistence.Store.File do
         {:error, reason}
     end
   end
+
+  @spec normalize_fold_result({:ok, term()} | {:halted, term()} | {:error, term()}) ::
+          {:ok, term()} | {:error, term()}
+  defp normalize_fold_result({:halted, acc}), do: {:ok, acc}
+  defp normalize_fold_result(result), do: result
 end

@@ -30,8 +30,11 @@ defmodule SpectreMnemonic.Identity do
       {:error, :multiple_scopes_not_allowed}
     else
       case configured_namespace() do
-        {:ok, configured} -> fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
-        {:error, _reason} = error -> error
+        {:ok, configured} ->
+          fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
+
+        {:error, _reason} = error ->
+          error
       end
     end
   end
@@ -61,7 +64,8 @@ defmodule SpectreMnemonic.Identity do
   @spec namespace!(keyword()) :: namespace()
   def namespace!(opts \\ []) do
     case fetch_namespace(opts) do
-      {:ok, namespace} -> namespace
+      {:ok, namespace} ->
+        namespace
 
       {:error, :namespace_required} ->
         raise ArgumentError,
@@ -87,11 +91,17 @@ defmodule SpectreMnemonic.Identity do
 
   @doc "Extracts a namespace from a record or its metadata."
   @spec namespace(term()) :: namespace() | nil
-  def namespace(%{namespace: namespace}) when is_binary(namespace), do: namespace
-  def namespace(%{"namespace" => namespace}) when is_binary(namespace), do: namespace
+  def namespace(record) when is_map(record) do
+    metadata = [Map.get(record, :metadata), Map.get(record, "metadata")]
 
-  def namespace(%{metadata: metadata}) when is_map(metadata) do
-    Map.get(metadata, :namespace) || Map.get(metadata, "namespace")
+    [Map.get(record, :namespace), Map.get(record, "namespace")]
+    |> Enum.concat(
+      Enum.flat_map(metadata, fn
+        value when is_map(value) -> [Map.get(value, :namespace), Map.get(value, "namespace")]
+        _other -> []
+      end)
+    )
+    |> Enum.find(&is_binary/1)
   end
 
   def namespace(_record), do: nil

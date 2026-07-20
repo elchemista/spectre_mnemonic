@@ -141,6 +141,7 @@ defmodule SpectreMnemonic.MentalModels do
     temporal = Temporal.from_opts(temporal_opts(map, opts), now)
     namespace = Identity.namespace!(opts)
     scope = Keyword.get(opts, :scope, value(map, :scope, nil))
+
     id =
       value(map, :id, Keyword.get(opts, :id) || stable_model_id(namespace, scope, query, answer))
 

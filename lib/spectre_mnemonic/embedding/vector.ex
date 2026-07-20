@@ -133,7 +133,22 @@ defmodule SpectreMnemonic.Embedding.Vector do
 
   @doc "Normalizes a vector and returns a f32 binary."
   @spec normalize_to_f32_binary(vector_input() | term()) :: binary() | nil
-  def normalize_to_f32_binary(vector) do
+  def normalize_to_f32_binary(nil), do: nil
+  def normalize_to_f32_binary([]), do: nil
+  def normalize_to_f32_binary(<<>>), do: nil
+
+  def normalize_to_f32_binary(vector) when is_binary(vector) and rem(byte_size(vector), 4) != 0,
+    do: nil
+
+  def normalize_to_f32_binary(%Nx.Tensor{} = vector), do: do_normalize_to_f32_binary(vector)
+
+  def normalize_to_f32_binary(vector) when is_binary(vector) or is_list(vector),
+    do: do_normalize_to_f32_binary(vector)
+
+  def normalize_to_f32_binary(_vector), do: nil
+
+  @spec do_normalize_to_f32_binary(vector_input()) :: binary() | nil
+  defp do_normalize_to_f32_binary(vector) do
     # Stored vectors use one boring binary format. Lists, tensors, adapters,
     # drama: all of it gets squeezed through here before persistence sees it.
     if nx_available?() do
@@ -322,7 +337,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @spec hamming_similarity(term(), term(), non_neg_integer() | nil) :: float()
   def hamming_similarity(left, right, bits \\ nil) do
     distance = hamming_distance(left, right)
-    bit_count = bits || min(byte_size(left || <<>>) * 8, byte_size(right || <<>>) * 8)
+    bit_count = bits || comparable_bits(left, right)
 
     cond do
       distance == :infinity -> 0.0
@@ -330,6 +345,12 @@ defmodule SpectreMnemonic.Embedding.Vector do
       true -> max(0.0, 1.0 - distance / bit_count)
     end
   end
+
+  @spec comparable_bits(term(), term()) :: non_neg_integer()
+  defp comparable_bits(left, right) when is_binary(left) and is_binary(right),
+    do: min(byte_size(left) * 8, byte_size(right) * 8)
+
+  defp comparable_bits(_left, _right), do: 0
 
   @spec norm([number()]) :: float()
   defp norm(vector) do

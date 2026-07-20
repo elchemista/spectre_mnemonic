@@ -8,10 +8,13 @@ defmodule SpectreMnemonic.Durable.Index do
 
   use GenServer
 
+  require Logger
+
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
+  alias SpectreMnemonic.Persistence.Family
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
@@ -49,8 +52,25 @@ defmodule SpectreMnemonic.Durable.Index do
   def search(cue, opts \\ []), do: call_if_running({:search, cue, opts}, {:ok, []})
 
   @doc "Rebuilds the index from persistent replay."
-  @spec rebuild(keyword()) :: :ok
-  def rebuild(opts \\ []), do: call_if_running({:rebuild, opts})
+  @spec rebuild(keyword()) :: :ok | {:error, term()}
+  def rebuild(opts \\ []) do
+    case Process.whereis(__MODULE__) do
+      nil ->
+        :ok
+
+      _pid ->
+        case GenServer.call(__MODULE__, :begin_rebuild) do
+          {:ok, ref} ->
+            replay = replay_for_rebuild(opts)
+            GenServer.call(__MODULE__, {:finish_rebuild, ref, replay})
+
+          {:error, _reason} = error ->
+            error
+        end
+    end
+  catch
+    :exit, reason -> {:error, {:durable_index_rebuild_failed, reason}}
+  end
 
   @doc "Clears all derived index state."
   @spec reset :: :ok
@@ -65,20 +85,56 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @impl GenServer
   def handle_info(:rebuild, state) do
-    {:noreply, rebuild_state(state, [])}
+    Task.start(fn ->
+      case rebuild() do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("durable index rebuild failed: #{inspect(reason)}")
+      end
+    end)
+
+    {:noreply, state}
   end
 
   @impl GenServer
-  def handle_call({:rebuild, opts}, _from, state) do
-    {:reply, :ok, rebuild_state(state, opts)}
+  def handle_call(:begin_rebuild, _from, %{rebuild: nil} = state) do
+    ref = make_ref()
+    {:reply, {:ok, ref}, %{state | rebuild: %{ref: ref, pending: []}}}
+  end
+
+  def handle_call(:begin_rebuild, _from, state) do
+    {:reply, {:error, :rebuild_in_progress}, state}
+  end
+
+  def handle_call({:finish_rebuild, ref, {:ok, records}}, _from, state) do
+    case state.rebuild do
+      %{ref: ^ref, pending: pending} ->
+        state =
+          records
+          |> merge_rebuild_records(Enum.reverse(pending))
+          |> index_records()
+          |> persist_snapshot()
+
+        {:reply, :ok, state}
+
+      _stale ->
+        {:reply, {:error, :stale_rebuild}, state}
+    end
+  end
+
+  def handle_call({:finish_rebuild, ref, {:error, reason}}, _from, state) do
+    case state.rebuild do
+      %{ref: ^ref} -> {:reply, {:error, reason}, %{state | rebuild: nil}}
+      _stale -> {:reply, {:error, :stale_rebuild}, state}
+    end
   end
 
   def handle_call({:upsert, record}, _from, state) do
-    {:reply, :ok, absorb_record(record, state)}
+    state = state |> upsert_record(record) |> track_rebuild_record(record)
+    {:reply, :ok, state}
   end
 
   def handle_call({:search, cue, opts}, _from, state) do
-    state = recompute_stats(state)
+    state = ensure_stats(state)
     {:reply, {:ok, search_state(state, cue, opts)}, state}
   end
 
@@ -88,27 +144,61 @@ defmodule SpectreMnemonic.Durable.Index do
     {:reply, :ok, state}
   end
 
-  @spec rebuild_state(map(), keyword()) :: map()
-  defp rebuild_state(_state, opts) do
-    # The append log is truth; this index is just a fast opinion rebuilt from
-    # truth. If it gets confused, replay wins. Very old-fashioned, very useful.
-    {:ok, records} = Manager.replay_all(opts)
-
+  @spec index_records([Record.t()]) :: map()
+  defp index_records(records) do
     records
     |> Enum.reduce(empty_state(), &absorb_record/2)
     |> recompute_stats()
-    |> persist_snapshot()
   end
 
   @spec empty_state :: map()
   defp empty_state do
-    %{docs: %{}, states: %{}, doc_freq: %{}, avg_len: 0.0, total_docs: 0}
+    %{
+      docs: %{},
+      states: %{},
+      doc_freq: %{},
+      avg_len: 0.0,
+      total_docs: 0,
+      dirty?: false,
+      rebuild: nil
+    }
   end
+
+  @spec replay_for_rebuild(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
+  defp replay_for_rebuild(opts) do
+    Manager.replay_all(opts)
+  catch
+    :exit, reason -> {:error, {:persistent_memory_replay_exit, reason}}
+  end
+
+  @spec merge_rebuild_records([Record.t()], [Record.t()]) :: [Record.t()]
+  defp merge_rebuild_records(replayed, pending) do
+    (replayed ++ pending)
+    |> Map.new(fn record -> {{record.dedupe_key || record.id, record.family}, record} end)
+    |> Map.values()
+  end
+
+  @spec upsert_record(map(), Record.t()) :: map()
+  defp upsert_record(state, record) do
+    updated = absorb_record(record, state)
+    if updated == state, do: state, else: %{updated | dirty?: true}
+  end
+
+  @spec track_rebuild_record(map(), Record.t()) :: map()
+  defp track_rebuild_record(%{rebuild: %{pending: pending} = rebuild} = state, record) do
+    %{state | rebuild: %{rebuild | pending: [record | pending]}}
+  end
+
+  defp track_rebuild_record(state, _record), do: state
+
+  @spec ensure_stats(map()) :: map()
+  defp ensure_stats(%{dirty?: true} = state), do: recompute_stats(state)
+  defp ensure_stats(state), do: state
 
   @spec absorb_record(Record.t(), map()) :: map()
   defp absorb_record(%Record{family: :memory_states, payload: payload} = record, state)
        when is_map(payload) do
-    memory_id = Map.get(payload, :memory_id)
+    memory_id = payload_value(payload, :memory_id)
 
     if is_binary(memory_id) do
       state_key = {record.namespace, record.scope, memory_id}
@@ -124,7 +214,7 @@ defmodule SpectreMnemonic.Durable.Index do
   defp absorb_record(%Record{family: :tombstones, payload: payload} = record, state)
        when is_map(payload) do
     payload
-    |> Map.get(:id)
+    |> payload_value(:id)
     |> absorb_tombstone(record, payload, state)
   end
 
@@ -139,29 +229,12 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @spec absorb_tombstone(term(), Record.t(), map(), map()) :: map()
   defp absorb_tombstone(memory_id, record, payload, state) when is_binary(memory_id) do
-    state_key = {record.namespace, record.scope, memory_id}
-    doc_key = {record.namespace, record.scope, Map.get(payload, :family), memory_id}
+    doc_key = {record.namespace, record.scope, payload_family(payload), memory_id}
 
-    state
-    |> Map.update!(:states, &put_tombstone_state(&1, state_key, payload))
-    |> Map.update!(:docs, &Map.delete(&1, doc_key))
+    Map.update!(state, :docs, &Map.delete(&1, doc_key))
   end
 
   defp absorb_tombstone(_memory_id, _record, _payload, state), do: state
-
-  @spec put_tombstone_state(map(), {binary(), term(), binary()}, map()) :: map()
-  defp put_tombstone_state(states, {_namespace, _scope, memory_id} = state_key, payload) do
-    tombstone = %{
-      id: "mstate_tombstone_#{memory_id}",
-      memory_id: memory_id,
-      state: :forgotten,
-      reason: :tombstone,
-      metadata: %{},
-      inserted_at: Map.get(payload, :forgotten_at, DateTime.utc_now())
-    }
-
-    Map.update(states, state_key, [tombstone], &[tombstone | &1])
-  end
 
   @spec doc_from_record(Record.t()) :: doc() | nil
   defp doc_from_record(%Record{} = record) do
@@ -221,7 +294,14 @@ defmodule SpectreMnemonic.Durable.Index do
         |> Enum.reduce(acc, fn term, acc -> Map.update(acc, term, 1, &(&1 + 1)) end)
       end)
 
-    %{state | docs: docs, doc_freq: doc_freq, avg_len: avg_len, total_docs: total_docs}
+    %{
+      state
+      | docs: docs,
+        doc_freq: doc_freq,
+        avg_len: avg_len,
+        total_docs: total_docs,
+        dirty?: false
+    }
   end
 
   @spec apply_hidden_states(map(), map()) :: map()
@@ -371,50 +451,107 @@ defmodule SpectreMnemonic.Durable.Index do
   end
 
   @spec payload_text(term()) :: binary()
-  defp payload_text(%{text: text}) when is_binary(text), do: text
-  defp payload_text(%{summary: summary}) when is_binary(summary), do: summary
-  defp payload_text(%{statement: statement}) when is_binary(statement), do: statement
+  defp payload_text(payload) when is_map(payload) do
+    text = payload_value(payload, :text)
+    summary = payload_value(payload, :summary)
+    statement = payload_value(payload, :statement)
+    query = payload_value(payload, :query)
+    answer = payload_value(payload, :answer)
+    name = payload_value(payload, :name)
 
-  defp payload_text(%{query: query, answer: answer}) when is_binary(query) and is_binary(answer),
-    do: query <> "\n" <> answer
-
-  defp payload_text(%{name: name}) when is_binary(name), do: name
-
-  defp payload_text(payload) when is_map(payload),
-    do: payload |> inspect(limit: 20) |> to_string()
+    cond do
+      is_binary(text) -> text
+      is_binary(summary) -> summary
+      is_binary(statement) -> statement
+      is_binary(query) and is_binary(answer) -> query <> "\n" <> answer
+      is_binary(name) -> name
+      true -> payload |> inspect(limit: 20) |> to_string()
+    end
+  end
 
   defp payload_text(_payload), do: ""
 
   @spec payload_memory_id(Record.t()) :: binary() | nil
-  defp payload_memory_id(%Record{payload: %{id: id}}) when is_binary(id), do: id
-  defp payload_memory_id(%Record{payload: %{source_id: id}}) when is_binary(id), do: id
+  defp payload_memory_id(%Record{
+         payload: payload,
+         source_event_id: source_event_id,
+         id: record_id
+       })
+       when is_map(payload) do
+    case payload_value(payload, :id) || payload_value(payload, :source_id) || source_event_id ||
+           record_id do
+      id when is_binary(id) -> id
+      _other -> nil
+    end
+  end
+
   defp payload_memory_id(%Record{source_event_id: id}) when is_binary(id), do: id
   defp payload_memory_id(%Record{id: id}) when is_binary(id), do: id
   defp payload_memory_id(_record), do: nil
 
   @spec payload_lifecycle_id(Record.t(), binary()) :: binary()
-  defp payload_lifecycle_id(
-         %Record{family: family, payload: %{source_id: source_id}},
-         _memory_id
-       )
-       when family in [:knowledge, :embeddings] and is_binary(source_id),
-       do: source_id
+  defp payload_lifecycle_id(%Record{family: family, payload: payload}, memory_id)
+       when family in [:knowledge, :embeddings] and is_map(payload) do
+    case payload_value(payload, :source_id) do
+      source_id when is_binary(source_id) -> source_id
+      _missing -> memory_id
+    end
+  end
 
   defp payload_lifecycle_id(_record, memory_id), do: memory_id
 
   @spec payload_vector(term()) :: binary() | nil
-  defp payload_vector(%{vector: vector}) when is_binary(vector), do: vector
+  defp payload_vector(payload) when is_map(payload) do
+    case payload_value(payload, :vector) do
+      vector when is_binary(vector) -> vector
+      _other -> nil
+    end
+  end
+
   defp payload_vector(_payload), do: nil
 
   @spec payload_signature(term()) :: binary() | nil
-  defp payload_signature(%{binary_signature: signature}) when is_binary(signature), do: signature
+  defp payload_signature(payload) when is_map(payload) do
+    case payload_value(payload, :binary_signature) do
+      signature when is_binary(signature) -> signature
+      _other -> nil
+    end
+  end
+
   defp payload_signature(_payload), do: nil
 
   @spec payload_provenance(term()) :: map()
-  defp payload_provenance(%{metadata: %{provenance: provenance}}) when is_map(provenance),
-    do: provenance
+  defp payload_provenance(payload) when is_map(payload) do
+    with metadata when is_map(metadata) <- payload_value(payload, :metadata),
+         provenance when is_map(provenance) <- payload_value(metadata, :provenance) do
+      provenance
+    else
+      _missing -> %{}
+    end
+  end
 
   defp payload_provenance(_payload), do: %{}
+
+  @spec payload_family(map()) :: atom() | nil
+  defp payload_family(payload) do
+    case payload_value(payload, :family) do
+      family when is_atom(family) -> family
+      family when is_binary(family) -> family |> Family.from_string() |> elem_or_nil()
+      _other -> nil
+    end
+  end
+
+  @spec elem_or_nil({:ok, term()} | :error) :: term() | nil
+  defp elem_or_nil({:ok, value}), do: value
+  defp elem_or_nil(:error), do: nil
+
+  @spec payload_value(map(), atom()) :: term()
+  defp payload_value(payload, key) do
+    case Map.fetch(payload, key) do
+      {:ok, value} -> value
+      :error -> Map.get(payload, Atom.to_string(key))
+    end
+  end
 
   @spec terms(binary()) :: [binary()]
   defp terms(text) do

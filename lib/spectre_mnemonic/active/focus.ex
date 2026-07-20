@@ -796,14 +796,14 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec record_references?(term(), MapSet.t()) :: boolean()
   defp record_references?(payload, ids) when is_map(payload) do
     direct_ids =
-      [
-        Map.get(payload, :id),
-        Map.get(payload, :source_id),
-        Map.get(payload, :memory_id),
-        Map.get(payload, :signal_id),
-        Map.get(payload, :source_id),
-        Map.get(payload, :target_id)
-      ] ++ List.wrap(Map.get(payload, :source_ids, [])) ++ provenance_source_ids(payload)
+      [:id, :source_id, :memory_id, :signal_id, :target_id]
+      |> Enum.flat_map(&map_values(payload, &1))
+      |> Enum.concat(
+        payload
+        |> map_values(:source_ids)
+        |> Enum.flat_map(&List.wrap/1)
+      )
+      |> Enum.concat(provenance_source_ids(payload))
 
     Enum.any?(direct_ids, &MapSet.member?(ids, &1))
   end
@@ -813,11 +813,26 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec provenance_source_ids(map()) :: [term()]
   defp provenance_source_ids(payload) do
     payload
-    |> Map.get(:metadata, %{})
-    |> Map.get(:provenance, %{})
-    |> Map.get(:source_ids, [])
-    |> List.wrap()
+    |> map_values(:metadata)
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(&map_values(&1, :provenance))
+    |> Enum.filter(&is_map/1)
+    |> Enum.flat_map(&map_values(&1, :source_ids))
+    |> Enum.flat_map(&List.wrap/1)
   end
+
+  @spec map_values(map(), atom()) :: [term()]
+  defp map_values(map, key) do
+    string_key = Atom.to_string(key)
+
+    []
+    |> maybe_add_map_value(Map.has_key?(map, string_key), Map.get(map, string_key))
+    |> maybe_add_map_value(Map.has_key?(map, key), Map.get(map, key))
+  end
+
+  @spec maybe_add_map_value([term()], boolean(), term()) :: [term()]
+  defp maybe_add_map_value(values, true, value), do: [value | values]
+  defp maybe_add_map_value(values, false, _value), do: values
 
   @spec persist_forget_plan(map(), keyword()) :: :ok | {:error, term()}
   defp persist_forget_plan(plan, opts) do
@@ -922,11 +937,15 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   defp forget_ids(selector, opts) do
-    fold_moments([], fn moment, ids ->
-      if selected?(moment, selector),
-        do: [moment.id | ids],
-        else: ids
-    end, opts)
+    fold_moments(
+      [],
+      fn moment, ids ->
+        if selected?(moment, selector),
+          do: [moment.id | ids],
+          else: ids
+      end,
+      opts
+    )
   end
 
   @spec indexed_ids(atom(), term()) :: [binary()]
@@ -952,6 +971,7 @@ defmodule SpectreMnemonic.Active.Focus do
       stream: signal.stream,
       task_id: signal.task_id,
       kind: signal.kind,
+      status: :active,
       last_input: signal.input,
       updated_at: now
     }
@@ -1097,6 +1117,7 @@ defmodule SpectreMnemonic.Active.Focus do
           stream: latest.stream,
           task_id: latest.task_id,
           kind: latest.kind,
+          status: :active,
           last_input: latest.input,
           updated_at: latest.inserted_at
         }
@@ -1114,7 +1135,16 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @spec payload_id(term()) :: term()
-  defp payload_id(%{id: id}), do: id
+  defp payload_id(payload) when is_map(payload) do
+    payload
+    |> map_values(:id)
+    |> Enum.find_value(fn
+      id when is_binary(id) -> id
+      id when is_atom(id) -> Atom.to_string(id)
+      _other -> nil
+    end)
+  end
+
   defp payload_id(_payload), do: nil
 
   @spec selected?(Moment.t() | Secret.t(), selector()) :: boolean()
@@ -1177,5 +1207,4 @@ defmodule SpectreMnemonic.Active.Focus do
   defp fingerprint(input) do
     Fingerprint.build(input)
   end
-
 end

@@ -24,10 +24,12 @@ defmodule SpectreMnemonic.Persistence.Store.Disk do
   end
 
   @doc "Replays all complete frames from the default file store."
-  @spec replay :: {:ok, [tuple()]}
+  @spec replay :: {:ok, [tuple()]} | {:error, term()}
   def replay do
-    {:ok, frames} = File.replay(data_root: data_root())
-    {:ok, Enum.map(frames, &legacy_frame/1)}
+    case File.replay(data_root: data_root()) do
+      {:ok, frames} -> {:ok, Enum.map(frames, &legacy_frame/1)}
+      {:error, _reason} = error -> error
+    end
   end
 
   @doc "Compacts current replayable records into a snapshot file."

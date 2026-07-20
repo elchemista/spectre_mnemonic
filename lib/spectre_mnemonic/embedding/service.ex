@@ -108,6 +108,10 @@ defmodule SpectreMnemonic.Embedding.Service do
       true ->
         %{vector: nil, binary_signature: nil, metadata: %{}, error: :provider_not_available}
     end
+  rescue
+    exception -> %{vector: nil, binary_signature: nil, metadata: %{}, error: exception}
+  catch
+    kind, reason -> %{vector: nil, binary_signature: nil, metadata: %{}, error: {kind, reason}}
   end
 
   @spec call_adapter(module(), term(), keyword()) :: map()
@@ -124,6 +128,8 @@ defmodule SpectreMnemonic.Embedding.Service do
     end
   rescue
     exception -> %{vector: nil, binary_signature: nil, metadata: %{}, error: exception}
+  catch
+    kind, reason -> %{vector: nil, binary_signature: nil, metadata: %{}, error: {kind, reason}}
   end
 
   @spec normalize_result(term(), keyword()) :: map()

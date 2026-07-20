@@ -278,7 +278,38 @@ defmodule SpectreMnemonic.Integration.HardeningTest do
     refute Enum.any?(records, fn record ->
              record.family in [:moments, :signals, :knowledge, :associations, :action_recipes] and
                references?(record.payload, moment.id, moment.signal_id)
-    end)
+           end)
+  end
+
+  test "forget tombstones string-keyed durable derivatives" do
+    scope = {:tenant, "forget-string-keys"}
+
+    assert {:ok, %{moment: moment}} =
+             SpectreMnemonic.signal("forget string keyed derivative", scope: scope)
+
+    assert {:ok, _result} =
+             Manager.append(
+               :knowledge,
+               %{
+                 "id" => "string-derived",
+                 "source_id" => moment.id,
+                 "text" => "derived from a private moment"
+               },
+               scope: scope
+             )
+
+    assert {:ok, before_forget} = Manager.replay(scope: scope)
+
+    assert Enum.any?(before_forget, fn record ->
+             record.family == :knowledge and Map.get(record.payload, "id") == "string-derived"
+           end)
+
+    assert {:ok, 1} = SpectreMnemonic.forget(moment.id, scope: scope)
+    assert {:ok, after_forget} = Manager.replay(scope: scope)
+
+    refute Enum.any?(after_forget, fn record ->
+             record.family == :knowledge and Map.get(record.payload, "id") == "string-derived"
+           end)
   end
 
   test "forget fails closed when durable replay cannot enumerate derivatives" do

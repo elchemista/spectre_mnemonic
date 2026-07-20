@@ -291,7 +291,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       if output_partition_matches?(output, expected) do
         {:cont, :ok}
       else
-        {:halt, {:error, {:out_of_scope_consolidation_output, output_partition(output), expected}}}
+        {:halt,
+         {:error, {:out_of_scope_consolidation_output, output_partition(output), expected}}}
       end
     end)
   end
@@ -342,7 +343,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
     if Enum.all?(consolidation.associations, fn association ->
          Scope.match?(association, consolidation.opts) and
-           (MapSet.size(partitions) == 0 or MapSet.member?(partitions, Scope.partition(association)))
+           (MapSet.size(partitions) == 0 or
+              MapSet.member?(partitions, Scope.partition(association)))
        end) do
       :ok
     else
@@ -506,7 +508,9 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       embeddings: consolidation.embeddings,
       associations: consolidation.associations
     ]
-    |> stop_on_error(fn {family, values} -> persist_values(family, values, consolidation.opts) end)
+    |> stop_on_error(fn {family, values} ->
+      persist_values(family, values, consolidation.opts)
+    end)
   end
 
   @spec persist_values(atom(), [term()], keyword()) :: :ok | {:error, term()}

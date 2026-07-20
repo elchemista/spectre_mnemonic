@@ -294,8 +294,9 @@ SpectreMnemonic.remember(text, extract_entities?: false)
 Memory can be scoped without changing the existing stream/task model. A scope is
 caller-owned data, such as a user, agent, tenant, or project tuple. Scoped recall
 only searches matching memory. Omitting `scope:` searches only the unscoped
-partition; crossing tenant scopes requires the explicit administrative option
-`scopes: :all`.
+partition. Every public operation accepts exactly one scope; administrative
+cross-tenant reads must issue separate, explicitly scoped calls and merge them
+outside the library.
 
 ```elixir
 SpectreMnemonic.remember("Payment retry policy is stable",

@@ -183,9 +183,13 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp ranked_moments(_cue, _index_scores, limit, _opts) when limit <= 0, do: []
 
   defp ranked_moments(cue, index_scores, limit, opts) do
-    Focus.fold_moments([], fn moment, ranked ->
-      maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts)
-    end, opts)
+    Focus.fold_moments(
+      [],
+      fn moment, ranked ->
+        maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts)
+      end,
+      opts
+    )
     |> Enum.sort_by(&rank_key/1)
     |> Enum.map(fn {_score, moment} -> moment end)
   end
@@ -726,5 +730,4 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp signature_bits(_embedding, left, right),
     do: min(byte_size(left || <<>>) * 8, byte_size(right || <<>>) * 8)
-
 end
