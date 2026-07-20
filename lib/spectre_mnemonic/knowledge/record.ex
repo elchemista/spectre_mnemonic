@@ -5,6 +5,8 @@ defmodule SpectreMnemonic.Knowledge.Record do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary() | nil,
+          scope: term(),
           source_id: binary(),
           text: binary(),
           summary: binary() | nil,
@@ -22,6 +24,8 @@ defmodule SpectreMnemonic.Knowledge.Record do
 
   defstruct [
     :id,
+    :namespace,
+    :scope,
     :source_id,
     :text,
     :summary,

@@ -110,9 +110,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
     # Adapters may add better language understanding, but they return graph
     # fragments, not authority. Normalize hard here or future me gets soup.
     if adapter_available?(adapter) do
-      adapter
-      |> apply(:extract, [text, opts])
-      |> normalize_adapter_result(adapter)
+      adapter.extract(text, opts) |> normalize_adapter_result(adapter)
     else
       %{empty() | metadata: %{provider: adapter, error: :adapter_not_available}}
     end

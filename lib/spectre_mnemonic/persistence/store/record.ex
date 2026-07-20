@@ -9,6 +9,8 @@ defmodule SpectreMnemonic.Persistence.Store.Record do
 
   defstruct [
     :id,
+    :namespace,
+    :scope,
     :family,
     :operation,
     :payload,
@@ -20,10 +22,12 @@ defmodule SpectreMnemonic.Persistence.Store.Record do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
+          scope: term(),
           family: atom(),
           operation: atom(),
           payload: term(),
-          dedupe_key: binary(),
+          dedupe_key: binary() | nil,
           inserted_at: DateTime.t(),
           source_event_id: binary() | nil,
           metadata: map()

@@ -24,8 +24,8 @@ defmodule SpectreMnemonic.Recall.Engine do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
-  alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Knowledge
   alias SpectreMnemonic.Memory.ActionRecipe
   alias SpectreMnemonic.Memory.Artifact
@@ -34,11 +34,13 @@ defmodule SpectreMnemonic.Recall.Engine do
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Memory.Temporal
-  alias SpectreMnemonic.Recall.Cue
+  alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.QueryContext
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Fusion
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Recall.Packet
+  alias SpectreMnemonic.SearchResult
   alias SpectreMnemonic.Secrets
 
   @hamming_threshold 0.62
@@ -68,9 +70,11 @@ defmodule SpectreMnemonic.Recall.Engine do
       iex> SpectreMnemonic.Recall.Engine.recall("what blocks deploy?", limit: 5)
       {:ok, %SpectreMnemonic.Recall.Packet{}}
   """
-  @spec recall(term(), keyword()) :: {:ok, Packet.t()}
+  @spec recall(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def recall(cue, opts \\ []) do
-    GenServer.call(__MODULE__, {:recall, cue, opts})
+    with {:ok, context} <- QueryContext.ensure(cue, opts) do
+      GenServer.call(__MODULE__, {:recall, context})
+    end
   end
 
   @impl GenServer
@@ -78,15 +82,17 @@ defmodule SpectreMnemonic.Recall.Engine do
   def init(state), do: {:ok, state}
 
   @impl GenServer
-  @spec handle_call({:recall, term(), keyword()}, GenServer.from(), map()) ::
+  @spec handle_call({:recall, QueryContext.t()}, GenServer.from(), map()) ::
           {:reply, {:ok, Packet.t()}, map()}
-  def handle_call({:recall, cue_input, opts}, _from, state) do
+  def handle_call({:recall, %QueryContext{} = context}, _from, state) do
     # Recall gathers evidence. It does not write the answer, bless the answer,
     # or pretend the top hit is truth. Ranking is useful; certainty is expensive.
-    cue = build_cue(cue_input, opts)
+    opts = context.opts
+    cue = context
     limit = Keyword.get(opts, :limit, 10)
     budget = budget(opts)
     {:ok, index_results} = Index.query(cue, opts)
+    {:ok, durable_results} = Manager.search(context, opts)
     index_scores = Map.new(index_results, &{&1.id, &1})
 
     seed_limit = max(limit, limit * budget.seed_multiplier)
@@ -98,7 +104,9 @@ defmodule SpectreMnemonic.Recall.Engine do
     # Reciprocal-rank fusion lets those candidates compete without requiring all
     # scoring systems to share the same numeric scale.
     index_ranked =
-      index_results |> Enum.map(& &1.id) |> Focus.moments_by_ids() |> filter_moments(opts)
+      index_results
+      |> Enum.map(& &1.id)
+      |> Focus.moments_by_ids(opts)
 
     ranked_candidates =
       [base_ranked, graph_ranked, index_ranked]
@@ -108,8 +116,8 @@ defmodule SpectreMnemonic.Recall.Engine do
       |> rerank_moments(cue, index_scores)
       |> filter_moments(opts)
 
-    observation_candidates = recall_observations(cue_input, opts)
-    mental_model_candidates = recall_mental_models(cue_input, opts)
+    observation_candidates = recall_observations(context, durable_results, opts)
+    mental_model_candidates = recall_mental_models(context, durable_results, opts)
     knowledge_candidates = compact_knowledge(opts)
 
     # Budgeting is split in two passes: first reserve room for primary evidence,
@@ -124,14 +132,17 @@ defmodule SpectreMnemonic.Recall.Engine do
         limit
       )
 
-    associations = components.moments |> Enum.map(& &1.id) |> Focus.associations_for_ids()
+    associations =
+      components.moments
+      |> Enum.map(& &1.id)
+      |> Focus.associations_for_ids(opts)
 
     {components, _used_tokens} =
       apply_dependent_budget(
         components,
-        artifacts_for(components.moments, associations),
+        artifacts_for(components.moments, associations, opts),
         associations,
-        action_recipes_for(components.moments, associations),
+        action_recipes_for(components.moments, associations, opts),
         knowledge_candidates,
         opts,
         used_tokens
@@ -141,7 +152,9 @@ defmodule SpectreMnemonic.Recall.Engine do
 
     packet = %Packet{
       cue: cue,
-      active_status: active_status(components.moments),
+      query_context: context,
+      search_results: durable_results,
+      active_status: active_status(components.moments, opts),
       moments: revealed,
       observations: components.observations,
       mental_models: components.mental_models,
@@ -166,14 +179,17 @@ defmodule SpectreMnemonic.Recall.Engine do
     {:reply, {:ok, packet}, state}
   end
 
-  @spec ranked_moments(Cue.t(), map(), integer(), keyword()) :: [recall_moment()]
+  @spec ranked_moments(QueryContext.t(), map(), integer(), keyword()) :: [recall_moment()]
   defp ranked_moments(_cue, _index_scores, limit, _opts) when limit <= 0, do: []
 
   defp ranked_moments(cue, index_scores, limit, opts) do
-    []
-    |> Focus.fold_moments(fn moment, ranked ->
-      maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts)
-    end)
+    Focus.fold_moments(
+      [],
+      fn moment, ranked ->
+        maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts)
+      end,
+      opts
+    )
     |> Enum.sort_by(&rank_key/1)
     |> Enum.map(fn {_score, moment} -> moment end)
   end
@@ -181,7 +197,7 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec maybe_insert_ranked_moment(
           recall_moment(),
           [{number(), recall_moment()}],
-          Cue.t(),
+          QueryContext.t(),
           map(),
           pos_integer(),
           keyword()
@@ -207,27 +223,7 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec rank_key({number(), recall_moment()}) :: {number(), integer()}
   defp rank_key({score, moment}), do: {-score, DateTime.to_unix(moment.inserted_at, :microsecond)}
 
-  @spec build_cue(term(), keyword()) :: Cue.t()
-  defp build_cue(input, opts) do
-    # The cue gets the same embedding/fingerprint treatment as memory. If
-    # embedding fails, text and graph signals still carry the box up the stairs.
-    text = if is_binary(input), do: input, else: inspect(input)
-    embedding = Service.embed(input, opts)
-
-    %Cue{
-      input: input,
-      text: text,
-      keywords: keywords(text),
-      entities: entities(text),
-      vector: embedding.vector,
-      binary_signature: Map.get(embedding, :binary_signature),
-      embedding: embedding,
-      fingerprint: Fingerprint.build(text),
-      opts: opts
-    }
-  end
-
-  @spec score(recall_moment(), Cue.t(), map()) :: number()
+  @spec score(recall_moment(), QueryContext.t(), map()) :: number()
   defp score(moment, cue, index_scores) do
     keyword_score = overlap(moment.keywords, cue.keywords) * 2
     entity_score = overlap(moment.entities, cue.entities) * 3
@@ -239,7 +235,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     if match_score > 0, do: match_score + moment.attention, else: 0
   end
 
-  @spec rerank_moments([recall_moment()], Cue.t(), map()) :: [recall_moment()]
+  @spec rerank_moments([recall_moment()], QueryContext.t(), map()) :: [recall_moment()]
   defp rerank_moments(moments, cue, index_scores) do
     moments
     |> Enum.map(fn moment ->
@@ -250,7 +246,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     |> Enum.map(fn {_score, moment} -> moment end)
   end
 
-  @spec structured_score(recall_moment(), Cue.t()) :: number()
+  @spec structured_score(recall_moment(), QueryContext.t()) :: number()
   defp structured_score(%{kind: :memory_entity, metadata: metadata} = moment, cue) do
     canonical = Map.get(metadata, :canonical)
     aliases = Map.get(metadata, :aliases, [])
@@ -297,7 +293,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     # Graph expansion is where nearby context gets a chance to help. It is not
     # permission to drag the whole attic into the prompt. Depth exists for sanity.
     ids = MapSet.new(Enum.map(moments, & &1.id))
-    associations = Focus.associations_for_ids(ids)
+    associations = Focus.associations_for_ids(ids, opts)
 
     linked_ids =
       associations
@@ -313,8 +309,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     next =
       linked_ids
       |> Enum.reject(&MapSet.member?(ids, &1))
-      |> Focus.moments_by_ids()
-      |> filter_moments(opts)
+      |> Focus.moments_by_ids(opts)
 
     if next == [] do
       moments
@@ -323,23 +318,34 @@ defmodule SpectreMnemonic.Recall.Engine do
     end
   end
 
-  @spec active_status([recall_moment()]) :: [map()]
-  defp active_status(moments) do
+  @spec active_status([recall_moment()], keyword()) :: [map()]
+  defp active_status(moments, opts) do
     moments
-    |> Enum.flat_map(&[&1.stream, &1.task_id])
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-    |> Enum.flat_map(fn key ->
-      case Focus.status(key) do
-        {:ok, status} -> [status]
-        {:error, _} -> []
-      end
+    |> Enum.flat_map(&statuses_for_moment(&1, opts))
+    |> Enum.uniq_by(fn status ->
+      {status.namespace, status.scope, status.stream, status.task_id}
     end)
-    |> Enum.uniq_by(fn status -> {status.stream, status.task_id} end)
   end
 
-  @spec artifacts_for([recall_moment()], [Association.t()]) :: [Artifact.t()]
-  defp artifacts_for(moments, associations) do
+  @spec statuses_for_moment(recall_moment(), keyword()) :: [map()]
+  defp statuses_for_moment(moment, opts) do
+    status_opts = Keyword.put(opts, :scope, Scope.scope(moment))
+
+    [moment.stream, moment.task_id]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.flat_map(&status_for_key(&1, status_opts))
+  end
+
+  @spec status_for_key(term(), keyword()) :: [map()]
+  defp status_for_key(key, opts) do
+    case Focus.status(key, opts) do
+      {:ok, status} -> [status]
+      {:error, _reason} -> []
+    end
+  end
+
+  @spec artifacts_for([recall_moment()], [Association.t()], keyword()) :: [Artifact.t()]
+  defp artifacts_for(moments, associations, opts) do
     ids = MapSet.new(Enum.map(moments, & &1.id))
 
     associations
@@ -350,16 +356,17 @@ defmodule SpectreMnemonic.Recall.Engine do
         true -> []
       end
     end)
-    |> Focus.artifacts()
+    |> Focus.artifacts(opts)
   end
 
-  @spec action_recipes_for([recall_moment()], [Association.t()]) :: [ActionRecipe.t()]
-  defp action_recipes_for(moments, associations) do
+  @spec action_recipes_for([recall_moment()], [Association.t()], keyword()) ::
+          [ActionRecipe.t()]
+  defp action_recipes_for(moments, associations, opts) do
     moment_ids = MapSet.new(Enum.map(moments, & &1.id))
     related_ids = related_memory_ids(moment_ids, associations)
 
     related_ids
-    |> Focus.associations_for_ids()
+    |> Focus.associations_for_ids(opts)
     |> Enum.flat_map(fn assoc ->
       if MapSet.member?(related_ids, assoc.source_id) and assoc.relation == :attached_action do
         [assoc.target_id]
@@ -367,7 +374,7 @@ defmodule SpectreMnemonic.Recall.Engine do
         []
       end
     end)
-    |> Focus.action_recipes()
+    |> Focus.action_recipes(opts)
   end
 
   @spec related_memory_ids(MapSet.t(), [Association.t()]) :: MapSet.t()
@@ -389,7 +396,10 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   @spec memory_visible?(recall_moment(), keyword()) :: boolean()
   defp memory_visible?(moment, opts) do
-    Scope.match?(moment, opts) and Temporal.match?(moment, opts)
+    state_opts = Keyword.put(opts, :scope, Scope.scope(moment))
+
+    Scope.match?(moment, opts) and Temporal.match?(moment, opts) and
+      Governance.search_visible?(moment.id, state_opts)
   end
 
   @spec budget(keyword()) :: map()
@@ -536,22 +546,30 @@ defmodule SpectreMnemonic.Recall.Engine do
     end
   end
 
-  @spec recall_observations(term(), keyword()) :: [term()]
-  defp recall_observations(cue, opts) do
+  @spec recall_observations(QueryContext.t(), [SearchResult.t()], keyword()) :: [term()]
+  defp recall_observations(context, durable_results, opts) do
     if Keyword.get(opts, :include_observations, true) do
-      opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :observation_limit, 5))
-      {:ok, observations} = SpectreMnemonic.search_observations(cue, opts)
+      opts =
+        opts
+        |> Keyword.put(:limit, Keyword.get(opts, :observation_limit, 5))
+        |> Keyword.put(:durable_results, durable_results)
+
+      {:ok, observations} = SpectreMnemonic.search_observations(context.text, opts)
       observations
     else
       []
     end
   end
 
-  @spec recall_mental_models(term(), keyword()) :: [term()]
-  defp recall_mental_models(cue, opts) do
+  @spec recall_mental_models(QueryContext.t(), [SearchResult.t()], keyword()) :: [term()]
+  defp recall_mental_models(context, durable_results, opts) do
     if Keyword.get(opts, :include_mental_models, true) do
-      opts = Keyword.put_new(opts, :limit, Keyword.get(opts, :mental_model_limit, 5))
-      {:ok, mental_models} = SpectreMnemonic.search_mental_models(cue, opts)
+      opts =
+        opts
+        |> Keyword.put(:limit, Keyword.get(opts, :mental_model_limit, 5))
+        |> Keyword.put(:durable_results, durable_results)
+
+      {:ok, mental_models} = SpectreMnemonic.search_mental_models(context.text, opts)
       mental_models
     else
       []
@@ -630,7 +648,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     end
   end
 
-  @spec status_match?(recall_moment(), Cue.t()) :: boolean()
+  @spec status_match?(recall_moment(), QueryContext.t()) :: boolean()
   defp status_match?(moment, cue) do
     cue_text = String.downcase(cue.text)
 
@@ -638,17 +656,17 @@ defmodule SpectreMnemonic.Recall.Engine do
       not is_nil(moment.task_id)
   end
 
-  @spec asks_when?(Cue.t()) :: boolean()
+  @spec asks_when?(QueryContext.t()) :: boolean()
   defp asks_when?(cue) do
     question_contains?(cue, ~w(when quando cuándo quand wann))
   end
 
-  @spec asks_action?(Cue.t()) :: boolean()
+  @spec asks_action?(QueryContext.t()) :: boolean()
   defp asks_action?(cue) do
     question_contains?(cue, ["what", "did", "do", "cosa", "che", "quoi", "que", "qué"])
   end
 
-  @spec asks_value?(Cue.t()) :: boolean()
+  @spec asks_value?(QueryContext.t()) :: boolean()
   defp asks_value?(cue) do
     question_contains?(cue, [
       "number",
@@ -667,7 +685,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     ])
   end
 
-  @spec question_contains?(Cue.t(), [binary()]) :: boolean()
+  @spec question_contains?(QueryContext.t(), [binary()]) :: boolean()
   defp question_contains?(cue, words) do
     text = String.downcase(cue.text)
     Enum.any?(words, &String.contains?(text, &1))
@@ -680,7 +698,7 @@ defmodule SpectreMnemonic.Recall.Engine do
     MapSet.size(MapSet.intersection(left, right))
   end
 
-  @spec semantic_score(Moment.t() | map(), Cue.t() | map(), map()) :: number()
+  @spec semantic_score(Moment.t() | map(), QueryContext.t() | map(), map()) :: number()
   defp semantic_score(%{id: id, vector: left, binary_signature: signature}, cue, index_scores)
        when is_binary(left) and is_binary(cue.vector) do
     case Map.fetch(index_scores, id) do
@@ -712,20 +730,4 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp signature_bits(_embedding, left, right),
     do: min(byte_size(left || <<>>) * 8, byte_size(right || <<>>) * 8)
-
-  @spec keywords(binary()) :: [binary()]
-  defp keywords(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 3))
-    |> Enum.uniq()
-  end
-
-  @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
-    |> List.flatten()
-    |> Enum.uniq()
-  end
 end

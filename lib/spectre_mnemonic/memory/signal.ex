@@ -8,6 +8,8 @@ defmodule SpectreMnemonic.Memory.Signal do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
+          scope: term(),
           input: term(),
           kind: atom(),
           stream: term(),
@@ -16,5 +18,5 @@ defmodule SpectreMnemonic.Memory.Signal do
           inserted_at: DateTime.t()
         }
 
-  defstruct [:id, :input, :kind, :stream, :task_id, :metadata, :inserted_at]
+  defstruct [:id, :namespace, :scope, :input, :kind, :stream, :task_id, :metadata, :inserted_at]
 end

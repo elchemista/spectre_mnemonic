@@ -23,9 +23,8 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
   """
   @spec ensure_model(keyword()) :: {:ok, Path.t()} | {:error, term()}
   def ensure_model(opts) do
-    files = Keyword.get(opts, :files, @required_files)
-
-    with {:ok, dir} <- target_dir(opts),
+    with {:ok, files} <- requested_files(opts),
+         {:ok, dir} <- target_dir(opts),
          :ok <- ensure_or_download(dir, files, opts) do
       {:ok, dir}
     end
@@ -34,9 +33,8 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
   @doc "Downloads every requested model file into the target cache directory."
   @spec download_model(keyword()) :: {:ok, Path.t()} | {:error, term()}
   def download_model(opts) do
-    files = Keyword.get(opts, :files, @required_files)
-
-    with {:ok, dir} <- target_dir(opts),
+    with {:ok, files} <- requested_files(opts),
+         {:ok, dir} <- target_dir(opts),
          :ok <- File.mkdir_p(dir) do
       download_files(files, dir, opts)
     end
@@ -94,6 +92,30 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
         {:error, :model_dir_not_configured}
     end
   end
+
+  @spec requested_files(keyword()) :: {:ok, [binary()]} | {:error, term()}
+  defp requested_files(opts) do
+    files = Keyword.get(opts, :files, @required_files)
+
+    cond do
+      not is_list(files) or files == [] ->
+        {:error, :model_files_required}
+
+      invalid = Enum.find(files, &(not safe_relative_file?(&1))) ->
+        {:error, {:invalid_model_file, invalid}}
+
+      true ->
+        {:ok, files}
+    end
+  end
+
+  @spec safe_relative_file?(term()) :: boolean()
+  defp safe_relative_file?(file) when is_binary(file) and file != "" do
+    Path.type(file) == :relative and
+      Enum.all?(Path.split(file), &(&1 not in [".", ".."]))
+  end
+
+  defp safe_relative_file?(_file), do: false
 
   @spec download_file(binary(), Path.t(), keyword()) :: :ok | {:error, term()}
   defp download_file(file, dir, opts) do
@@ -233,9 +255,17 @@ defmodule SpectreMnemonic.Embedding.ModelDownloader do
 
   @spec safe_model_id(binary()) :: binary()
   defp safe_model_id(model_id) do
-    model_id
-    |> String.replace(~r/[^A-Za-z0-9._-]+/, "--")
-    |> String.trim("-")
+    sanitized =
+      model_id
+      |> String.replace(~r/[^A-Za-z0-9._-]+/, "--")
+      |> String.trim("-")
+
+    if sanitized == "" do
+      digest = model_id |> sha256() |> binary_part(0, 12)
+      "model-#{digest}"
+    else
+      sanitized
+    end
   end
 
   @spec default_cache_root :: Path.t()

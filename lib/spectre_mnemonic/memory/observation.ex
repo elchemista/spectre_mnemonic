@@ -8,6 +8,7 @@ defmodule SpectreMnemonic.Memory.Observation do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
           statement: binary(),
           scope: term(),
           tags: [term()],
@@ -34,6 +35,7 @@ defmodule SpectreMnemonic.Memory.Observation do
 
   defstruct [
     :id,
+    :namespace,
     :statement,
     :scope,
     :vector,

@@ -5,6 +5,7 @@ defmodule SpectreMnemonic.Memory.Moment do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
           signal_id: binary(),
           stream: term(),
           task_id: term(),
@@ -30,6 +31,7 @@ defmodule SpectreMnemonic.Memory.Moment do
 
   defstruct [
     :id,
+    :namespace,
     :signal_id,
     :stream,
     :task_id,

@@ -23,7 +23,9 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:mnemonic_artifacts, :set},
     {:mnemonic_action_recipes, :set},
     {:mnemonic_observations, :set},
-    {:mnemonic_mental_models, :set}
+    {:mnemonic_mental_models, :set},
+    {:mnemonic_governance_states, :set},
+    {:mnemonic_governance_facts, :set}
   ]
 
   @doc "Starts the ETS owner process."

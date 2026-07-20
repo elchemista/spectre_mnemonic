@@ -70,42 +70,61 @@ defmodule SpectreMnemonic.Memory.Temporal do
   @doc "Extracts temporal fields from direct fields or metadata/provenance."
   @spec temporal_map(map()) :: map()
   def temporal_map(memory) when is_map(memory) do
-    metadata = Map.get(memory, :metadata, %{}) || %{}
-    provenance = Map.get(metadata, :provenance, %{}) || %{}
+    metadata = memory |> map_values(:metadata) |> Enum.filter(&is_map/1)
+
+    provenance =
+      metadata
+      |> Enum.flat_map(&map_values(&1, :provenance))
+      |> Enum.filter(&is_map/1)
+
+    sources = [memory | metadata ++ provenance]
 
     @fields
     |> Map.new(fn field ->
       value =
-        Map.get(memory, field) ||
-          Map.get(metadata, field) ||
-          Map.get(metadata, Atom.to_string(field)) ||
-          Map.get(provenance, field) ||
-          Map.get(provenance, Atom.to_string(field))
+        Enum.find_value(sources, fn source ->
+          source
+          |> map_values(field)
+          |> Enum.find_value(&normalize/1)
+        end)
 
-      {field, normalize(value)}
+      {field, value}
     end)
   end
 
   def temporal_map(_memory), do: %{}
 
+  @spec map_values(map(), atom()) :: [term()]
+  defp map_values(map, key) do
+    string_key = Atom.to_string(key)
+
+    []
+    |> maybe_prepend(Map.has_key?(map, string_key), Map.get(map, string_key))
+    |> maybe_prepend(Map.has_key?(map, key), Map.get(map, key))
+  end
+
+  @spec maybe_prepend([term()], boolean(), term()) :: [term()]
+  defp maybe_prepend(values, true, value), do: [value | values]
+  defp maybe_prepend(values, false, _value), do: values
+
   @spec compare_after(DateTime.t() | nil, term()) :: boolean()
   defp compare_after(_value, nil), do: true
-  defp compare_after(nil, _cutoff), do: false
 
   defp compare_after(value, cutoff) do
     case normalize(cutoff) do
       nil -> true
+      _cutoff when is_nil(value) -> false
       cutoff -> DateTime.compare(value, cutoff) in [:gt, :eq]
     end
   end
 
   @spec compare_before(DateTime.t() | nil, term()) :: boolean()
   defp compare_before(_value, nil), do: true
-  defp compare_before(nil, _cutoff), do: false
 
   defp compare_before(value, cutoff) do
     case normalize(cutoff) do
       nil -> true
+      _cutoff when is_nil(value) -> false
       cutoff -> DateTime.compare(value, cutoff) in [:lt, :eq]
     end
   end

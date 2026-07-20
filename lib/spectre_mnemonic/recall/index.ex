@@ -11,6 +11,7 @@ defmodule SpectreMnemonic.Recall.Index do
   use GenServer
 
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Memory.Scope
 
   @index_table :mnemonic_embedding_index
   @label_table :mnemonic_embedding_labels
@@ -98,8 +99,12 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   def handle_call({:query, cue, opts}, _from, state) do
-    limit = Keyword.get(opts, :overfetch) || get_in(index_config(), [:overfetch]) || 40
-    results = query_hnsw(state, cue, limit) || brute_force(cue, limit)
+    limit = query_limit(opts)
+
+    results =
+      (query_hnsw_scoped(state, cue, limit, opts) || brute_force(cue, limit, opts))
+      |> Enum.take(limit)
+
     {:reply, {:ok, results}, state}
   end
 
@@ -109,11 +114,11 @@ defmodule SpectreMnemonic.Recall.Index do
     {:reply, :ok, %{state | hnsw: nil, hnsw_dim: nil, hnsw_max: nil, next_label: 1}}
   end
 
-  @spec brute_force(map(), pos_integer()) :: [map()]
-  defp brute_force(%{vector: nil}, _limit), do: []
-  defp brute_force(_cue, limit) when limit <= 0, do: []
+  @spec brute_force(map(), non_neg_integer(), keyword()) :: [map()]
+  defp brute_force(%{vector: nil}, _limit, _opts), do: []
+  defp brute_force(_cue, limit, _opts) when limit <= 0, do: []
 
-  defp brute_force(cue, limit) do
+  defp brute_force(cue, limit, opts) do
     # HNSW is nice when available. Brute force is the fallback with work boots.
     # Small hot sets can survive without a fancy neighbor oracle.
     cue_vector = Map.get(cue, :vector)
@@ -121,9 +126,13 @@ defmodule SpectreMnemonic.Recall.Index do
 
     :ets.foldl(
       fn {moment_id, entry}, ranked ->
-        moment_id
-        |> score_entry(entry, cue_vector, cue_signature)
-        |> insert_ranked_entry(ranked, limit)
+        if Scope.match?(entry, opts) do
+          moment_id
+          |> score_entry(entry, cue_vector, cue_signature)
+          |> insert_ranked_entry(ranked, limit)
+        else
+          ranked
+        end
       end,
       [],
       @index_table
@@ -141,16 +150,36 @@ defmodule SpectreMnemonic.Recall.Index do
   @spec entry_rank_key(map()) :: {number(), non_neg_integer() | :infinity, binary()}
   defp entry_rank_key(entry), do: {-entry.score, entry.hamming_distance, entry.id}
 
-  @spec query_hnsw(state(), map(), pos_integer()) :: [map()] | nil
-  defp query_hnsw(%{hnsw: nil}, _cue, _limit), do: nil
-  defp query_hnsw(_state, %{vector: nil}, _limit), do: nil
+  @spec query_hnsw_scoped(state(), map(), non_neg_integer(), keyword()) :: [map()] | nil
+  defp query_hnsw_scoped(%{hnsw: nil}, _cue, _limit, _opts), do: nil
+  defp query_hnsw_scoped(_state, %{vector: nil}, _limit, _opts), do: nil
+  defp query_hnsw_scoped(_state, _cue, limit, _opts) when limit <= 0, do: []
 
-  defp query_hnsw(state, cue, limit) do
-    k = min(limit, indexed_count())
+  defp query_hnsw_scoped(state, cue, limit, opts) do
+    total = indexed_count()
+    initial = min(total, max(limit, limit * 4))
 
-    if k > 0, do: query_hnsw_neighbors(state, cue, k)
+    if initial > 0, do: query_hnsw_scoped(state, cue, limit, opts, initial, total)
   rescue
     _exception -> nil
+  end
+
+  @spec query_hnsw_scoped(state(), map(), pos_integer(), keyword(), pos_integer(), pos_integer()) ::
+          [map()] | nil
+  defp query_hnsw_scoped(state, cue, limit, opts, k, total) do
+    case query_hnsw_neighbors(state, cue, k) do
+      nil ->
+        nil
+
+      results ->
+        scoped = Enum.filter(results, &Scope.match?(&1, opts))
+
+        if length(scoped) >= limit or k >= total do
+          scoped
+        else
+          query_hnsw_scoped(state, cue, limit, opts, min(total, k * 2), total)
+        end
+    end
   end
 
   @spec query_hnsw_neighbors(state(), map(), pos_integer()) :: [map()] | nil
@@ -184,6 +213,8 @@ defmodule SpectreMnemonic.Recall.Index do
 
     %{
       id: moment_id,
+      namespace: Map.get(entry, :namespace),
+      scope: Map.get(entry, :scope),
       score: cosine * 4.0 + hamming_similarity * 4.0,
       cosine: cosine,
       hamming_distance: hamming,
@@ -192,12 +223,16 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   @spec indexable(map()) :: {:ok, map()} | :skip
-  defp indexable(%{id: id, vector: vector, binary_signature: signature, embedding: embedding})
+  defp indexable(
+         %{id: id, vector: vector, binary_signature: signature, embedding: embedding} = moment
+       )
        when is_binary(id) and is_binary(vector) and is_binary(signature) do
     metadata = embedding_metadata(embedding)
 
     {:ok,
      %{
+       namespace: Scope.namespace(moment),
+       scope: Scope.scope(moment),
        vector: vector,
        binary_signature: signature,
        dimensions: Map.get(metadata, :dimensions) || Vector.dimensions(vector),
@@ -295,6 +330,14 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec indexed_count :: non_neg_integer()
   defp indexed_count, do: :ets.info(@index_table, :size) || 0
+
+  @spec query_limit(keyword()) :: non_neg_integer()
+  defp query_limit(opts) do
+    case Keyword.get(opts, :overfetch) || get_in(index_config(), [:overfetch]) || 40 do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 40
+    end
+  end
 
   @spec hnsw_enabled? :: boolean()
   defp hnsw_enabled? do

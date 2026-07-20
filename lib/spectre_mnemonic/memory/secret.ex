@@ -10,6 +10,7 @@ defmodule SpectreMnemonic.Memory.Secret do
 
   @type t :: %__MODULE__{
           id: binary(),
+          namespace: binary(),
           signal_id: binary(),
           secret_id: binary(),
           label: binary(),
@@ -47,6 +48,7 @@ defmodule SpectreMnemonic.Memory.Secret do
   # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :id,
+    :namespace,
     :signal_id,
     :secret_id,
     :label,

@@ -20,6 +20,7 @@ defmodule SpectreMnemonic.Intake do
   """
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Intake.Extraction
   alias SpectreMnemonic.Intake.Memory
   alias SpectreMnemonic.Intake.Packet
@@ -75,8 +76,9 @@ defmodule SpectreMnemonic.Intake do
   """
   @spec remember(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
-    with {:ok, memory} <- normalize(input, opts),
-         memory <- attach_recent_moments(memory),
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, memory} <- normalize(input, opts),
+         memory <- attach_recent_moments(memory, opts),
          {:ok, memory} <- run_plugs(memory, opts) do
       dispatch_memory(memory, opts)
     else
@@ -195,7 +197,7 @@ defmodule SpectreMnemonic.Intake do
       metadata =
         input_metadata(input)
         |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
-        |> Map.put_new(:scope, Keyword.get(opts, :scope))
+        |> Identity.put_context(opts)
         |> maybe_put(:mission, mission)
         |> maybe_put(:extraction_mode, extraction_mode)
         |> Temporal.put_metadata(temporal)
@@ -203,6 +205,7 @@ defmodule SpectreMnemonic.Intake do
       {:ok,
        %Memory{
          input: input,
+         namespace: Identity.namespace!(opts),
          text: text,
          kind: kind,
          stream: Keyword.get(opts, :stream) || infer_stream(kind),
@@ -228,9 +231,9 @@ defmodule SpectreMnemonic.Intake do
           {:ok, Memory.t()} | {:halt, Memory.t()} | {:error, term()}
   defp run_plugs(%Memory{} = memory, opts), do: PlugPipeline.run(memory, opts)
 
-  @spec attach_recent_moments(Memory.t()) :: Memory.t()
-  defp attach_recent_moments(%Memory{} = memory) do
-    recent = Focus.recent_moments(memory.stream, memory.task_id, 12)
+  @spec attach_recent_moments(Memory.t(), keyword()) :: Memory.t()
+  defp attach_recent_moments(%Memory{} = memory, opts) do
+    recent = Focus.recent_moments(memory.stream, memory.task_id, 12, opts)
     %{memory | recent_moments: recent}
   end
 
@@ -582,24 +585,24 @@ defmodule SpectreMnemonic.Intake do
     node_by_local_id = Map.new(results, &{&1.moment.metadata.extraction_local_id, &1.moment})
 
     graph
-    |> extraction_edge_plan(root, node_by_local_id)
+    |> extraction_edge_plan(root, node_by_local_id, opts)
     |> Enum.uniq_by(fn {source, relation, target, _edge_opts} ->
       {source.id, relation, target.id}
     end)
     |> link_edges(opts)
   end
 
-  @spec extraction_edge_plan(map(), Moment.t(), map()) :: [
+  @spec extraction_edge_plan(map(), Moment.t(), map(), keyword()) :: [
           {Moment.t(), atom(), Moment.t(), keyword()}
         ]
-  defp extraction_edge_plan(graph, root, node_by_local_id) do
+  defp extraction_edge_plan(graph, root, node_by_local_id, opts) do
     [
       observed_edges(root, Map.values(node_by_local_id)),
       mention_edges(root, graph.entities, node_by_local_id),
       relation_edges(graph.relations, node_by_local_id),
       event_field_edges(graph.events, node_by_local_id),
       value_entity_edges(graph.values, node_by_local_id),
-      same_entity_edges(graph.entities, node_by_local_id)
+      same_entity_edges(graph.entities, node_by_local_id, opts)
     ]
     |> List.flatten()
   end
@@ -611,7 +614,12 @@ defmodule SpectreMnemonic.Intake do
 
     planned_edges
     |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
-      link_memory(source, relation, target, Keyword.put_new(edge_opts, :persist?, persist?))
+      link_opts =
+        opts
+        |> Keyword.merge(edge_opts)
+        |> Keyword.put_new(:persist?, persist?)
+
+      link_memory(source, relation, target, link_opts)
     end)
   end
 
@@ -682,22 +690,24 @@ defmodule SpectreMnemonic.Intake do
     end)
   end
 
-  @spec same_entity_edges([map()], map()) :: [{Moment.t(), atom(), Moment.t(), keyword()}]
-  defp same_entity_edges(entities, node_by_local_id) do
+  @spec same_entity_edges([map()], map(), keyword()) :: [
+          {Moment.t(), atom(), Moment.t(), keyword()}
+        ]
+  defp same_entity_edges(entities, node_by_local_id, opts) do
     current_ids = MapSet.new(Enum.map(node_by_local_id, fn {_local_id, moment} -> moment.id end))
 
     Enum.flat_map(entities, fn entity ->
       case Map.get(node_by_local_id, entity.id) do
         nil -> []
-        current -> same_entity_edges_for(current, entity, current_ids)
+        current -> same_entity_edges_for(current, entity, current_ids, opts)
       end
     end)
   end
 
-  @spec same_entity_edges_for(Moment.t(), map(), MapSet.t(binary())) ::
+  @spec same_entity_edges_for(Moment.t(), map(), MapSet.t(binary()), keyword()) ::
           [{Moment.t(), atom(), Moment.t(), keyword()}]
-  defp same_entity_edges_for(current, entity, current_ids) do
-    Focus.moments()
+  defp same_entity_edges_for(current, entity, current_ids, opts) do
+    Focus.moments(opts)
     |> Enum.filter(&(&1.kind == :memory_entity))
     |> Enum.reject(&MapSet.member?(current_ids, &1.id))
     |> Enum.filter(&(Map.get(&1.metadata, :canonical) == entity.canonical))
@@ -821,17 +831,17 @@ defmodule SpectreMnemonic.Intake do
         |> Enum.map(& &1.id)
         |> MapSet.new()
 
-      existing_edges = existing_cross_memory_edges(current_ids)
+      existing_edges = existing_cross_memory_edges(current_ids, opts)
       anchors = [root | chunks] |> Enum.filter(&linkable_memory?/1)
 
-      Focus.moments()
+      Focus.moments(opts)
       |> Enum.reject(&(MapSet.member?(current_ids, &1.id) or not linkable_memory?(&1)))
       |> Enum.filter(&same_scope?(root, &1, opts))
       |> cross_memory_candidates(anchors, threshold, existing_edges)
       |> Enum.sort_by(fn {_source, _target, score} -> -score end)
       |> Enum.take(max_edges)
       |> Enum.map(fn {source, target, score} ->
-        metadata = %{similarity: score, scope: :cross_memory}
+        metadata = %{similarity: score, relationship_scope: :cross_memory}
         {source, :related_memory, target, [weight: score, metadata: metadata]}
       end)
     else
@@ -839,10 +849,10 @@ defmodule SpectreMnemonic.Intake do
     end
   end
 
-  @spec existing_cross_memory_edges(MapSet.t(binary())) :: MapSet.t()
-  defp existing_cross_memory_edges(current_ids) do
+  @spec existing_cross_memory_edges(MapSet.t(binary()), keyword()) :: MapSet.t()
+  defp existing_cross_memory_edges(current_ids, opts) do
     current_ids
-    |> Focus.associations_for_ids()
+    |> Focus.associations_for_ids(opts)
     |> Enum.filter(&(&1.relation == :related_memory))
     |> Enum.reduce(MapSet.new(), fn assoc, acc ->
       acc
@@ -869,13 +879,7 @@ defmodule SpectreMnemonic.Intake do
   defp linkable_memory?(_moment), do: true
 
   @spec same_scope?(Moment.t(), Moment.t(), keyword()) :: boolean()
-  defp same_scope?(left, right, opts) do
-    cond do
-      Keyword.has_key?(opts, :scopes) -> Scope.match?(right, opts)
-      is_nil(Scope.scope(left)) -> is_nil(Scope.scope(right))
-      true -> Scope.scope(left) == Scope.scope(right)
-    end
-  end
+  defp same_scope?(left, right, _opts), do: Scope.partition(left) == Scope.partition(right)
 
   @spec relationship_score(Moment.t(), Moment.t()) :: float()
   defp relationship_score(left, right) do

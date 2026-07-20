@@ -16,6 +16,7 @@ defmodule SpectreMnemonic.Intake.Memory do
   """
   @type t :: %__MODULE__{
           input: term(),
+          namespace: binary(),
           text: binary(),
           kind: atom(),
           stream: term(),
@@ -43,6 +44,7 @@ defmodule SpectreMnemonic.Intake.Memory do
 
   defstruct [
     :input,
+    :namespace,
     :text,
     :kind,
     :stream,

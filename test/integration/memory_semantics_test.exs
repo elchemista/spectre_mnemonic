@@ -66,6 +66,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
   test "legacy observations without observation_type metadata still search" do
     legacy = %Observation{
       id: "legacy_obs",
+      namespace: "spectre_mnemonic_test",
       statement: "legacy preference survives search",
       scope: {:project, "legacy"},
       confidence: 0.8,
@@ -342,7 +343,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert expired == []
   end
 
-  test "mental models are preferred by reflect and adapter output is normalized" do
+  test "mental models are preferred by structured reflection evidence" do
     assert {:ok, model} =
              SpectreMnemonic.put_mental_model(%{
                title: "Billing Retry Policy",
@@ -357,10 +358,12 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert Enum.any?(packet.raw_memories, &(&1.id == raw.id))
     assert hd(packet.citations).source == :mental_model
 
-    assert {:ok, %Packet{} = adapted} =
+    assert {:ok, %Packet{} = evidence_only} =
              SpectreMnemonic.reflect("billing retry", adapter: __MODULE__.ReflectionAdapter)
 
-    assert adapted.response == {:reflected, "billing retry", [model.id]}
+    assert evidence_only.response == nil
+    assert evidence_only.metadata.response_generation == :spectre
+    assert hd(evidence_only.evidence).type == :mental_model
   end
 
   test "reflect ranks observations by evidence priority" do
@@ -414,27 +417,20 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
            |> Enum.drop_while(&(&1.source != :moment))
            |> Enum.all?(&(&1.source == :moment))
 
-    assert {:ok, %Packet{} = adapted} =
-             SpectreMnemonic.reflect("ranktopic",
-               scope: scope,
-               adapter: __MODULE__.RankingReflectionAdapter
-             )
-
-    assert adapted.response ==
-             {:ranked, [:decision, :preference, :project_state, :pattern, :fact],
-              [
-                :mental_model,
-                :observation,
-                :observation,
-                :observation,
-                :observation,
-                :observation,
-                :moment,
-                :moment,
-                :moment,
-                :moment,
-                :moment
-              ]}
+    assert Enum.map(packet.evidence, & &1.type) ==
+             [
+               :mental_model,
+               :observation,
+               :observation,
+               :observation,
+               :observation,
+               :observation,
+               :moment,
+               :moment,
+               :moment,
+               :moment,
+               :moment
+             ]
   end
 
   test "plain text mental models use first line as title and query" do
@@ -594,7 +590,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert observation.metadata.observation_type == :project_state
   end
 
-  test "scope filters recall while scopes allows explicit cross-scope recall" do
+  test "scope filters recall and multi-scope reads fail closed" do
     {:ok, %{moment: alpha}} =
       SpectreMnemonic.signal("shared invoice retry strategy",
         scope: {:project, "alpha"},
@@ -612,18 +608,14 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert MapSet.member?(scoped_ids, alpha.id)
     refute MapSet.member?(scoped_ids, beta.id)
 
-    assert {:ok, crossed} =
+    assert {:error, :multiple_scopes_not_allowed} =
              SpectreMnemonic.recall("invoice retry",
                scopes: [{:project, "alpha"}, {:project, "beta"}],
                limit: 5
              )
-
-    crossed_ids = MapSet.new(Enum.map(crossed.moments, & &1.id))
-    assert MapSet.member?(crossed_ids, alpha.id)
-    assert MapSet.member?(crossed_ids, beta.id)
   end
 
-  test "unscoped recall stays broad for backward compatibility" do
+  test "unscoped recall stays inside the nil partition" do
     {:ok, %{moment: alpha}} =
       SpectreMnemonic.signal("compatibility scope broad query",
         scope: {:workspace, "alpha"},
@@ -638,8 +630,8 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
 
     assert {:ok, packet} = SpectreMnemonic.recall("compatibility scope broad", limit: 10)
     ids = MapSet.new(Enum.map(packet.moments, & &1.id))
-    assert MapSet.member?(ids, alpha.id)
-    assert MapSet.member?(ids, beta.id)
+    refute MapSet.member?(ids, alpha.id)
+    refute MapSet.member?(ids, beta.id)
   end
 
   test "temporal filters distinguish occurred observed and valid windows" do
@@ -822,27 +814,6 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert packet.root.metadata.mission_priority == 2.5
     assert packet.root.metadata.extraction_mode == :custom
     assert packet.root.metadata.extraction_profile[:remember] == [:custom_learning]
-  end
-
-  defmodule ReflectionAdapter do
-    @behaviour SpectreMnemonic.Reflection.Adapter
-
-    @impl SpectreMnemonic.Reflection.Adapter
-    def reflect(packet, _opts) do
-      ids = Enum.map(packet.mental_models, & &1.id)
-      {:ok, {:reflected, packet.query, ids}}
-    end
-  end
-
-  defmodule RankingReflectionAdapter do
-    @behaviour SpectreMnemonic.Reflection.Adapter
-
-    @impl SpectreMnemonic.Reflection.Adapter
-    def reflect(packet, _opts) do
-      observation_types = Enum.map(packet.observations, & &1.metadata.observation_type)
-      citation_sources = Enum.map(packet.citations, & &1.source)
-      {:ok, {:ranked, observation_types, citation_sources}}
-    end
   end
 
   defmodule FailingReadStore do

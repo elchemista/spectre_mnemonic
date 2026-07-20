@@ -21,13 +21,14 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Memory.ActionRecipe
   alias SpectreMnemonic.Memory.Artifact
   alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Observations
-  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Engine
   alias SpectreMnemonic.Recall.Packet
   alias SpectreMnemonic.Reflection
+  alias SpectreMnemonic.SearchResult
   alias SpectreMnemonic.Secrets
 
   @doc """
@@ -162,35 +163,36 @@ defmodule SpectreMnemonic do
       iex> Enum.all?(results, &Map.has_key?(&1, :source))
       true
   """
-  @spec search(cue :: term(), opts :: keyword()) :: {:ok, [map()]} | {:error, term()}
+  @spec search(cue :: term(), opts :: keyword()) ::
+          {:ok, [SearchResult.t()]} | {:error, term()}
   def search(cue, opts \\ []) do
     # Search is the flat "give me candidates" door. Recall is richer, durable
     # search is wider, and this function glues them without pretending it wrote
     # the final answer. The model can do prose. The runtime brings receipts.
-    with {:ok, packet} <- recall(cue, opts),
-         {:ok, durable_results} <- Manager.search(cue, opts) do
+    with {:ok, packet} <- recall(cue, opts) do
       active_results =
         packet.moments
-        |> Enum.filter(&Governance.search_visible?(&1.id, opts))
+        |> Enum.filter(fn moment ->
+          Governance.search_visible?(
+            moment.id,
+            Keyword.put(opts, :scope, Scope.scope(moment))
+          )
+        end)
         |> Enum.with_index()
         |> Enum.map(fn {moment, index} ->
-          %{
+          %SearchResult{
             source: :active,
+            namespace: moment.namespace,
+            scope: moment.scope,
             family: :moments,
             id: moment.id,
             rank: index + 1,
-            record: moment
+            record: moment,
+            inserted_at: moment.inserted_at
           }
         end)
 
-      durable_results =
-        Enum.map(durable_results, fn result ->
-          result
-          |> Map.new()
-          |> Map.put_new(:source, :persistent)
-        end)
-
-      {:ok, active_results ++ durable_results}
+      {:ok, active_results ++ packet.search_results}
     end
   end
 
@@ -287,17 +289,16 @@ defmodule SpectreMnemonic do
   @doc """
   Reflects over memory without requiring an LLM.
 
-  The default returns a structured evidence packet ordered as mental models,
-  ranked observations, then raw recall. Observation evidence is ranked as
-  decisions, preferences, project state, patterns, then facts. Pass `:adapter`
-  or configure `:reflection_adapter` to turn that packet into a final response.
+  Returns a structured evidence packet ordered as mental models, ranked
+  observations, then raw recall. Observation evidence is ranked as decisions,
+  preferences, project state, patterns, then facts. Reflection never generates
+  prose; response generation belongs to the calling Spectre layer.
 
   `:max_tokens` is forwarded to recall as a best-effort packet budget. Recall
   may include one oversized primary evidence item when excluding it would make
   the packet empty.
 
-  Use reflection when a caller wants a prepared evidence bundle or when a custom
-  adapter should transform memory into a natural-language answer.
+  Use reflection when a caller wants a prepared, source-linked evidence bundle.
 
   ## Example
 
@@ -406,9 +407,9 @@ defmodule SpectreMnemonic do
       iex> SpectreMnemonic.status("search-1")
       {:ok, %{status: :active}}
   """
-  @spec status(stream_or_task_id :: term()) :: {:ok, map()} | {:error, :not_found}
-  def status(stream_or_task_id) do
-    Focus.status(stream_or_task_id)
+  @spec status(stream_or_task_id :: term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def status(stream_or_task_id, opts \\ []) do
+    Focus.status(stream_or_task_id, opts)
   end
 
   @doc """

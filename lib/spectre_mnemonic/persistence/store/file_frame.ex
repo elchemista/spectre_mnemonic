@@ -114,10 +114,20 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
         when acc: term()
   defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun) do
     if :erlang.crc32(payload) == crc do
-      continue_frame(io, {seq, timestamp, :erlang.binary_to_term(payload)}, acc, fun)
+      case decode_payload(payload) do
+        {:ok, decoded} -> continue_frame(io, {seq, timestamp, decoded}, acc, fun)
+        :error -> acc
+      end
     else
       acc
     end
+  end
+
+  @spec decode_payload(binary()) :: {:ok, term()} | :error
+  defp decode_payload(payload) do
+    {:ok, :erlang.binary_to_term(payload, [:safe])}
+  rescue
+    _exception -> :error
   end
 
   @spec continue_frame(File.io_device(), t(), acc, fold_fun(acc)) :: acc when acc: term()
