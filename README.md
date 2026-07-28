@@ -61,6 +61,23 @@ def deps do
 end
 ```
 
+Version 0.1.2 can also publish Mnemonic configuration through an immutable
+Spectre Stack definition:
+
+```elixir
+defmodule MyApp.AI do
+  use Spectre.Stack, id: :my_app
+
+  install Spectre.Mnemonic do
+    store MyApp.MemoryStore
+    isolate_by [:agent, :subject, :conversation, :flow, :task]
+  end
+end
+```
+
+This declaration records configuration only. It does not start or claim the
+legacy Mnemonic application, named processes, or ETS tables for that Stack.
+
 Start it as an OTP application or under your supervision tree. The default
 application starts ETS ownership, persistence, the durable index, stream routing,
 active focus, recall, consolidation, and the opt-in consolidation scheduler.

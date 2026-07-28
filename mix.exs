@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.1.2"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -63,6 +63,7 @@ defmodule SpectreMnemonic.MixProject do
   @spec deps :: [{atom(), binary()} | {atom(), binary(), keyword()}]
   defp deps do
     [
+      {:spectre, github: "elchemista/spectre", ref: "b39b0b1e77d685c0e497cd64d7f16f20d3c1c846"},
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
