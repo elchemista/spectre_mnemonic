@@ -351,33 +351,37 @@ defmodule SpectreMnemonic.Recall.Index do
   @spec hnsw_new(atom(), pos_integer(), pos_integer(), keyword()) ::
           {:ok, term()} | {:error, term()}
   defp hnsw_new(space, dimensions, max_elements, opts) do
-    @hnsw_index.new(space, dimensions, max_elements, opts)
+    apply(@hnsw_index, :new, [space, dimensions, max_elements, opts])
   end
 
   @spec hnsw_set_ef(term(), non_neg_integer()) :: :ok | {:error, term()}
   defp hnsw_set_ef(index, ef) do
-    @hnsw_index.set_ef(index, ef)
+    apply(@hnsw_index, :set_ef, [index, ef])
   end
 
   @spec hnsw_knn_query(term(), binary(), pos_integer()) ::
           {:ok, Nx.Tensor.t(), Nx.Tensor.t()} | {:error, term()}
   defp hnsw_knn_query(index, vector, k) do
-    @hnsw_index.knn_query(index, vector, k: k)
+    apply(@hnsw_index, :knn_query, [index, vector, [k: k]])
   end
 
   @spec hnsw_add_items(term(), Nx.Tensor.t(), pos_integer()) :: :ok | {:error, term()}
   defp hnsw_add_items(index, tensor, label) do
-    @hnsw_index.add_items(index, tensor, ids: [label], replace_deleted: false)
+    apply(@hnsw_index, :add_items, [
+      index,
+      tensor,
+      [ids: [label], replace_deleted: false]
+    ])
   end
 
   @spec hnsw_resize_index(term(), pos_integer()) :: :ok | {:error, term()}
   defp hnsw_resize_index(index, max_elements) do
-    @hnsw_index.resize_index(index, max_elements)
+    apply(@hnsw_index, :resize_index, [index, max_elements])
   end
 
   @spec hnsw_mark_deleted(term(), pos_integer()) :: :ok | {:error, term()}
   defp hnsw_mark_deleted(index, label) do
-    @hnsw_index.mark_deleted(index, label)
+    apply(@hnsw_index, :mark_deleted, [index, label])
   end
 
   @spec index_config :: map()

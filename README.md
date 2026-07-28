@@ -61,6 +61,40 @@ def deps do
 end
 ```
 
+Version 0.1.2 can also publish Mnemonic configuration through an immutable
+Spectre Stack definition:
+
+```elixir
+defmodule MyApp.AI do
+  use Spectre.Stack, id: :my_app
+
+  install Spectre.Mnemonic do
+    store MyApp.MemoryStore
+    isolate_by [:agent, :subject, :conversation, :flow, :task]
+  end
+end
+```
+
+Selecting that Stack on an Agent activates `Spectre.Mnemonic.Memory`
+automatically:
+
+```elixir
+defmodule MyApp.Agent do
+  use Spectre.Agent, stack: MyApp.AI
+end
+```
+
+Spectre's normal memory load/save path now calls Mnemonic recall and remember.
+The adapter derives an opaque scope from `isolate_by`, configures the declared
+persistent store, and forwards the complete runtime context needed for
+agent/subject/conversation/flow/task isolation. It also emits privacy-safe
+Journal outcomes containing isolation dimension names, never memory content or
+subject values. A second `use Spectre.Mnemonic` is not required.
+
+The installation does not start or claim the legacy Mnemonic application,
+named processes, or ETS tables for that Stack. Those remain explicitly
+supervised runtime infrastructure until they can be isolated per Stack.
+
 Start it as an OTP application or under your supervision tree. The default
 application starts ETS ownership, persistence, the durable index, stream routing,
 active focus, recall, consolidation, and the opt-in consolidation scheduler.
