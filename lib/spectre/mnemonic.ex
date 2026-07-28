@@ -3,8 +3,9 @@ defmodule Spectre.Mnemonic do
   Stack-installable definition for Spectre Mnemonic.
 
   The installation compiles memory-store and isolation declarations into
-  immutable data. It does not claim ownership of the legacy Mnemonic
-  application, named processes, or ETS tables.
+  immutable data. Selecting it activates the Spectre memory adapter while
+  leaving ownership of the Mnemonic application, named processes, and ETS
+  tables with the host.
   """
 
   alias Spectre.Stack.DSL
@@ -22,6 +23,7 @@ defmodule Spectre.Mnemonic do
     operations: [],
     actions: [],
     resources: [],
+    agent_extensions: [Spectre.Mnemonic.Extension],
     dsl: __MODULE__,
     metadata: %{application: :spectre_mnemonic, role: :memory}
 
@@ -34,6 +36,30 @@ defmodule Spectre.Mnemonic do
       )
 
     compile_declarations(declarations, default_config(opts))
+  end
+
+  defmacro __using__(opts) do
+    quote do
+      Spectre.Extension.register!(
+        __MODULE__,
+        Spectre.Mnemonic.Extension,
+        unquote(opts)
+      )
+    end
+  end
+
+  @doc """
+  Returns the immutable Mnemonic installation bound to an Agent.
+  """
+  @spec config(module()) :: {:ok, map()} | {:error, term()}
+  def config(agent) when is_atom(agent) do
+    with {:ok, mount} <- Spectre.Extension.fetch(agent, :mnemonic),
+         config when is_map(config) <- mount.compiled do
+      {:ok, config}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_mnemonic_configuration}
+    end
   end
 
   @spec compile_declarations([{atom(), [term()]}], map()) :: {:ok, map()} | {:error, term()}

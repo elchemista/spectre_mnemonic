@@ -63,7 +63,7 @@ defmodule SpectreMnemonic.MixProject do
   @spec deps :: [{atom(), binary()} | {atom(), binary(), keyword()}]
   defp deps do
     [
-      {:spectre, github: "elchemista/spectre", ref: "b39b0b1e77d685c0e497cd64d7f16f20d3c1c846"},
+      spectre_dep(),
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
@@ -71,5 +71,12 @@ defmodule SpectreMnemonic.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
+  end
+
+  defp spectre_dep do
+    case System.get_env("SPECTRE_PATH") do
+      path when is_binary(path) and path != "" -> {:spectre, path: Path.expand(path)}
+      _other -> {:spectre, github: "elchemista/spectre", branch: "feature/v0.1.2-stack"}
+    end
   end
 end
