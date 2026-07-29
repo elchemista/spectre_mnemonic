@@ -61,7 +61,7 @@ def deps do
 end
 ```
 
-Version 0.1.2 can also publish Mnemonic configuration through an immutable
+Version 0.1.3 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -90,6 +90,12 @@ persistent store, and forwards the complete runtime context needed for
 agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
+
+Mnemonic values and runtime handles are never stored in `%Spectre.Run{}`.
+Recall is resolved again whenever a restored Run advances. After the core
+commits a turn, the adapter's `remember/4` callback writes a compact logical
+projection with `persist?: true`; full Result, State, process, and adapter
+handles remain outside durable memory records.
 
 The installation does not start or claim the legacy Mnemonic application,
 named processes, or ETS tables for that Stack. Those remain explicitly

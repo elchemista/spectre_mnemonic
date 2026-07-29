@@ -17,11 +17,43 @@ defmodule Spectre.Mnemonic.Memory do
     end
   end
 
+  alias Spectre.Input
+  alias Spectre.Result
+
   @spec remember(term(), keyword()) :: {:ok, term()} | {:error, term()}
   def remember(payload, opts) when is_list(opts) do
     with {:ok, agent} <- agent(opts),
          {:ok, memory_opts} <- options(agent, opts) do
-      result = SpectreMnemonic.remember(payload, memory_opts)
+      result = remember_payload(normalize_payload(payload, agent), durable(memory_opts))
+      record(agent, :mnemonic_remember, result, memory_opts)
+      result
+    end
+  end
+
+  @doc """
+  Persists a committed Spectre turn through the explicit memory callback.
+
+  The four-argument callback keeps Run continuation data separate from the
+  memory engine. Mnemonic receives the committed logical turn only after each
+  `advance/2` or `resume/3`, and runtime handles are resolved from `opts` for
+  that call rather than retained in `Spectre.Run`.
+  """
+  @spec remember(Input.t(), Result.t(), module(), keyword()) ::
+          {:ok, term()} | {:error, term()}
+  def remember(%Input{} = input, %Result{} = result, agent, opts)
+      when is_atom(agent) and not is_nil(agent) and is_list(opts) do
+    runtime_opts =
+      Keyword.merge(opts,
+        input: input,
+        state: result.state,
+        result: result,
+        agent: agent
+      )
+
+    payload = turn_payload(input, result, agent)
+
+    with {:ok, memory_opts} <- options(agent, runtime_opts) do
+      result = remember_payload(payload, durable(memory_opts))
       record(agent, :mnemonic_remember, result, memory_opts)
       result
     end
@@ -67,6 +99,124 @@ defmodule Spectre.Mnemonic.Memory do
     partition = Enum.map(dimensions, &{&1, dimension(&1, opts)})
     Keyword.put(opts, :scope, {:spectre, partition})
   end
+
+  @spec durable(keyword()) :: keyword()
+  defp durable(opts), do: Keyword.put(opts, :persist?, true)
+
+  @spec normalize_payload(term(), module()) :: term()
+  defp normalize_payload(%{input: %Input{} = input} = payload, agent) do
+    result = %Result{
+      input: input,
+      reply_text: Map.get(payload, :reply_text, ""),
+      route: Map.get(payload, :route),
+      state: Map.get(payload, :state),
+      effects: Map.get(payload, :effects, []),
+      awaitables: Map.get(payload, :awaitables, []),
+      events: Map.get(payload, :events, [])
+    }
+
+    turn_payload(input, result, agent)
+  end
+
+  defp normalize_payload(payload, _agent), do: payload
+
+  @spec remember_payload(term(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp remember_payload(%{text: text, metadata: metadata, kind: kind}, opts)
+       when is_binary(text) and is_map(metadata) and is_atom(kind) do
+    SpectreMnemonic.remember(
+      text,
+      opts
+      |> Keyword.put(:metadata, metadata)
+      |> Keyword.put(:kind, kind)
+    )
+  end
+
+  defp remember_payload(payload, opts), do: SpectreMnemonic.remember(payload, opts)
+
+  @spec turn_payload(Input.t(), Result.t(), module()) :: map()
+  defp turn_payload(%Input{} = input, %Result{} = result, agent) do
+    transcript =
+      [input.text, result.reply_text]
+      |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+      |> Enum.join("\n")
+
+    %{
+      text: transcript,
+      kind: :conversation,
+      metadata: %{
+        source: :spectre,
+        agent: inspect(agent),
+        conversation_id: conversation_id(result.state),
+        route: route_projection(result.route),
+        effects: Enum.map(result.effects, &effect_projection/1),
+        awaitables: Enum.map(result.awaitables, &awaitable_projection/1),
+        events: Enum.map(result.events, &event_projection/1),
+        run: run_projection(result.metadata)
+      }
+    }
+  end
+
+  @spec route_projection(term()) :: map() | nil
+  defp route_projection(nil), do: nil
+
+  defp route_projection(route) when is_map(route) do
+    route
+    |> Map.take([:label, :flow, :scope, :strategy, :confidence, :accepted?])
+    |> Map.update(:scope, nil, &logical_id/1)
+  end
+
+  defp route_projection(_route), do: nil
+
+  @spec effect_projection(term()) :: map()
+  defp effect_projection(effect) when is_map(effect) do
+    effect
+    |> Map.take([:id, :kind, :name, :status, :mode])
+    |> Map.update(:id, nil, &logical_id/1)
+  end
+
+  defp effect_projection(_effect), do: %{}
+
+  @spec awaitable_projection(term()) :: map()
+  defp awaitable_projection(awaitable) when is_map(awaitable) do
+    awaitable
+    |> Map.take([:id, :kind, :status, :subject_id])
+    |> Map.update(:id, nil, &logical_id/1)
+    |> Map.update(:subject_id, nil, &logical_id/1)
+  end
+
+  defp awaitable_projection(_awaitable), do: %{}
+
+  @spec event_projection(term()) :: term()
+  defp event_projection(%{type: type}), do: type
+  defp event_projection(event) when is_atom(event) or is_binary(event), do: event
+  defp event_projection(_event), do: :event
+
+  @spec run_projection(map()) :: map() | nil
+  defp run_projection(metadata) when is_map(metadata) do
+    case Map.get(metadata, :run) do
+      run when is_map(run) -> Map.take(run, [:id, :revision, :status, :cursor, :step_id])
+      _other -> nil
+    end
+  end
+
+  defp run_projection(_metadata), do: nil
+
+  @spec conversation_id(term()) :: term()
+  defp conversation_id(%{conversation_id: conversation_id}), do: logical_id(conversation_id)
+  defp conversation_id(_state), do: nil
+
+  @spec logical_id(term()) :: term()
+  defp logical_id(value)
+       when is_nil(value) or is_boolean(value) or is_number(value) or is_binary(value) or
+              is_atom(value),
+       do: value
+
+  defp logical_id(value) when is_tuple(value) do
+    values = value |> Tuple.to_list() |> Enum.map(&logical_id/1)
+    if Enum.any?(values, &is_nil/1), do: nil, else: List.to_tuple(values)
+  end
+
+  defp logical_id(_value), do: nil
 
   @spec dimension(atom(), keyword()) :: term()
   defp dimension(:agent, opts), do: Keyword.get(opts, :agent)
