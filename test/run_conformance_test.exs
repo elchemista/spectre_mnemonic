@@ -31,12 +31,16 @@ end
 defmodule SpectreMnemonic.RunConformanceTest do
   use ExUnit.Case, async: false
 
+  alias Spectre.Awaitable
+  alias Spectre.Effect
+  alias Spectre.Input
+  alias Spectre.Input.Source
+  alias Spectre.Mnemonic.Memory
+  alias Spectre.Result
+  alias Spectre.Route
   alias Spectre.Run
   alias Spectre.Runtime
-  alias Spectre.Input
-  alias Spectre.Result
   alias Spectre.State
-  alias Spectre.Mnemonic.Memory
   alias SpectreMnemonic.RunConformanceTest.Agent
 
   test "restored Runs re-resolve memory and never checkpoint the recalled value or runtime handles" do
@@ -94,5 +98,139 @@ defmodule SpectreMnemonic.RunConformanceTest do
     assert packet.persistence == %{mode: :immediate, durable?: true}
     assert String.contains?(packet.root.text, "remember the committed turn")
     assert packet.root.metadata.source == :spectre
+  end
+
+  test "committed turns retain logical lifecycle context and discard runtime identities" do
+    input = %Input{
+      text: "logical input",
+      source: %Source{
+        kind: :test,
+        conversation_id: "source-conversation",
+        actor_id: "actor-1"
+      }
+    }
+
+    route = %Route{
+      label: :remember,
+      flow: :memory,
+      scope: {:unsafe, self()},
+      strategy: :regex,
+      confidence: 1.0,
+      accepted?: true
+    }
+
+    effect = %Effect{
+      id: {:effect, 1},
+      kind: :action,
+      name: :store,
+      status: :completed,
+      mode: :sync
+    }
+
+    awaitable = %Awaitable{
+      id: {:awaitable, 1},
+      kind: :policy,
+      status: :accepted,
+      subject_id: {:effect, 1}
+    }
+
+    result = %Result{
+      input: input,
+      state: %State{conversation_id: {:conversation, 42}},
+      reply_text: "logical reply",
+      route: route,
+      effects: [effect, :invalid],
+      awaitables: [awaitable, :invalid],
+      events: [%{type: :routed}, "committed", %{unexpected: true}],
+      metadata: %{
+        run: %{
+          id: "run-1",
+          revision: 2,
+          status: :complete,
+          cursor: :complete,
+          step_id: "step-2",
+          runtime_client: self()
+        }
+      }
+    }
+
+    assert {:ok, packet} =
+             Memory.remember(input, result, Agent,
+               namespace: "spectre_mnemonic_test",
+               stream: unique_stream("logical-turn")
+             )
+
+    metadata = packet.root.metadata
+    assert packet.root.text =~ "logical input"
+    assert metadata.conversation_id == {:conversation, 42}
+    assert metadata.route.scope == nil
+
+    assert metadata.effects == [
+             %{id: {:effect, 1}, kind: :action, mode: :sync, name: :store, status: :completed},
+             %{}
+           ]
+
+    assert metadata.awaitables == [
+             %{
+               id: {:awaitable, 1},
+               kind: :policy,
+               status: :accepted,
+               subject_id: {:effect, 1}
+             },
+             %{}
+           ]
+
+    assert metadata.events == [:routed, "committed", :event]
+
+    assert metadata.run == %{
+             id: "run-1",
+             revision: 2,
+             status: :complete,
+             cursor: :complete,
+             step_id: "step-2"
+           }
+  end
+
+  test "legacy payload projection is durable and missing Agent context fails closed" do
+    input = Input.new("legacy input")
+
+    payload = %{
+      input: input,
+      reply_text: "legacy reply",
+      route: :invalid,
+      state: nil,
+      effects: [],
+      awaitables: [],
+      events: []
+    }
+
+    assert {:ok, packet} =
+             Memory.remember(payload,
+               agent: Agent,
+               namespace: "spectre_mnemonic_test",
+               stream: unique_stream("legacy-turn")
+             )
+
+    assert packet.persistence.durable?
+    assert packet.root.text =~ "legacy input"
+    assert packet.root.metadata.route == nil
+    assert packet.root.metadata.conversation_id == nil
+    assert packet.root.metadata.run == nil
+
+    assert {:ok, plain_packet} =
+             Memory.remember("plain legacy payload",
+               agent: Agent,
+               namespace: "spectre_mnemonic_test",
+               stream: unique_stream("plain-turn")
+             )
+
+    assert plain_packet.persistence.durable?
+
+    assert {:error, :mnemonic_agent_required} = Memory.remember("missing agent", [])
+    assert {:error, :mnemonic_agent_required} = Memory.recall("missing agent", [])
+  end
+
+  defp unique_stream(prefix) do
+    "#{prefix}-#{System.unique_integer([:positive])}"
   end
 end
