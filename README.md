@@ -61,7 +61,7 @@ def deps do
 end
 ```
 
-Version 0.1.3 can also publish Mnemonic configuration through an immutable
+Version 0.1.4 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -90,6 +90,36 @@ persistent store, and forwards the complete runtime context needed for
 agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
+
+When `isolate_by` includes `:subject`, version 0.1.4 requires the explicit
+canonical `%Spectre.Subject{}` supplied by an Agent Instance:
+
+```elixir
+subject = Spectre.Subject.new(account.id)
+
+{:ok, memory_opts} =
+  Spectre.Mnemonic.Memory.options(MyApp.Agent,
+    agent: MyApp.Agent,
+    subject: subject,
+    input: input,
+    state: state
+  )
+```
+
+The resulting memory partition uses `Spectre.Subject.key/1`. Mnemonic never
+falls back to `Input.Source.actor_id`, a sender name, phone number, or
+conversation id as cross-channel identity. Different channel principals share
+memory only after the core Subject Registry explicitly links them and the
+owning Instance supplies the same canonical Subject. Calls without a Subject
+fail closed with `:mnemonic_canonical_subject_required`; explicit scalar
+application identities are normalized through `Spectre.Subject.new/1` for
+caller compatibility.
+
+Instance calls also partition the `:agent` dimension by canonical
+`Spectre.AgentRef`, so two logical Agents backed by the same module cannot
+share memory accidentally. The `:conversation` dimension follows the current
+origin supplied by the Run/Input, not the stable persistence key of the
+Subject-owned Instance.
 
 Mnemonic values and runtime handles are never stored in `%Spectre.Run{}`.
 Recall is resolved again whenever a restored Run advances. After the core
