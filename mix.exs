@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.1.4"
+  @version "0.1.5"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -76,10 +76,10 @@ defmodule SpectreMnemonic.MixProject do
   defp spectre_dep do
     case System.get_env("SPECTRE_PATH") do
       path when is_binary(path) and path != "" ->
-        {:spectre, "~> 0.1.4", path: Path.expand(path)}
+        {:spectre, "~> 0.1.5", path: Path.expand(path)}
 
       _other ->
-        {:spectre, "~> 0.1.4", github: "elchemista/spectre", branch: "main"}
+        {:spectre, "~> 0.1.5", github: "elchemista/spectre", branch: "main"}
     end
   end
 end
