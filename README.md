@@ -61,7 +61,7 @@ def deps do
 end
 ```
 
-Version 0.1.4 can also publish Mnemonic configuration through an immutable
+Version 0.1.5 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -91,7 +91,7 @@ agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
 
-When `isolate_by` includes `:subject`, version 0.1.4 requires the explicit
+When `isolate_by` includes `:subject`, version 0.1.5 requires the explicit
 canonical `%Spectre.Subject{}` supplied by an Agent Instance:
 
 ```elixir

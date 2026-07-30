@@ -38,9 +38,9 @@ defmodule SpectreMnemonic.StackInstallableTest do
   test "publishes the versioned Mnemonic Stack contract" do
     assert {:ok, package} = V1.verify_installable(Spectre.Mnemonic)
     assert package.id == :mnemonic
-    assert package.version == "0.1.4"
+    assert package.version == "0.1.5"
     assert package.contract == 1
-    assert package.spectre == "~> 0.1.4"
+    assert package.spectre == "~> 0.1.5"
     assert package.provides == [{:service, :memory}]
     assert package.operations == []
     assert package.actions == []
