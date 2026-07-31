@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.1.5"
+  @version "0.1.6"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -17,9 +17,11 @@ defmodule SpectreMnemonic.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
+      dialyzer: [plt_add_apps: [:mix]],
       docs: [
         main: "readme",
-        extras: ["README.md", "LICENSE"]
+        source_ref: "v#{@version}",
+        extras: ["README.md", "docs/PUBLIC_API.md", "CHANGELOG.md", "LICENSE"]
       ],
       source_url: @source_url,
       homepage_url: @source_url
@@ -47,8 +49,10 @@ defmodule SpectreMnemonic.MixProject do
       maintainers: ["elchemista"],
       files: ~w(
         lib
+        docs
         mix.exs
         README.md
+        CHANGELOG.md
         LICENSE
       ),
       licenses: ["Apache-2.0"],
@@ -68,14 +72,18 @@ defmodule SpectreMnemonic.MixProject do
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
       {:hnswlib, "~> 0.1", optional: true},
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 
   defp spectre_dep do
-    case System.get_env("SPECTRE_PATH") do
-      path when is_binary(path) and path != "" ->
+    case {System.get_env("SPECTRE_HEX_BUILD"), System.get_env("SPECTRE_PATH")} do
+      {hex_build, _path} when hex_build in ["1", "true"] ->
+        {:spectre, "~> 0.1.5"}
+
+      {_hex_build, path} when is_binary(path) and path != "" ->
         {:spectre, "~> 0.1.5", path: Path.expand(path)}
 
       _other ->

@@ -11,6 +11,19 @@ beside your framework: record what happened, recall nearby context, promote
 important moments, track stale or contradicted facts, and keep compact knowledge
 available without hydrating every old event.
 
+The exact `0.1.6` compatibility surface is published in the
+[public API manifest](docs/PUBLIC_API.md).
+
+## 0.1.6 Recoverable Baseline
+
+Version `0.1.6` is a consolidation-only release with no new runtime feature and
+no intentional breaking change. Elixir 1.19 on Erlang/OTP 28 is the initially
+guaranteed pair. Uniform CI runs format, warnings-as-errors compilation, tests,
+non-strict Credo, Dialyzer, ExDoc, and local package validation with no
+publication. The changelog,
+license, and explicit API manifest complete the release boundary before
+`0.2.0` development begins.
+
 ```elixir
 {:ok, memory} =
   SpectreMnemonic.remember("Alice email is alice@example.com",
@@ -61,7 +74,7 @@ def deps do
 end
 ```
 
-Version 0.1.5 can also publish Mnemonic configuration through an immutable
+Version 0.1.6 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -91,7 +104,7 @@ agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
 
-When `isolate_by` includes `:subject`, version 0.1.5 requires the explicit
+When `isolate_by` includes `:subject`, version 0.1.6 requires the explicit
 canonical `%Spectre.Subject{}` supplied by an Agent Instance:
 
 ```elixir
