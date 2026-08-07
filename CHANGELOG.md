@@ -4,6 +4,13 @@ All notable changes to Spectre Mnemonic are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Made distribution GitHub-only by removing Hex package metadata and package
+  build CI.
+- Replaced the dynamic Spectre source selector with one direct dependency on
+  the Spectre GitHub `0.2.0` tag.
+
 ## [0.2.0] - 2026-08-01
 
 ### Changed

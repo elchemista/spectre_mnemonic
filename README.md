@@ -25,8 +25,7 @@ the core retains canonical Agent, Run, Work, Vigil, and checkpoint ownership.
 Version `0.1.6` is a consolidation-only release with no new runtime feature and
 no intentional breaking change. Elixir 1.19 on Erlang/OTP 28 is the initially
 guaranteed pair. Uniform CI runs format, warnings-as-errors compilation, tests,
-non-strict Credo, Dialyzer, ExDoc, and local package validation with no
-publication. The changelog,
+non-strict Credo, Dialyzer, and ExDoc. The changelog,
 license, and explicit API manifest complete the release boundary before
 `0.2.0` development begins.
 
@@ -75,10 +74,13 @@ Add the dependency:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic"}
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", tag: "v0.2.0"}
   ]
 end
 ```
+
+Spectre Mnemonic is distributed exclusively from GitHub; there is no Hex
+package.
 
 Version 0.2.0 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
@@ -817,7 +819,7 @@ config :spectre_mnemonic,
   embedding_adapter: MyApp.EmbeddingAdapter
 ```
 
-Adapters implement `SpectreMnemonic.Embedding.Adapter.embed/2` and return
+Adapters implement `c:SpectreMnemonic.Embedding.Adapter.embed/2` and return
 `{:ok, vector}`, `{:ok, embedding_map}`, or `{:error, reason}`.
 
 Enable the local Model2Vec provider:
