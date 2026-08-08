@@ -72,7 +72,9 @@ defmodule SpectreMnemonic.Recall.Engine do
   """
   @spec recall(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def recall(cue, opts \\ []) do
-    with {:ok, context} <- QueryContext.ensure(cue, opts) do
+    with :ok <- validate_recall_options(opts),
+         {:ok, context} <- QueryContext.ensure(cue, opts),
+         :ok <- validate_recall_options(context.opts) do
       GenServer.call(__MODULE__, {:recall, context})
     end
   end
@@ -85,14 +87,25 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec handle_call({:recall, QueryContext.t()}, GenServer.from(), map()) ::
           {:reply, {:ok, Packet.t()}, map()}
   def handle_call({:recall, %QueryContext{} = context}, _from, state) do
+    do_handle_recall(context, state)
+  rescue
+    exception ->
+      {:reply, {:error, {:recall_failed, exception.__struct__, Exception.message(exception)}},
+       state}
+  catch
+    kind, reason -> {:reply, {:error, {:recall_failed, kind, reason}}, state}
+  end
+
+  @spec do_handle_recall(QueryContext.t(), map()) :: {:reply, {:ok, Packet.t()}, map()}
+  defp do_handle_recall(context, state) do
     # Recall gathers evidence. It does not write the answer, bless the answer,
     # or pretend the top hit is truth. Ranking is useful; certainty is expensive.
     opts = context.opts
     cue = context
     limit = Keyword.get(opts, :limit, 10)
     budget = budget(opts)
-    {:ok, index_results} = Index.query(cue, opts)
-    {:ok, durable_results} = Manager.search(context, opts)
+    index_results = result_values(Index.query(cue, opts))
+    durable_results = result_values(Manager.search(context, opts))
     index_scores = Map.new(index_results, &{&1.id, &1})
 
     seed_limit = max(limit, limit * budget.seed_multiplier)
@@ -554,8 +567,9 @@ defmodule SpectreMnemonic.Recall.Engine do
         |> Keyword.put(:limit, Keyword.get(opts, :observation_limit, 5))
         |> Keyword.put(:durable_results, durable_results)
 
-      {:ok, observations} = SpectreMnemonic.search_observations(context.text, opts)
-      observations
+      context.text
+      |> SpectreMnemonic.search_observations(opts)
+      |> result_values()
     else
       []
     end
@@ -569,8 +583,9 @@ defmodule SpectreMnemonic.Recall.Engine do
         |> Keyword.put(:limit, Keyword.get(opts, :mental_model_limit, 5))
         |> Keyword.put(:durable_results, durable_results)
 
-      {:ok, mental_models} = SpectreMnemonic.search_mental_models(context.text, opts)
-      mental_models
+      context.text
+      |> SpectreMnemonic.search_mental_models(opts)
+      |> result_values()
     else
       []
     end
@@ -642,6 +657,7 @@ defmodule SpectreMnemonic.Recall.Engine do
       case Knowledge.Base.load(opts) do
         {:ok, %{summary: nil, skills: [], latest_ingestions: [], facts: [], procedures: []}} -> []
         {:ok, knowledge} -> [knowledge]
+        {:error, _reason} -> []
       end
     else
       []
@@ -730,4 +746,56 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp signature_bits(_embedding, left, right),
     do: min(byte_size(left || <<>>) * 8, byte_size(right || <<>>) * 8)
+
+  @spec validate_recall_options(term()) :: :ok | {:error, term()}
+  defp validate_recall_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      validators = [
+        {:limit, &non_negative_integer?/1},
+        {:observation_limit, &non_negative_integer?/1},
+        {:mental_model_limit, &non_negative_integer?/1},
+        {:max_tokens, &positive_integer?/1},
+        {:include_observations, &is_boolean/1},
+        {:include_mental_models, &is_boolean/1},
+        {:include_knowledge, &is_boolean/1},
+        {:budget, &(&1 in [:low, :mid, :high])}
+      ]
+
+      Enum.reduce_while(validators, :ok, &validate_recall_option(&1, &2, opts))
+    else
+      {:error, {:invalid_recall_options, opts}}
+    end
+  end
+
+  defp validate_recall_options(opts), do: {:error, {:invalid_recall_options, opts}}
+
+  @spec validate_recall_option(
+          {atom(), (term() -> boolean())},
+          :ok,
+          keyword()
+        ) :: {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_recall_option({key, valid?}, :ok, opts) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> validate_recall_option_value(key, value, valid?)
+      :error -> {:cont, :ok}
+    end
+  end
+
+  @spec validate_recall_option_value(atom(), term(), (term() -> boolean())) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_recall_option_value(key, value, valid?) do
+    if valid?.(value),
+      do: {:cont, :ok},
+      else: {:halt, {:error, {:invalid_recall_option, key, value}}}
+  end
+
+  @spec non_negative_integer?(term()) :: boolean()
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  @spec positive_integer?(term()) :: boolean()
+  defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  @spec result_values(term()) :: [term()]
+  defp result_values({:ok, values}) when is_list(values), do: values
+  defp result_values(_result), do: []
 end

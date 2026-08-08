@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Actions.Runtime
   alias SpectreMnemonic.Active.ETSOwner
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.BinaryQuantizer
@@ -8,10 +9,14 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
   alias SpectreMnemonic.Intake.Memory
   alias SpectreMnemonic.Intake.MissionPolicy
   alias SpectreMnemonic.Intake.PlugPipeline
+  alias SpectreMnemonic.Knowledge.Base
+  alias SpectreMnemonic.Memory.ActionRecipe
   alias SpectreMnemonic.Memory.Observation
   alias SpectreMnemonic.MentalModels
   alias SpectreMnemonic.Observations
   alias SpectreMnemonic.Persistence.Family
+  alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Recall.Engine
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Fusion
   alias SpectreMnemonic.Result
@@ -52,10 +57,30 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert [{shared_score, %{memory_id: "shared"}}, {_score, %{source_id: "source"}}] = fused
     assert shared_score > 0.1
 
+    assert [{fallback_score, %{id: "fallback"}}] =
+             Fusion.rrf([[%{id: "fallback"}]], k: :invalid)
+
+    assert fallback_score > 0.0
+
+    malformed =
+      SearchResult.new(%{
+        id: "malformed-maps",
+        metadata: :invalid,
+        provenance: "invalid",
+        scores: [:invalid],
+        adapter_detail: :kept
+      })
+
+    assert malformed.metadata == %{adapter_detail: :kept}
+    assert malformed.provenance == %{}
+    assert malformed.scores == %{}
+
     assert is_integer(Fingerprint.build(%{arbitrary: :term}))
     assert Fingerprint.hamming_similarity(:invalid, 1) == 0.0
     assert BinaryQuantizer.quantize([]) == nil
     assert BinaryQuantizer.quantize([1.0], bits: 0) == nil
+    assert BinaryQuantizer.quantize([1.0], bits: :invalid) == nil
+    assert BinaryQuantizer.quantize([:invalid]) == nil
     assert ETSOwner.member?(:mnemonic_moments, "missing") == false
     assert ETSOwner.member?(:missing_mnemonic_table, "missing") == false
   end
@@ -133,11 +158,28 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
              PlugPipeline.run(memory, plugs: [__MODULE__.ResultPlug])
   end
 
+  test "action runtime contains invalid adapters and callback failures" do
+    recipe = %ActionRecipe{id: "runtime-hardening", text: "Inspect only"}
+
+    assert {:error, {:runtime_not_available, "not-a-module"}} =
+             Runtime.analyze(recipe, adapter: "not-a-module")
+
+    assert {:error, {:runtime_failed, :analyze, RuntimeError, "runtime exploded"}} =
+             Runtime.analyze(recipe, adapter: __MODULE__.RaisingRuntime)
+
+    assert {:error, {:runtime_failed, :run, :throw, :runtime_threw}} =
+             Runtime.run(recipe, %{}, adapter: __MODULE__.ThrowingRuntime)
+
+    assert {:error, {:unexpected_runtime_result, :analyze, :unexpected}} =
+             Runtime.analyze(recipe, adapter: __MODULE__.UnexpectedRuntime)
+  end
+
   test "focus read APIs stay scoped and tolerate empty or unknown selectors" do
     assert {:error, :not_found} = Focus.status(:missing)
     assert Focus.associations() == []
     assert Focus.fold_moments([], fn moment, acc -> [moment.id | acc] end) == []
     assert Focus.recent_moments(:chat, nil, 5) == []
+    assert Focus.recent_moments(:chat, nil, :invalid) == []
     assert Focus.moments_by_ids(["missing", "missing"]) == []
     assert Focus.associations_for_ids(["missing"]) == []
     assert Focus.artifacts(["missing"]) == []
@@ -166,7 +208,110 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert Focus.moments_by_ids([first.id]) == []
   end
 
+  test "focus rejects malformed mutation options without losing its processes" do
+    focus = Process.whereis(Focus)
+    router = Process.whereis(SpectreMnemonic.Active.Router)
+
+    assert {:error, {:invalid_focus_option, :metadata, :invalid}} =
+             SpectreMnemonic.signal("invalid metadata", metadata: :invalid)
+
+    assert {:error, {:invalid_focus_option, :secret?, "yes"}} =
+             SpectreMnemonic.signal("invalid secret flag", secret?: "yes")
+
+    assert {:error, {:invalid_focus_option, :action_recipe, [:invalid]}} =
+             SpectreMnemonic.signal("invalid recipe", action_recipe: [:invalid])
+
+    assert {:error, {:invalid_focus_option, :metadata, :invalid}} =
+             Focus.artifact("artifact", metadata: :invalid)
+
+    assert {:ok, %{moment: moment}} = SpectreMnemonic.signal("focus remains healthy")
+
+    assert {:ok, 0} =
+             Focus.forget(fn _moment -> raise "predicate must not run in Focus" end)
+
+    assert Focus.moments_by_ids([moment.id]) == [moment]
+    assert Process.whereis(Focus) == focus
+    assert Process.alive?(focus)
+    assert Process.whereis(SpectreMnemonic.Active.Router) == router
+    assert Process.alive?(router)
+  end
+
+  test "recall rejects dangerous option shapes without crashing its engine" do
+    engine = Process.whereis(Engine)
+
+    assert {:error, {:invalid_recall_options, :invalid}} = Engine.recall("cue", :invalid)
+
+    for {key, value} <- [
+          limit: :invalid,
+          observation_limit: -1,
+          mental_model_limit: "five",
+          max_tokens: 0,
+          include_observations: :yes,
+          include_mental_models: nil,
+          include_knowledge: "yes",
+          budget: :unbounded
+        ] do
+      assert {:error, {:invalid_recall_option, ^key, ^value}} =
+               Engine.recall("cue", [{key, value}])
+    end
+
+    assert {:ok, _packet} = Engine.recall("still healthy", limit: 1)
+    assert Process.whereis(Engine) == engine
+    assert Process.alive?(engine)
+  end
+
+  test "search limits cannot crash durable or derived search paths" do
+    manager = Process.whereis(Manager)
+
+    assert {:ok, []} = Manager.search("missing", limit: :invalid)
+    assert {:ok, []} = Observations.search("missing", limit: :invalid)
+    assert {:ok, []} = MentalModels.search("missing", limit: :invalid)
+    assert {:ok, []} = SpectreMnemonic.search_knowledge("missing", limit: :invalid)
+
+    assert Process.whereis(Manager) == manager
+    assert Process.alive?(manager)
+  end
+
+  test "malformed persistent-memory configuration falls back without crashing manager" do
+    manager = Process.whereis(Manager)
+
+    Application.put_env(:spectre_mnemonic, :persistent_memory, :invalid)
+    assert [default_store] = Keyword.fetch!(Manager.config(), :stores)
+    assert Keyword.fetch!(default_store, :id) == :local_file
+    assert {:ok, []} = Manager.search("invalid config fallback")
+
+    Application.put_env(:spectre_mnemonic, :persistent_memory, stores: [:invalid_store])
+
+    assert {:ok, %{stores: [%{store: :local_file}]}} =
+             Manager.append(:knowledge, %{id: "config-fallback"})
+
+    assert Process.whereis(Manager) == manager
+    assert Process.alive?(manager)
+  end
+
+  test "malformed knowledge budgets normalize to safe defaults" do
+    Application.put_env(:spectre_mnemonic, :knowledge, %{
+      enabled: :invalid,
+      max_loaded_bytes: :invalid,
+      max_latest_ingestions: -1,
+      max_skills: nil,
+      max_facts: "many",
+      max_procedures: -10
+    })
+
+    config = Base.config()
+    assert Keyword.get(config, :enabled) == true
+    assert Keyword.get(config, :max_loaded_bytes) == 16_000
+    assert Keyword.get(config, :max_latest_ingestions) == 20
+    assert Keyword.get(config, :max_skills) == 20
+    assert Keyword.get(config, :max_facts) == 20
+    assert Keyword.get(config, :max_procedures) == 20
+    assert {:ok, _knowledge} = Base.load()
+  end
+
   test "governance lifecycle defaults, invalid transitions, and string scopes are deterministic" do
+    governance = Process.whereis(Governance)
+
     assert :forgotten in Governance.states()
     assert Governance.observe_moment(:invalid) == :ok
     assert Governance.fact_claim(:invalid) == nil
@@ -174,6 +319,18 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert Governance.search_visible?("missing")
     assert Governance.consolidatable?(%{id: "missing"})
     assert {:ok, %{stale: 0}} = Governance.decay()
+
+    assert {:error, {:invalid_decay_option, :stale_after_ms, :invalid}} =
+             Governance.decay(stale_after_ms: :invalid)
+
+    assert {:error, {:invalid_decay_option, :now, :invalid}} =
+             Governance.decay(now: :invalid)
+
+    assert {:error, {:invalid_governance_metadata, :invalid}} =
+             Governance.append_state("invalid-metadata", :candidate, :test, [], :invalid)
+
+    assert Process.whereis(Governance) == governance
+    assert Process.alive?(governance)
 
     provenance = Governance.with_provenance(%{}, source_ids: [nil, "source"])
     assert provenance.provenance.source_ids == ["source"]
@@ -325,5 +482,20 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
 
   defmodule ThrowingPlug do
     def call(_memory, _opts), do: throw(:plug_threw)
+  end
+
+  defmodule RaisingRuntime do
+    def analyze(_recipe, _opts), do: raise("runtime exploded")
+    def run(_recipe, _context, _opts), do: {:ok, :unused}
+  end
+
+  defmodule ThrowingRuntime do
+    def analyze(_recipe, _opts), do: {:ok, :unused}
+    def run(_recipe, _context, _opts), do: throw(:runtime_threw)
+  end
+
+  defmodule UnexpectedRuntime do
+    def analyze(_recipe, _opts), do: :unexpected
+    def run(_recipe, _context, _opts), do: :unexpected
   end
 end

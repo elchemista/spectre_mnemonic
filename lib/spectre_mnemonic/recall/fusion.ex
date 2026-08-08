@@ -8,7 +8,7 @@ defmodule SpectreMnemonic.Recall.Fusion do
   def rrf(result_lists, opts \\ []) do
     # RRF is the peace treaty between ranking systems. Nobody has to share a
     # score scale, which is good because they absolutely would not.
-    k = Keyword.get(opts, :k, @default_k)
+    k = fusion_constant(opts)
 
     result_lists
     |> Enum.flat_map(fn results ->
@@ -34,4 +34,12 @@ defmodule SpectreMnemonic.Recall.Fusion do
 
   @spec result_sort_id(term()) :: binary()
   defp result_sort_id(result), do: result |> result_id() |> inspect()
+
+  @spec fusion_constant(keyword()) :: non_neg_integer()
+  defp fusion_constant(opts) do
+    case Keyword.get(opts, :k, @default_k) do
+      k when is_integer(k) and k >= 0 -> k
+      _invalid -> @default_k
+    end
+  end
 end

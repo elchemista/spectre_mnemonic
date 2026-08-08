@@ -102,12 +102,43 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
 
   @spec config :: keyword()
   defp config do
-    configured = Application.get_env(:spectre_mnemonic, :consolidation_scheduler, [])
-    Keyword.merge(@default_config, configured)
+    configured =
+      :spectre_mnemonic
+      |> Application.get_env(:consolidation_scheduler, [])
+      |> normalize_config()
+
+    @default_config
+    |> Keyword.merge(configured)
+    |> normalize_values()
   end
 
   @spec schedule_tick(keyword()) :: reference()
   defp schedule_tick(cfg) do
     Process.send_after(self(), :tick, Keyword.get(cfg, :interval_ms, 300_000))
+  end
+
+  @spec normalize_config(term()) :: keyword()
+  defp normalize_config(config) when is_map(config), do: Map.to_list(config)
+
+  defp normalize_config(config) when is_list(config) do
+    if Keyword.keyword?(config), do: config, else: []
+  end
+
+  defp normalize_config(_config), do: []
+
+  @spec normalize_values(keyword()) :: keyword()
+  defp normalize_values(config) do
+    config
+    |> normalize_value(:enabled, &is_boolean/1)
+    |> normalize_value(:interval_ms, &(is_integer(&1) and &1 > 0))
+    |> normalize_value(:min_attention, &is_number/1)
+    |> normalize_value(:stale_after_ms, &(is_integer(&1) and &1 >= 0))
+  end
+
+  @spec normalize_value(keyword(), atom(), (term() -> boolean())) :: keyword()
+  defp normalize_value(config, key, valid?) do
+    if valid?.(Keyword.get(config, key)),
+      do: config,
+      else: Keyword.put(config, key, Keyword.fetch!(@default_config, key))
   end
 end

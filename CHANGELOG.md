@@ -11,6 +11,29 @@ All notable changes to Spectre Mnemonic are documented in this file.
 - Replaced the dynamic Spectre source selector with one direct dependency on
   the Spectre GitHub `0.2.0` tag.
 
+### Fixed
+
+- Serialized append and compaction operations for durable and progressive
+  knowledge logs, preserving unique monotonic sequences under concurrency.
+- Contained malformed options and adapter failures across focus, recall,
+  governance, consolidation, action execution, embeddings, and secrets.
+- Hardened Model2Vec artifact validation, checksum handling, download writes,
+  and cache naming so distinct model identifiers cannot collide.
+
+### Security
+
+- Limited both compressed and declared expanded frame payloads to 64 MiB by
+  default, configurable through `:max_frame_bytes`, before allocating or
+  decoding persisted Erlang terms.
+- Bound AES-GCM ciphertext to the current secret context and validated custom
+  authorization, cryptography, and key-provider boundaries.
+
+### Performance
+
+- Replaced per-append persistent-term sequence writes with atomic counters.
+- Removed repeated indexed list scans and incremental binary copying from
+  binary embedding quantization.
+
 ## [0.2.0] - 2026-08-01
 
 ### Changed

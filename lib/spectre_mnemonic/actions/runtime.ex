@@ -14,7 +14,7 @@ defmodule SpectreMnemonic.Actions.Runtime do
     # Recipes are stored intent, not executable wishes. I want the adapter to
     # make the scary choice explicitly, with a real module name on the paperwork.
     with {:ok, adapter} <- adapter(opts) do
-      adapter.analyze(recipe, opts)
+      call_adapter(adapter, :analyze, [recipe, opts])
     end
   end
 
@@ -24,7 +24,7 @@ defmodule SpectreMnemonic.Actions.Runtime do
     # No default executor lives here. That is not laziness; that is me refusing
     # to let a memory library become a tiny remote-control chainsaw.
     with {:ok, adapter} <- adapter(opts) do
-      adapter.run(recipe, context, opts)
+      call_adapter(adapter, :run, [recipe, context, opts])
     end
   end
 
@@ -38,12 +38,27 @@ defmodule SpectreMnemonic.Actions.Runtime do
       is_nil(configured) ->
         {:error, :runtime_not_configured}
 
-      Code.ensure_loaded?(configured) and function_exported?(configured, :analyze, 2) and
+      is_atom(configured) and Code.ensure_loaded?(configured) and
+        function_exported?(configured, :analyze, 2) and
           function_exported?(configured, :run, 3) ->
         {:ok, configured}
 
       true ->
         {:error, {:runtime_not_available, configured}}
     end
+  end
+
+  @spec call_adapter(module(), :analyze | :run, [term()]) :: {:ok, term()} | {:error, term()}
+  defp call_adapter(adapter, operation, arguments) do
+    case apply(adapter, operation, arguments) do
+      {:ok, _result} = result -> result
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_runtime_result, operation, other}}
+    end
+  rescue
+    exception ->
+      {:error, {:runtime_failed, operation, exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:runtime_failed, operation, kind, reason}}
   end
 end

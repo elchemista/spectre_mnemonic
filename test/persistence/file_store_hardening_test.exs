@@ -26,6 +26,42 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
     assert read_frames(invalid_term_frame()) == []
   end
 
+  test "frame size limits reject oversized writes and declared payloads without allocating them" do
+    Application.put_env(:spectre_mnemonic, :max_frame_bytes, 128)
+    root = tmp_root("frame-limit")
+    payload = String.duplicate("compressible payload ", 100)
+
+    oversized =
+      record("oversized")
+      |> Map.put(:payload, %{text: payload})
+
+    assert {:error, {:frame_too_large, size, 128}} =
+             StoreFile.put(oversized, data_root: root)
+
+    assert size > 128
+
+    assert_raise ArgumentError, ~r/frame payload is .* maximum is 128/, fn ->
+      FileFrame.encode(1, payload)
+    end
+
+    declared_oversized = <<"SMEM", 1, 1::unsigned-64, 100::signed-64, 129::32, 0::32>>
+    assert read_frames(declared_oversized) == []
+
+    Application.put_env(:spectre_mnemonic, :max_frame_bytes, :invalid)
+    assert FileFrame.max_payload_bytes() == 64 * 1024 * 1024
+    assert is_binary(FileFrame.encode(1, :small))
+  end
+
+  test "legacy integer sequence caches migrate to atomics" do
+    root = tmp_root("legacy-sequence-cache")
+    opts = [data_root: root]
+    path = Path.join([root, "segments", "active.smem"])
+
+    assert {:ok, 1} = StoreFile.put(record("first"), opts)
+    :persistent_term.put({StoreFile, :seq, path}, 7)
+    assert {:ok, 8} = StoreFile.put(record("second"), opts)
+  end
+
   test "invalid compaction retention is rejected before snapshot or segment mutation" do
     root = tmp_root("invalid-retention")
     opts = [data_root: root]
@@ -40,6 +76,37 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
 
     assert File.read!(active) == before
     refute File.exists?(Path.join([root, "snapshots", "current.term"]))
+  end
+
+  test "concurrent appends keep sequence numbers unique and in durable order" do
+    root = tmp_root("concurrent-appends")
+    opts = [data_root: root]
+
+    sequences =
+      1..40
+      |> Task.async_stream(
+        fn index -> StoreFile.put(record("concurrent-#{index}"), opts) end,
+        max_concurrency: 16,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, {:ok, sequence}} -> sequence end)
+
+    assert Enum.sort(sequences) == Enum.to_list(1..40)
+    assert {:ok, frames} = StoreFile.replay(opts)
+
+    assert Enum.map(frames, fn {sequence, _timestamp, _record} -> sequence end) ==
+             Enum.to_list(1..40)
+  end
+
+  test "unusable storage roots return errors instead of raising" do
+    parent = tmp_root("invalid-root")
+    File.mkdir_p!(parent)
+    root = Path.join(parent, "regular-file")
+    File.write!(root, "not a directory")
+
+    assert {:error, _reason} = StoreFile.put(record("not-written"), data_root: root)
+    assert {:error, _reason} = StoreFile.compact(data_root: root)
   end
 
   test "replay fold halt propagates from snapshots without scanning the active segment" do
@@ -178,7 +245,11 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
     root =
       Path.join(System.tmp_dir!(), "spectre-#{label}-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(root) end)
+    on_exit(fn ->
+      :persistent_term.erase({StoreFile, :seq, Path.join([root, "segments", "active.smem"])})
+      File.rm_rf!(root)
+    end)
+
     root
   end
 

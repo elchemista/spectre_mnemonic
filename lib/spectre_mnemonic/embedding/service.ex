@@ -46,6 +46,15 @@ defmodule SpectreMnemonic.Embedding.Service do
   """
   @spec embed(input :: term(), opts :: keyword()) :: map()
   def embed(input, opts) do
+    do_embed(input, opts)
+  rescue
+    exception -> failed(exception)
+  catch
+    kind, reason -> failed({kind, reason})
+  end
+
+  @spec do_embed(term(), keyword()) :: map()
+  defp do_embed(input, opts) do
     # Embeddings improve recall, but ingestion must not depend on them. Models,
     # files, and NIFs fail in creative ways. Text still gets remembered.
     adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
@@ -64,10 +73,11 @@ defmodule SpectreMnemonic.Embedding.Service do
 
   @spec embed_with_adapter(module(), term(), keyword()) :: map()
   defp embed_with_adapter(adapter, input, opts) do
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :embed, 2) do
+    if is_atom(adapter) and Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, :embed, 2) do
       call_adapter(adapter, input, opts)
     else
-      %{vector: nil, binary_signature: nil, metadata: %{}, error: :adapter_not_available}
+      failed(:adapter_not_available)
     end
   end
 
@@ -76,42 +86,32 @@ defmodule SpectreMnemonic.Embedding.Service do
     provider = Keyword.get(fast_config(), :provider, SpectreMnemonic.Embedding.Model2VecStatic)
     provider_opts = Keyword.merge(fast_config(), opts)
 
-    cond do
-      not Code.ensure_loaded?(provider) ->
-        %{vector: nil, binary_signature: nil, metadata: %{}, error: :provider_not_available}
-
-      function_exported?(provider, :embed, 2) ->
-        # Providers are allowed to fail without breaking ingestion. The recall
-        # engine still has text, metadata, fingerprint, and graph signals.
-        case provider.embed(input, provider_opts) do
-          {:ok, result} ->
-            normalize_result(result, provider_opts)
-
-          {:error, :model_dir_not_configured} ->
-            empty()
-
-          {:error, reason} ->
-            %{vector: nil, binary_signature: nil, metadata: %{}, error: reason}
-
-          result when is_map(result) ->
-            normalize_result(result, provider_opts)
-
-          other ->
-            %{
-              vector: nil,
-              binary_signature: nil,
-              metadata: %{},
-              error: {:unexpected_provider_result, other}
-            }
-        end
-
-      true ->
-        %{vector: nil, binary_signature: nil, metadata: %{}, error: :provider_not_available}
-    end
+    if provider_available?(provider),
+      do: call_fast_provider(provider, input, provider_opts),
+      else: failed(:provider_not_available)
   rescue
-    exception -> %{vector: nil, binary_signature: nil, metadata: %{}, error: exception}
+    exception -> failed(exception)
   catch
-    kind, reason -> %{vector: nil, binary_signature: nil, metadata: %{}, error: {kind, reason}}
+    kind, reason -> failed({kind, reason})
+  end
+
+  @spec call_fast_provider(module(), term(), keyword()) :: map()
+  defp call_fast_provider(provider, input, provider_opts) do
+    # Providers are allowed to fail without breaking ingestion. The recall
+    # engine still has text, metadata, fingerprint, and graph signals.
+    case provider.embed(input, provider_opts) do
+      {:ok, result} -> normalize_result(result, provider_opts)
+      {:error, :model_dir_not_configured} -> empty()
+      {:error, reason} -> failed(reason)
+      result when is_map(result) -> normalize_result(result, provider_opts)
+      other -> failed({:unexpected_provider_result, other})
+    end
+  end
+
+  @spec provider_available?(term()) :: boolean()
+  defp provider_available?(provider) do
+    is_atom(provider) and Code.ensure_loaded?(provider) and
+      function_exported?(provider, :embed, 2)
   end
 
   @spec call_adapter(module(), term(), keyword()) :: map()
@@ -124,12 +124,12 @@ defmodule SpectreMnemonic.Embedding.Service do
         normalize_result(result, opts)
 
       {:error, reason} ->
-        %{vector: nil, binary_signature: nil, metadata: %{}, error: reason}
+        failed(reason)
     end
   rescue
-    exception -> %{vector: nil, binary_signature: nil, metadata: %{}, error: exception}
+    exception -> failed(exception)
   catch
-    kind, reason -> %{vector: nil, binary_signature: nil, metadata: %{}, error: {kind, reason}}
+    kind, reason -> failed({kind, reason})
   end
 
   @spec normalize_result(term(), keyword()) :: map()
@@ -181,7 +181,7 @@ defmodule SpectreMnemonic.Embedding.Service do
       end)
       |> Map.new()
 
-    result_metadata = fetch_key(result, :metadata) || %{}
+    result_metadata = normalize_metadata(fetch_key(result, :metadata))
 
     %{
       format: :f32_binary,
@@ -198,17 +198,37 @@ defmodule SpectreMnemonic.Embedding.Service do
   defp fast_enabled? do
     fast_config()
     |> Keyword.get(:enabled, false)
+    |> Kernel.==(true)
   end
 
   @spec fast_config :: keyword()
   defp fast_config do
     :spectre_mnemonic
     |> Application.get_env(:embedding, [])
+    |> normalize_config()
     |> Keyword.get(:fast, [])
+    |> normalize_config()
   end
+
+  @spec normalize_config(term()) :: keyword()
+  defp normalize_config(config) when is_map(config), do: Map.to_list(config)
+
+  defp normalize_config(config) when is_list(config) do
+    if Keyword.keyword?(config), do: config, else: []
+  end
+
+  defp normalize_config(_config), do: []
+
+  @spec normalize_metadata(term()) :: map()
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_metadata(_metadata), do: %{}
 
   @spec empty :: map()
   defp empty, do: %{vector: nil, binary_signature: nil, metadata: %{}, error: nil}
+
+  @spec failed(term()) :: map()
+  defp failed(reason),
+    do: %{vector: nil, binary_signature: nil, metadata: %{}, error: reason}
 
   @spec fetch_key(map(), atom()) :: term()
   defp fetch_key(map, key) do

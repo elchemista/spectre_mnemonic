@@ -26,14 +26,10 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     # Append first, ask existential questions later. The frame has seq, time,
     # length, and CRC so replay can be grumpy in a useful way.
     root = data_root(opts)
-    ensure_root!(root)
     path = active_path(root)
-    seq = next_seq(path)
-    frame = FileFrame.encode(seq, record)
 
-    case File.write(path, frame, [:append, :binary]) do
-      :ok -> {:ok, seq}
-      {:error, reason} -> {:error, reason}
+    with :ok <- ensure_root(root) do
+      with_path_lock(path, fn -> append_locked(path, record) end)
     end
   end
 
@@ -67,28 +63,13 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   @spec compact(keyword(), [Record.t()] | nil) :: {:ok, Path.t()} | {:error, term()}
   def compact(opts, supplied_records) do
     root = data_root(opts)
-    ensure_root!(root)
-    records = supplied_records || compactable_records(root)
-    snapshot = snapshot_path(root)
-    temporary = snapshot <> ".tmp"
     retain = Keyword.get(opts, :retain_compacted_segments, 1)
 
-    payload = %{
-      version: 1,
-      created_at: DateTime.utc_now(),
-      records: records
-    }
-
     with :ok <- validate_retention(retain),
-         :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
-         :ok <- install_snapshot(snapshot, temporary),
-         :ok <- rotate_active_segment(root),
-         :ok <- prune_rotated_segments(root, retain) do
-      {:ok, snapshot}
-    else
-      {:error, reason} ->
-        File.rm(temporary)
-        {:error, reason}
+         :ok <- ensure_root(root) do
+      root
+      |> active_path()
+      |> with_path_lock(fn -> compact_locked(root, supplied_records, retain) end)
     end
   end
 
@@ -99,11 +80,49 @@ defmodule SpectreMnemonic.Persistence.Store.File do
       Application.get_env(:spectre_mnemonic, :data_root, "mnemonic_data")
   end
 
-  @spec ensure_root!(Path.t()) :: :ok
-  defp ensure_root!(root) do
-    File.mkdir_p!(Path.join(root, "segments"))
-    File.mkdir_p!(Path.join(root, "snapshots"))
-    File.mkdir_p!(Path.join(root, "artifacts"))
+  @spec ensure_root(Path.t()) :: :ok | {:error, term()}
+  defp ensure_root(root) do
+    with :ok <- File.mkdir_p(Path.join(root, "segments")),
+         :ok <- File.mkdir_p(Path.join(root, "snapshots")) do
+      File.mkdir_p(Path.join(root, "artifacts"))
+    end
+  end
+
+  @spec append_locked(Path.t(), Record.t()) :: {:ok, pos_integer()} | {:error, term()}
+  defp append_locked(path, record) do
+    seq = next_seq(path)
+
+    with {:ok, frame} <- FileFrame.encode_checked(seq, record) do
+      case File.write(path, frame, [:append, :binary]) do
+        :ok -> {:ok, seq}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @spec compact_locked(Path.t(), [Record.t()] | nil, non_neg_integer()) ::
+          {:ok, Path.t()} | {:error, term()}
+  defp compact_locked(root, supplied_records, retain) do
+    records = supplied_records || compactable_records(root)
+    snapshot = snapshot_path(root)
+    temporary = snapshot <> ".tmp"
+
+    payload = %{
+      version: 1,
+      created_at: DateTime.utc_now(),
+      records: records
+    }
+
+    with :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
+         :ok <- install_snapshot(snapshot, temporary),
+         :ok <- rotate_active_segment(root),
+         :ok <- prune_rotated_segments(root, retain) do
+      {:ok, snapshot}
+    else
+      {:error, reason} ->
+        File.rm(temporary)
+        {:error, reason}
+    end
   end
 
   @spec active_path(Path.t()) :: Path.t()
@@ -387,23 +406,47 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   defp next_seq(path) do
     key = {__MODULE__, :seq, path}
 
-    current =
+    counter =
       case :persistent_term.get(key, :missing) do
-        :missing -> initial_seq(path)
-        seq -> seq
+        {:atomics, counter} ->
+          counter
+
+        :missing ->
+          install_sequence_counter(key, initial_seq(path))
+
+        seq when is_integer(seq) and seq >= 0 ->
+          install_sequence_counter(key, seq)
       end
 
-    seq = current + 1
-    :persistent_term.put(key, seq)
-    seq
+    :atomics.add_get(counter, 1, 1)
+  end
+
+  @spec install_sequence_counter(term(), non_neg_integer()) :: :atomics.atomics_ref()
+  defp install_sequence_counter(key, current) do
+    counter = :atomics.new(1, signed: false)
+    :ok = :atomics.put(counter, 1, current)
+    :persistent_term.put(key, {:atomics, counter})
+    counter
   end
 
   @spec initial_seq(Path.t()) :: non_neg_integer()
   defp initial_seq(path) do
     {:ok, seq} =
-      replay_path_fold(path, 0, fn {seq, _timestamp, _payload}, _acc -> {:cont, seq} end)
+      replay_path_fold(path, 0, fn {seq, _timestamp, _payload}, current ->
+        {:cont, max(seq, current)}
+      end)
 
     seq
+  end
+
+  @spec with_path_lock(Path.t(), (-> result)) :: result | {:error, term()} when result: term()
+  defp with_path_lock(path, fun) do
+    lock = {{__MODULE__, :path, path}, self()}
+
+    case :global.trans(lock, fun) do
+      {:aborted, reason} -> {:error, {:file_store_lock_failed, reason}}
+      result -> result
+    end
   end
 
   @spec replay_path(Path.t()) :: [FileFrame.t()]

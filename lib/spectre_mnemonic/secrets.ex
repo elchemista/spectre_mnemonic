@@ -29,7 +29,11 @@ defmodule SpectreMnemonic.Secrets do
   """
   @spec encrypt(binary(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def encrypt(plaintext, context, opts) do
-    crypto_adapter(opts).encrypt(plaintext, context, opts)
+    with {:ok, adapter} <- crypto_adapter(opts, :encrypt),
+         {:ok, encrypted} <- call_encrypt(adapter, plaintext, context, opts),
+         :ok <- validate_encrypted_payload(encrypted) do
+      {:ok, encrypted}
+    end
   end
 
   @doc """
@@ -64,8 +68,9 @@ defmodule SpectreMnemonic.Secrets do
     request = authorization_request(secret, opts)
 
     with {:ok, adapter} <- authorization_adapter(opts),
-         {:ok, grant} <- adapter.authorize(request, opts),
-         {:ok, plaintext} <- crypto_adapter(opts).decrypt(secret, request, opts) do
+         {:ok, grant} <- authorize(adapter, request, opts),
+         {:ok, crypto} <- crypto_adapter(opts, :decrypt),
+         {:ok, plaintext} <- call_decrypt(crypto, secret, request, opts) do
       {:ok,
        %{
          secret
@@ -115,11 +120,19 @@ defmodule SpectreMnemonic.Secrets do
     %{module: SpectreMnemonic, function: :reveal, arity: 2}
   end
 
-  @spec crypto_adapter(keyword()) :: module()
-  defp crypto_adapter(opts) do
-    Keyword.get(opts, :crypto_adapter) ||
-      Application.get_env(:spectre_mnemonic, :secret_crypto_adapter) ||
-      AESGCM
+  @spec crypto_adapter(keyword(), :encrypt | :decrypt) :: {:ok, module()} | {:error, term()}
+  defp crypto_adapter(opts, operation) do
+    adapter =
+      Keyword.get(opts, :crypto_adapter) ||
+        Application.get_env(:spectre_mnemonic, :secret_crypto_adapter) ||
+        AESGCM
+
+    if is_atom(adapter) and Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, operation, 3) do
+      {:ok, adapter}
+    else
+      {:error, {:secret_crypto_not_available, adapter, operation}}
+    end
   end
 
   @spec authorization_adapter(keyword()) ::
@@ -133,7 +146,8 @@ defmodule SpectreMnemonic.Secrets do
       is_nil(adapter) ->
         {:error, :authorization_not_configured}
 
-      Code.ensure_loaded?(adapter) and function_exported?(adapter, :authorize, 2) ->
+      is_atom(adapter) and Code.ensure_loaded?(adapter) and
+          function_exported?(adapter, :authorize, 2) ->
         {:ok, adapter}
 
       true ->
@@ -175,4 +189,61 @@ defmodule SpectreMnemonic.Secrets do
   defp authorization_status(:authorization_not_configured), do: :required
   defp authorization_status({:authorization_not_available, _adapter}), do: :required
   defp authorization_status(_reason), do: :denied
+
+  @spec call_encrypt(module(), binary(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  defp call_encrypt(adapter, plaintext, context, opts) do
+    case adapter.encrypt(plaintext, context, opts) do
+      {:ok, encrypted} when is_map(encrypted) -> {:ok, encrypted}
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_secret_crypto_result, :encrypt, other}}
+    end
+  rescue
+    exception -> adapter_failure(:encrypt, exception)
+  catch
+    kind, reason -> {:error, {:secret_crypto_failed, :encrypt, {kind, reason}}}
+  end
+
+  @spec call_decrypt(module(), Secret.t(), map(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  defp call_decrypt(adapter, secret, context, opts) do
+    case adapter.decrypt(secret, context, opts) do
+      {:ok, plaintext} when is_binary(plaintext) -> {:ok, plaintext}
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_secret_crypto_result, :decrypt, other}}
+    end
+  rescue
+    exception -> adapter_failure(:decrypt, exception)
+  catch
+    kind, reason -> {:error, {:secret_crypto_failed, :decrypt, {kind, reason}}}
+  end
+
+  @spec authorize(module(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  defp authorize(adapter, request, opts) do
+    case adapter.authorize(request, opts) do
+      {:ok, grant} when is_map(grant) -> {:ok, grant}
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_authorization_result, other}}
+    end
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  @spec validate_encrypted_payload(map()) :: :ok | {:error, :invalid_encrypted_secret}
+  defp validate_encrypted_payload(encrypted) do
+    valid? =
+      is_atom(Map.get(encrypted, :algorithm)) and
+        Enum.all?([:ciphertext, :iv, :tag, :aad], fn key ->
+          is_binary(Map.get(encrypted, key))
+        end)
+
+    if valid?, do: :ok, else: {:error, :invalid_encrypted_secret}
+  end
+
+  @spec adapter_failure(:encrypt | :decrypt, Exception.t()) :: {:error, term()}
+  defp adapter_failure(operation, exception) do
+    {:error,
+     {:secret_crypto_failed, operation, {exception.__struct__, Exception.message(exception)}}}
+  end
 end

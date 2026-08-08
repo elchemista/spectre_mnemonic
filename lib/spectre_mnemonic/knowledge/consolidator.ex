@@ -67,7 +67,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   """
   @spec consolidate(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- validate_options(opts) do
       timeout = Keyword.get(opts, :timeout, 30_000)
       GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
     end
@@ -104,7 +105,51 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
+  rescue
+    exception ->
+      {:reply,
+       {:error, {:consolidation_failed, exception.__struct__, Exception.message(exception)}},
+       state}
+  catch
+    kind, reason -> {:reply, {:error, {:consolidation_failed, kind, reason}}, state}
   end
+
+  @spec validate_options(keyword()) :: :ok | {:error, term()}
+  defp validate_options(opts) do
+    validators = [
+      {:timeout, &valid_timeout?/1},
+      {:min_attention, &is_number/1},
+      {:graph_depth, &non_negative_integer?/1},
+      {:consolidation_graph_depth, &non_negative_integer?/1},
+      {:compact?, &is_boolean/1}
+    ]
+
+    Enum.reduce_while(validators, :ok, &validate_option(&1, &2, opts))
+  end
+
+  @spec validate_option({atom(), (term() -> boolean())}, :ok, keyword()) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_option({key, valid?}, :ok, opts) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> validate_option_value(key, value, valid?)
+      :error -> {:cont, :ok}
+    end
+  end
+
+  @spec validate_option_value(atom(), term(), (term() -> boolean())) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_option_value(key, value, valid?) do
+    if valid?.(value),
+      do: {:cont, :ok},
+      else: {:halt, {:error, {:invalid_consolidation_option, key, value}}}
+  end
+
+  @spec valid_timeout?(term()) :: boolean()
+  defp valid_timeout?(:infinity), do: true
+  defp valid_timeout?(timeout), do: is_integer(timeout) and timeout > 0
+
+  @spec non_negative_integer?(term()) :: boolean()
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
 
   @spec run_consolidation(Consolidation.t(), keyword()) ::
           {:ok, Consolidation.t()} | {:error, term()}
@@ -149,7 +194,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   @spec consolidate_with_adapter(module(), Consolidation.t(), keyword()) ::
           {:ok, Consolidation.t()} | {:error, term()}
   defp consolidate_with_adapter(adapter, consolidation, opts) do
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :consolidate, 2) do
+    if is_atom(adapter) and Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, :consolidate, 2) do
       adapter.consolidate(consolidation, opts)
       |> normalize_consolidation(consolidation)
     else

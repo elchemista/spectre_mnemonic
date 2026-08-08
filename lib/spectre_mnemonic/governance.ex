@@ -140,12 +140,15 @@ defmodule SpectreMnemonic.Governance do
 
   @spec do_decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
   defp do_decay(opts) do
-    stale_after_ms =
-      opts
-      |> Keyword.get(:stale_after_ms, Keyword.get(opts, :freshness_ms, @default_stale_after_ms))
-      |> max(0)
+    with {:ok, stale_after_ms} <- stale_after_ms(opts),
+         {:ok, now} <- decay_time(opts) do
+      decay_before(opts, now, stale_after_ms)
+    end
+  end
 
-    now = Keyword.get(opts, :now, DateTime.utc_now())
+  @spec decay_before(keyword(), DateTime.t(), non_neg_integer()) ::
+          {:ok, %{stale: non_neg_integer()}} | {:error, term()}
+  defp decay_before(opts, now, stale_after_ms) do
     cutoff = DateTime.add(now, -stale_after_ms, :millisecond)
 
     candidates =
@@ -172,6 +175,26 @@ defmodule SpectreMnemonic.Governance do
     case result do
       :ok -> {:ok, %{stale: length(candidates)}}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec stale_after_ms(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  defp stale_after_ms(opts) do
+    case Keyword.get(
+           opts,
+           :stale_after_ms,
+           Keyword.get(opts, :freshness_ms, @default_stale_after_ms)
+         ) do
+      value when is_integer(value) and value >= 0 -> {:ok, value}
+      value -> {:error, {:invalid_decay_option, :stale_after_ms, value}}
+    end
+  end
+
+  @spec decay_time(keyword()) :: {:ok, DateTime.t()} | {:error, term()}
+  defp decay_time(opts) do
+    case Keyword.get(opts, :now, DateTime.utc_now()) do
+      %DateTime{} = now -> {:ok, now}
+      value -> {:error, {:invalid_decay_option, :now, value}}
     end
   end
 
@@ -207,7 +230,8 @@ defmodule SpectreMnemonic.Governance do
   @doc "Persists one valid transition and updates its materialized projection."
   @spec append_state(binary(), state(), atom(), keyword(), map()) :: :ok | {:error, term()}
   def append_state(memory_id, state, reason, opts \\ [], metadata \\ %{}) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, metadata} <- normalize_metadata(metadata) do
       GenServer.call(__MODULE__, {:append_state, memory_id, state, reason, opts, metadata})
     end
   end
@@ -267,6 +291,12 @@ defmodule SpectreMnemonic.Governance do
       end
 
     {:reply, reply, server_state}
+  rescue
+    exception ->
+      {:reply, {:error, {:governance_failed, exception.__struct__, Exception.message(exception)}},
+       server_state}
+  catch
+    kind, reason -> {:reply, {:error, {:governance_failed, kind, reason}}, server_state}
   end
 
   @spec rebuild_materialized() :: :ok | {:error, term()}
@@ -342,6 +372,17 @@ defmodule SpectreMnemonic.Governance do
     |> Map.get(:metadata, %{})
     |> Map.merge(Map.new(metadata))
   end
+
+  @spec normalize_metadata(term()) :: {:ok, map()} | {:error, term()}
+  defp normalize_metadata(metadata) when is_map(metadata), do: {:ok, metadata}
+
+  defp normalize_metadata(metadata) when is_list(metadata) do
+    if Keyword.keyword?(metadata),
+      do: {:ok, Map.new(metadata)},
+      else: {:error, {:invalid_governance_metadata, metadata}}
+  end
+
+  defp normalize_metadata(metadata), do: {:error, {:invalid_governance_metadata, metadata}}
 
   @spec govern_fact(map(), map(), state(), keyword()) :: :ok | {:error, term()}
   defp govern_fact(moment, fact, state, opts) do

@@ -75,8 +75,16 @@ defmodule SpectreMnemonic.Observations do
 
       durable = durable_observations(cue, opts)
 
-      limit = Keyword.get(opts, :limit, 10)
+      limit = search_limit(opts)
       {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
+    end
+  end
+
+  @spec search_limit(keyword()) :: non_neg_integer()
+  defp search_limit(opts) do
+    case Keyword.get(opts, :limit, 10) do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 10
     end
   end
 

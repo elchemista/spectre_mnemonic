@@ -490,6 +490,17 @@ Persistent records are backend-neutral envelopes in families such as:
 - `:action_recipes`
 - `:tombstones`
 
+Append-only payloads are bounded to 64 MiB by default. Both the stored size and
+the expanded size declared by compressed Erlang terms are checked before
+decoding. Applications that need a different bound can configure it explicitly:
+
+```elixir
+config :spectre_mnemonic,
+  max_frame_bytes: 16 * 1024 * 1024
+```
+
+The same bound protects `active.smem` and `knowledge.smem`.
+
 `SpectreMnemonic.Persistence.Manager.replay/1` replays durable envelopes and
 applies tombstones.
 
@@ -836,7 +847,10 @@ config :spectre_mnemonic,
 ```
 
 Downloads are opt-in. For production, pre-populate the cache or pass
-`:model_dir`.
+`:model_dir`. Downloaded files are written atomically and optional SHA-256
+checksums are verified before installation. Computed cache directories include
+a short digest of the complete model identifier, so identifiers that sanitize
+to the same readable name still remain isolated.
 
 Consolidation does not re-embed text. It copies the `vector`,
 `binary_signature`, and `embedding` already stored on each moment.

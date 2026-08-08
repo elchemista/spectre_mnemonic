@@ -314,7 +314,7 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @spec search_state(map(), term(), keyword()) :: [SearchResult.t()]
   defp search_state(%{docs: docs, total_docs: total_docs} = state, cue, opts) do
-    limit = Keyword.get(opts, :limit, 10)
+    limit = search_limit(opts)
     query = cue_text(cue)
     query_terms = terms(query)
     query_entities = entities(query)
@@ -331,6 +331,14 @@ defmodule SpectreMnemonic.Durable.Index do
       {-result.score, -result_timestamp(result), result.id}
     end)
     |> Enum.take(limit)
+  end
+
+  @spec search_limit(keyword()) :: non_neg_integer()
+  defp search_limit(opts) do
+    case Keyword.get(opts, :limit, 10) do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 10
+    end
   end
 
   @spec query_embedding(term(), keyword()) :: map()

@@ -23,6 +23,7 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
   @magic "SMEM"
   @version 1
   @header_bytes byte_size(@magic) + 1 + 8 + 8 + 4 + 4
+  @default_max_payload_bytes 64 * 1024 * 1024
 
   @type t :: {pos_integer(), integer(), term()}
   @type fold_fun(acc) :: (t(), acc -> {:cont, acc} | {:halt, acc})
@@ -43,11 +44,41 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
   @spec encode(pos_integer(), term(), integer()) :: binary()
   def encode(seq, payload, timestamp \\ System.system_time(:millisecond))
       when is_integer(seq) and seq > 0 and is_integer(timestamp) do
-    encoded_payload = :erlang.term_to_binary(payload, [:compressed])
-    crc = :erlang.crc32(encoded_payload)
+    case encode_checked(seq, payload, timestamp) do
+      {:ok, frame} ->
+        frame
 
-    <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(encoded_payload)::32,
-      crc::32, encoded_payload::binary>>
+      {:error, {:frame_too_large, size, maximum}} ->
+        raise ArgumentError, "frame payload is #{size} bytes; maximum is #{maximum}"
+    end
+  end
+
+  @doc false
+  @spec encode_checked(pos_integer(), term(), integer()) ::
+          {:ok, binary()} | {:error, {:frame_too_large, non_neg_integer(), pos_integer()}}
+  def encode_checked(seq, payload, timestamp \\ System.system_time(:millisecond))
+      when is_integer(seq) and seq > 0 and is_integer(timestamp) do
+    encoded_payload = :erlang.term_to_binary(payload, [:compressed])
+    maximum = max_payload_bytes()
+
+    if safe_payload_size?(encoded_payload, maximum) do
+      crc = :erlang.crc32(encoded_payload)
+
+      {:ok,
+       <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(encoded_payload)::32,
+         crc::32, encoded_payload::binary>>}
+    else
+      {:error, {:frame_too_large, payload_size(encoded_payload), maximum}}
+    end
+  end
+
+  @doc false
+  @spec max_payload_bytes :: pos_integer()
+  def max_payload_bytes do
+    case Application.get_env(:spectre_mnemonic, :max_frame_bytes, @default_max_payload_bytes) do
+      maximum when is_integer(maximum) and maximum > 0 -> maximum
+      _invalid -> @default_max_payload_bytes
+    end
   end
 
   @doc """
@@ -93,12 +124,16 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
         ) :: acc
         when acc: term()
   defp read_payload(io, seq, timestamp, len, crc, acc, fun) do
-    case IO.binread(io, len) do
-      payload when is_binary(payload) and byte_size(payload) == len ->
-        read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
+    if len <= max_payload_bytes() do
+      case IO.binread(io, len) do
+        payload when is_binary(payload) and byte_size(payload) == len ->
+          read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
 
-      _incomplete_or_error ->
-        acc
+        _incomplete_or_error ->
+          acc
+      end
+    else
+      acc
     end
   end
 
@@ -125,10 +160,28 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
 
   @spec decode_payload(binary()) :: {:ok, term()} | :error
   defp decode_payload(payload) do
-    {:ok, :erlang.binary_to_term(payload, [:safe])}
+    if safe_payload_size?(payload, max_payload_bytes()) do
+      {:ok, :erlang.binary_to_term(payload, [:safe])}
+    else
+      :error
+    end
   rescue
     _exception -> :error
   end
+
+  @spec safe_payload_size?(binary(), pos_integer()) :: boolean()
+  defp safe_payload_size?(payload, maximum) do
+    payload_size(payload) <= maximum
+  end
+
+  @spec payload_size(binary()) :: non_neg_integer()
+  defp payload_size(payload), do: max(byte_size(payload), expanded_payload_size(payload))
+
+  @spec expanded_payload_size(binary()) :: non_neg_integer()
+  defp expanded_payload_size(<<131, 80, expanded::unsigned-big-32, _compressed::binary>>),
+    do: expanded
+
+  defp expanded_payload_size(payload), do: byte_size(payload)
 
   @spec continue_frame(File.io_device(), t(), acc, fold_fun(acc)) :: acc when acc: term()
   defp continue_frame(io, frame, acc, fun) do

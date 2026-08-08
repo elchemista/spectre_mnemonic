@@ -70,7 +70,16 @@ defmodule SpectreMnemonic.Active.Router do
 
   @spec metadata_stream(keyword()) :: term() | nil
   defp metadata_stream(opts) do
-    metadata = Keyword.get(opts, :metadata, %{})
+    metadata = normalize_metadata(Keyword.get(opts, :metadata, %{}))
     Map.get(metadata, :stream) || Map.get(metadata, "stream")
   end
+
+  @spec normalize_metadata(term()) :: map()
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+
+  defp normalize_metadata(metadata) when is_list(metadata) do
+    if Keyword.keyword?(metadata), do: Map.new(metadata), else: %{}
+  end
+
+  defp normalize_metadata(_metadata), do: %{}
 end

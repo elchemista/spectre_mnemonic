@@ -228,7 +228,7 @@ defmodule SpectreMnemonic do
       {:ok, _observations}
   """
   @spec search_observations(term(), keyword()) ::
-          {:ok, [SpectreMnemonic.Memory.Observation.t() | map()]}
+          {:ok, [SpectreMnemonic.Memory.Observation.t() | map()]} | {:error, term()}
   def search_observations(cue, opts \\ []) do
     Observations.search(cue, opts)
   end
@@ -281,7 +281,7 @@ defmodule SpectreMnemonic do
       {:ok, _models}
   """
   @spec search_mental_models(term(), keyword()) ::
-          {:ok, [SpectreMnemonic.Memory.MentalModel.t() | map()]}
+          {:ok, [SpectreMnemonic.Memory.MentalModel.t() | map()]} | {:error, term()}
   def search_mental_models(cue, opts \\ []) do
     MentalModels.search(cue, opts)
   end

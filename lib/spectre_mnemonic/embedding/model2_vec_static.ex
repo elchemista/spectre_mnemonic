@@ -47,6 +47,10 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected_model2vec_result, other}}
     end
+  rescue
+    _exception -> {:error, :invalid_model_artifacts}
+  catch
+    _kind, _reason -> {:error, :invalid_model_artifacts}
   end
 
   @spec model_dir(keyword()) :: {:ok, Path.t()} | {:error, term()}
@@ -68,8 +72,9 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
          {:ok, <<header_size::little-unsigned-integer-64, rest::binary>>} <- File.read(path),
          <<header_json::binary-size(^header_size), tensor_data::binary>> <- rest,
          {:ok, header} <- Jason.decode(header_json),
-         {:ok, tensor_name, tensor} <- find_f32_matrix(header) do
-      %{"data_offsets" => [start_offset, end_offset], "shape" => [rows, dimensions]} = tensor
+         {:ok, tensor_name, tensor} <- find_f32_matrix(header),
+         {:ok, start_offset, end_offset, rows, dimensions} <-
+           tensor_layout(tensor, byte_size(tensor_data)) do
       tensor_bytes = binary_part(tensor_data, start_offset, end_offset - start_offset)
 
       {:ok,
@@ -92,17 +97,48 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   end
 
   @spec find_f32_matrix(map()) :: {:ok, binary(), map()} | {:error, :missing_f32_matrix}
-  defp find_f32_matrix(header) do
+  defp find_f32_matrix(header) when is_map(header) do
     header
     |> Enum.reject(fn {name, _value} -> name == "__metadata__" end)
     |> Enum.find(fn {_name, value} ->
-      Map.get(value, "dtype") == "F32" and
+      is_map(value) and Map.get(value, "dtype") == "F32" and
         match?([rows, dim] when rows > 0 and dim > 0, Map.get(value, "shape"))
     end)
     |> case do
       {name, tensor} -> {:ok, name, tensor}
       nil -> {:error, :missing_f32_matrix}
     end
+  end
+
+  defp find_f32_matrix(_header), do: {:error, :missing_f32_matrix}
+
+  @spec tensor_layout(map(), non_neg_integer()) ::
+          {:ok, non_neg_integer(), non_neg_integer(), pos_integer(), pos_integer()}
+          | {:error, :invalid_safetensors_file}
+  defp tensor_layout(
+         %{"data_offsets" => [start_offset, end_offset], "shape" => [rows, dimensions]},
+         data_size
+       ) do
+    if valid_offsets?(start_offset, end_offset, data_size) and
+         valid_shape?(rows, dimensions, end_offset - start_offset) do
+      {:ok, start_offset, end_offset, rows, dimensions}
+    else
+      {:error, :invalid_safetensors_file}
+    end
+  end
+
+  defp tensor_layout(_tensor, _data_size), do: {:error, :invalid_safetensors_file}
+
+  @spec valid_offsets?(term(), term(), non_neg_integer()) :: boolean()
+  defp valid_offsets?(start_offset, end_offset, data_size) do
+    is_integer(start_offset) and is_integer(end_offset) and start_offset >= 0 and
+      end_offset >= start_offset and end_offset <= data_size
+  end
+
+  @spec valid_shape?(term(), term(), non_neg_integer()) :: boolean()
+  defp valid_shape?(rows, dimensions, byte_size) do
+    is_integer(rows) and is_integer(dimensions) and rows > 0 and dimensions > 0 and
+      byte_size == rows * dimensions * 4
   end
 
   @spec tokenize(term(), map(), Path.t()) :: [integer()]
