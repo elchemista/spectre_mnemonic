@@ -35,6 +35,25 @@ defmodule SpectreMnemonic.Integration.ConsolidatorHardeningTest do
     assert Process.alive?(Process.whereis(Consolidator))
   end
 
+  test "invalid numeric and timeout options cannot crash the consolidator" do
+    consolidator = Process.whereis(Consolidator)
+
+    for {key, value} <- [
+          timeout: 0,
+          min_attention: :invalid,
+          graph_depth: :invalid,
+          consolidation_graph_depth: -1,
+          compact?: :yes
+        ] do
+      assert {:error, {:invalid_consolidation_option, ^key, ^value}} =
+               Consolidator.consolidate([{key, value}])
+    end
+
+    assert {:ok, []} = Consolidator.consolidate(timeout: :infinity, graph_depth: 0)
+    assert Process.whereis(Consolidator) == consolidator
+    assert Process.alive?(consolidator)
+  end
+
   test "configured consolidation adapters are validated and contained" do
     assert {:error, {:invalid_consolidation_adapter, String}} =
              Consolidator.consolidate(consolidation_adapter: String)

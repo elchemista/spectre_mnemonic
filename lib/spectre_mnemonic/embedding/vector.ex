@@ -11,7 +11,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
 
   @doc "Converts a list or f32 binary into a little-endian f32 binary."
   @spec to_f32_binary(vector_input() | term()) :: binary() | nil
-  def to_f32_binary(vector) when is_binary(vector), do: vector
+  def to_f32_binary(vector) when is_binary(vector) and rem(byte_size(vector), 4) == 0, do: vector
 
   def to_f32_binary(vector) do
     if tensor?(vector) do
@@ -25,9 +25,9 @@ defmodule SpectreMnemonic.Embedding.Vector do
 
   @spec to_f32_binary_without_nx(term()) :: binary() | nil
   defp to_f32_binary_without_nx(vector) when is_list(vector) do
-    vector
-    |> Enum.map(&(&1 * 1.0))
-    |> Enum.reduce(<<>>, fn value, acc -> <<acc::binary, value::little-float-32>> end)
+    if numeric_list?(vector) do
+      for value <- vector, into: <<>>, do: <<value * 1.0::little-float-32>>
+    end
   end
 
   defp to_f32_binary_without_nx(_vector), do: nil
@@ -43,7 +43,10 @@ defmodule SpectreMnemonic.Embedding.Vector do
   end
 
   @spec to_list_without_nx(term()) :: [float()]
-  defp to_list_without_nx(vector) when is_list(vector), do: Enum.map(vector, &(&1 * 1.0))
+  defp to_list_without_nx(vector) when is_list(vector) do
+    if numeric_list?(vector), do: Enum.map(vector, &(&1 * 1.0)), else: []
+  end
+
   defp to_list_without_nx(nil), do: []
   defp to_list_without_nx(<<>>), do: []
 
@@ -54,14 +57,15 @@ defmodule SpectreMnemonic.Embedding.Vector do
   defp to_list_without_nx(_vector), do: []
 
   @doc "Converts a little-endian f32 binary, list, or tensor into an Nx tensor."
-  @spec to_tensor(vector_input()) :: term() | {:error, :nx_not_available}
+  @spec to_tensor(vector_input() | term()) ::
+          term() | {:error, :nx_not_available | :invalid_vector}
   def to_tensor(vector) do
     if nx_available?() do
       cond do
         tensor?(vector) -> Nx.as_type(vector, :f32)
-        is_binary(vector) -> Nx.from_binary(vector, :f32)
-        is_list(vector) -> Nx.tensor(vector, type: :f32)
-        true -> Nx.tensor([], type: :f32)
+        valid_f32_binary?(vector) -> Nx.from_binary(vector, :f32)
+        numeric_list?(vector) -> Nx.tensor(vector, type: :f32)
+        true -> {:error, :invalid_vector}
       end
     else
       {:error, :nx_not_available}
@@ -77,10 +81,10 @@ defmodule SpectreMnemonic.Embedding.Vector do
         |> Nx.shape()
         |> Tuple.product()
 
-      is_list(vector) ->
+      numeric_list?(vector) ->
         length(vector)
 
-      is_binary(vector) ->
+      valid_f32_binary?(vector) ->
         div(byte_size(vector), 4)
 
       true ->
@@ -91,12 +95,16 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Normalizes a vector to unit length, preserving list representation."
   @spec normalize([number()] | term()) :: [float()]
   def normalize(vector) do
-    if nx_available?() do
-      vector
-      |> normalize_tensor()
-      |> Nx.to_flat_list()
+    if valid_dense_vector?(vector) do
+      if nx_available?() do
+        vector
+        |> normalize_tensor()
+        |> Nx.to_flat_list()
+      else
+        normalize_without_nx(vector)
+      end
     else
-      normalize_without_nx(vector)
+      []
     end
   end
 
@@ -151,25 +159,29 @@ defmodule SpectreMnemonic.Embedding.Vector do
   defp do_normalize_to_f32_binary(vector) do
     # Stored vectors use one boring binary format. Lists, tensors, adapters,
     # drama: all of it gets squeezed through here before persistence sees it.
-    if nx_available?() do
-      vector
-      |> normalize_tensor()
-      |> to_f32_binary()
+    if valid_dense_vector?(vector) do
+      if nx_available?() do
+        vector
+        |> normalize_tensor()
+        |> to_f32_binary()
+      else
+        vector
+        |> to_list_without_nx()
+        |> normalize_without_nx()
+        |> to_f32_binary_without_nx()
+      end
     else
-      vector
-      |> to_list_without_nx()
-      |> normalize_without_nx()
-      |> to_f32_binary_without_nx()
+      nil
     end
   end
 
   @doc "Computes dot product for equally sized vectors."
   @spec dot(vector_input(), vector_input()) :: float()
   def dot(left, right) do
-    if nx_available?() do
-      dot_with_nx(left, right)
+    if valid_dense_vector?(left) and valid_dense_vector?(right) do
+      if nx_available?(), do: dot_with_nx(left, right), else: dot_without_nx(left, right)
     else
-      dot_without_nx(left, right)
+      0.0
     end
   end
 
@@ -179,10 +191,10 @@ defmodule SpectreMnemonic.Embedding.Vector do
     do: cosine_f32_binary(left, right)
 
   def cosine(left, right) do
-    if nx_available?() do
-      cosine_with_nx(left, right)
+    if valid_dense_vector?(left) and valid_dense_vector?(right) do
+      if nx_available?(), do: cosine_with_nx(left, right), else: cosine_without_nx(left, right)
     else
-      cosine_without_nx(left, right)
+      0.0
     end
   end
 
@@ -337,7 +349,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @spec hamming_similarity(term(), term(), non_neg_integer() | nil) :: float()
   def hamming_similarity(left, right, bits \\ nil) do
     distance = hamming_distance(left, right)
-    bit_count = bits || comparable_bits(left, right)
+    bit_count = comparable_bit_count(bits, left, right)
 
     cond do
       distance == :infinity -> 0.0
@@ -351,6 +363,25 @@ defmodule SpectreMnemonic.Embedding.Vector do
     do: min(byte_size(left) * 8, byte_size(right) * 8)
 
   defp comparable_bits(_left, _right), do: 0
+
+  @spec comparable_bit_count(term(), term(), term()) :: non_neg_integer()
+  defp comparable_bit_count(nil, left, right), do: comparable_bits(left, right)
+  defp comparable_bit_count(bits, _left, _right) when is_integer(bits) and bits >= 0, do: bits
+  defp comparable_bit_count(_bits, _left, _right), do: 0
+
+  @spec valid_dense_vector?(term()) :: boolean()
+  defp valid_dense_vector?(vector) when is_list(vector), do: numeric_list?(vector)
+  defp valid_dense_vector?(vector) when is_binary(vector), do: valid_f32_binary?(vector)
+  defp valid_dense_vector?(%Nx.Tensor{} = vector), do: tensor?(vector)
+  defp valid_dense_vector?(_vector), do: false
+
+  @spec valid_f32_binary?(term()) :: boolean()
+  defp valid_f32_binary?(binary) when is_binary(binary), do: rem(byte_size(binary), 4) == 0
+  defp valid_f32_binary?(_binary), do: false
+
+  @spec numeric_list?(term()) :: boolean()
+  defp numeric_list?(list) when is_list(list), do: Enum.all?(list, &is_number/1)
+  defp numeric_list?(_list), do: false
 
   @spec norm([number()]) :: float()
   defp norm(vector) do

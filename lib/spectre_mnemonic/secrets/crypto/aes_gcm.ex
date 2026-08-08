@@ -35,14 +35,19 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
          aad: aad
        }}
     end
+  rescue
+    exception -> secret_crypto_error(exception)
+  catch
+    kind, reason -> {:error, {:secret_crypto_failed, {kind, reason}}}
   end
 
   def encrypt(plaintext, context, opts), do: encrypt(inspect(plaintext), context, opts)
 
   @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def decrypt(%Secret{} = secret, context, opts) do
-    with {:ok, key} <- key(context, opts),
-         :ok <- supported_algorithm(secret.algorithm) do
+    with :ok <- supported_algorithm(secret.algorithm),
+         :ok <- matching_aad(secret.aad, context),
+         {:ok, key} <- key(context, opts) do
       case :crypto.crypto_one_time_aead(
              :aes_256_gcm,
              key,
@@ -57,7 +62,9 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
       end
     end
   rescue
-    ArgumentError -> {:error, :invalid_secret_ciphertext}
+    _exception -> {:error, :invalid_secret_ciphertext}
+  catch
+    _kind, _reason -> {:error, :invalid_secret_ciphertext}
   end
 
   @spec key(map(), keyword()) :: {:ok, binary()} | {:error, term()}
@@ -103,4 +110,22 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   @spec supported_algorithm(atom()) :: :ok | {:error, term()}
   defp supported_algorithm(@algorithm), do: :ok
   defp supported_algorithm(other), do: {:error, {:unsupported_secret_algorithm, other}}
+
+  @spec matching_aad(term(), map()) :: :ok | {:error, :secret_context_mismatch}
+  defp matching_aad(stored, context) when is_binary(stored) do
+    expected = aad(context)
+
+    if byte_size(stored) == byte_size(expected) and :crypto.hash_equals(stored, expected) do
+      :ok
+    else
+      {:error, :secret_context_mismatch}
+    end
+  end
+
+  defp matching_aad(_stored, _context), do: {:error, :secret_context_mismatch}
+
+  @spec secret_crypto_error(Exception.t()) :: {:error, term()}
+  defp secret_crypto_error(exception) do
+    {:error, {:secret_crypto_failed, {exception.__struct__, Exception.message(exception)}}}
+  end
 end

@@ -165,7 +165,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
       iex> SpectreMnemonic.Persistence.Manager.search("retry policy", limit: 10)
       {:ok, _results}
   """
-  @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]}
+  @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]} | {:error, term()}
   def search(cue, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       GenServer.call(__MODULE__, {:search, cue, opts})
@@ -216,7 +216,10 @@ defmodule SpectreMnemonic.Persistence.Manager do
   """
   @spec config :: config()
   def config do
-    configured = Application.get_env(:spectre_mnemonic, :persistent_memory, [])
+    configured =
+      :spectre_mnemonic
+      |> Application.get_env(:persistent_memory, [])
+      |> normalize_keyword_config()
 
     defaults()
     |> Keyword.merge(configured, fn
@@ -313,7 +316,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     results =
       durable_index_results(cue, opts)
       |> merge_search_results(adapter_results)
-      |> Enum.take(Keyword.get(opts, :limit, 10))
+      |> Enum.take(search_limit(opts))
 
     {:reply, {:ok, results}, state}
   end
@@ -610,7 +613,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec effective_config(keyword()) :: config()
   defp effective_config(opts) do
-    override = Keyword.get(opts, :persistent_memory, [])
+    override = opts |> Keyword.get(:persistent_memory, []) |> normalize_keyword_config()
 
     config()
     |> Keyword.merge(override, fn
@@ -654,31 +657,66 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec ensure_stores(config()) :: config()
   defp ensure_stores(config) do
     case Keyword.get(config, :stores, []) do
-      [] -> Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
-      _stores -> config
+      stores when is_list(stores) and stores != [] ->
+        if Enum.all?(stores, &(is_map(&1) or is_list(&1))),
+          do: config,
+          else: Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
+
+      _invalid ->
+        Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
     end
   end
 
   @spec normalize_config(config()) :: config()
   defp normalize_config(config) do
-    Keyword.update!(config, :stores, fn stores ->
-      stores
+    stores =
+      config
+      |> Keyword.get(:stores, [])
       |> Enum.map(&normalize_store/1)
+      |> Enum.reject(&is_nil/1)
+      |> default_stores_if_empty()
       |> ensure_primary_store()
-    end)
+
+    Keyword.put(config, :stores, stores)
   end
 
-  @spec normalize_store(keyword()) :: store()
+  @spec normalize_store(keyword() | map() | term()) :: store() | nil
   defp normalize_store(store) do
-    %{
-      id: Keyword.fetch!(store, :id),
-      adapter: Keyword.fetch!(store, :adapter),
-      role: Keyword.get(store, :role),
-      duplicate: Keyword.get(store, :duplicate, true),
-      families: Keyword.get(store, :families, :all),
-      opts: Keyword.get(store, :opts, [])
-    }
+    store = normalize_keyword_config(store)
+
+    with {:ok, id} <- Keyword.fetch(store, :id),
+         {:ok, adapter} when is_atom(adapter) <- Keyword.fetch(store, :adapter) do
+      %{
+        id: id,
+        adapter: adapter,
+        role: Keyword.get(store, :role),
+        duplicate: Keyword.get(store, :duplicate, true),
+        families: Keyword.get(store, :families, :all),
+        opts: normalize_keyword_config(Keyword.get(store, :opts, []))
+      }
+    else
+      _invalid -> nil
+    end
   end
+
+  @spec default_stores_if_empty([store()]) :: [store()]
+  defp default_stores_if_empty([]) do
+    defaults()
+    |> Keyword.fetch!(:stores)
+    |> Enum.map(&normalize_store/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp default_stores_if_empty(stores), do: stores
+
+  @spec normalize_keyword_config(term()) :: keyword()
+  defp normalize_keyword_config(config) when is_map(config), do: Map.to_list(config)
+
+  defp normalize_keyword_config(config) when is_list(config) do
+    if Keyword.keyword?(config), do: config, else: []
+  end
+
+  defp normalize_keyword_config(_config), do: []
 
   @spec ensure_primary_store([store()]) :: [store()]
   defp ensure_primary_store([]), do: []
@@ -854,15 +892,15 @@ defmodule SpectreMnemonic.Persistence.Manager do
     end
   end
 
-  @spec semantic_adapter(config(), keyword()) :: module() | nil
+  @spec semantic_adapter(config(), keyword()) :: term()
   defp semantic_adapter(cfg, opts) do
     Keyword.get(opts, :semantic_compact_adapter) ||
       Keyword.get(cfg, :semantic_compact_adapter)
   end
 
-  @spec semantic_with_adapter(module(), map(), keyword()) :: {:ok, term()} | {:error, term()}
+  @spec semantic_with_adapter(term(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp semantic_with_adapter(module, input, opts) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
+    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
       module.compact(input, opts) |> normalize_semantic_adapter_result()
     else
       {:error, {:invalid_semantic_compact_adapter, module}}
@@ -1079,9 +1117,22 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   @spec semantic_limit(config(), keyword()) :: non_neg_integer()
   defp semantic_limit(cfg, opts) do
-    opts
-    |> Keyword.get(:semantic_compact_limit, Keyword.get(cfg, :semantic_compact_limit, 1_000))
-    |> max(0)
+    case Keyword.get(
+           opts,
+           :semantic_compact_limit,
+           Keyword.get(cfg, :semantic_compact_limit, 1_000)
+         ) do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 1_000
+    end
+  end
+
+  @spec search_limit(keyword()) :: non_neg_integer()
+  defp search_limit(opts) do
+    case Keyword.get(opts, :limit, 10) do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 10
+    end
   end
 
   @spec record_priority(Record.t()) :: number()

@@ -22,7 +22,7 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
 
     cond do
       values == [] -> nil
-      bits <= 0 -> nil
+      not is_integer(bits) or bits <= 0 -> nil
       true -> values |> sample(bits) |> pack()
     end
   end
@@ -30,10 +30,11 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
   @spec sample([number()], pos_integer()) :: [boolean()]
   defp sample(values, bits) do
     dimensions = length(values)
+    values = List.to_tuple(values)
 
     for index <- 0..(bits - 1) do
       source_index = min(dimensions - 1, div(index * dimensions, bits))
-      Enum.at(values, source_index) > 0.0
+      elem(values, source_index) > 0.0
     end
   end
 
@@ -41,16 +42,14 @@ defmodule SpectreMnemonic.Embedding.BinaryQuantizer do
   defp pack(bits) do
     bits
     |> Enum.chunk_every(8, 8, Stream.cycle([false]) |> Enum.take(7))
-    |> Enum.reduce(<<>>, fn chunk, acc ->
-      byte =
-        chunk
-        |> Enum.with_index()
-        |> Enum.reduce(0, fn
-          {true, index}, value -> Bitwise.bor(value, Bitwise.bsl(1, 7 - index))
-          {false, _index}, value -> value
-        end)
-
-      <<acc::binary, byte>>
+    |> Enum.map(fn chunk ->
+      chunk
+      |> Enum.with_index()
+      |> Enum.reduce(0, fn
+        {true, index}, value -> Bitwise.bor(value, Bitwise.bsl(1, 7 - index))
+        {false, _index}, value -> value
+      end)
     end)
+    |> :erlang.list_to_binary()
   end
 end

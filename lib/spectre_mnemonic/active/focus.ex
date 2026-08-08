@@ -96,7 +96,16 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @doc "Forgets matching active memory records."
   @spec forget(selector(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def forget(selector, opts \\ []) do
+  def forget(selector, opts \\ [])
+
+  def forget(selector, opts) when is_function(selector, 1) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      forget_ids = forget_ids(selector, opts)
+      GenServer.call(__MODULE__, {:forget_ids, forget_ids, opts})
+    end
+  end
+
+  def forget(selector, opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       GenServer.call(__MODULE__, {:forget, selector, opts})
     end
@@ -132,6 +141,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @doc false
   @spec recent_moments(term(), term(), pos_integer(), keyword()) :: [Moment.t() | Secret.t()]
   def recent_moments(stream, task_id, limit, opts \\ []) do
+    limit = if is_integer(limit) and limit >= 0, do: limit, else: 0
     namespace = Identity.namespace!(opts)
     scope = Keyword.get(opts, :scope)
     stream_ids = indexed_ids(:mnemonic_moments_by_stream, {{namespace, scope}, stream})
@@ -206,50 +216,69 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec handle_call(term(), GenServer.from(), state()) ::
           {:reply, term(), state()}
   def handle_call({:record_signal, input, opts}, _from, state) do
-    if Keyword.get(opts, :secret?, false) do
-      {:reply, record_secret_signal(input, opts), state}
-    else
-      {:reply, record_plain_signal(input, opts), state}
-    end
+    result = safe_focus_call(fn -> record_signal_checked(input, opts) end)
+    {:reply, result, state}
   end
 
   def handle_call({:link, source_id, relation, target_id, opts}, _from, state) do
-    case association_context(source_id, target_id, opts) do
-      {:ok, association_opts} ->
-        association = build_association(source_id, relation, target_id, association_opts)
-
-        case maybe_persist_value(:associations, association, association_opts) do
-          {:ok, _association} = result ->
-            insert_association(association)
-            {:reply, result, state}
-
-          {:error, _reason} = error ->
-            {:reply, error, state}
-        end
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
+    result = safe_focus_call(fn -> link_checked(source_id, relation, target_id, opts) end)
+    {:reply, result, state}
   end
 
   def handle_call({:artifact, path_or_binary, opts}, _from, state) do
-    artifact = build_artifact(path_or_binary, opts)
-
-    result =
-      with {:ok, artifact} <- persist_value(:artifacts, artifact, opts),
-           {:ok, action_bundle} <-
-             maybe_attach_action_recipe(artifact.id, opts, artifact.inserted_at) do
-        :ets.insert(:mnemonic_artifacts, {artifact.id, artifact})
-        insert_action_bundle(action_bundle)
-        {:ok, artifact_result(artifact, action_recipe(action_bundle))}
-      end
-
+    result = safe_focus_call(fn -> artifact_checked(path_or_binary, opts) end)
     {:reply, result, state}
   end
 
   def handle_call({:forget, selector, opts}, _from, state) do
-    forget_ids = forget_ids(selector, opts)
-    {:reply, forget_moments(forget_ids, opts), state}
+    result = safe_focus_call(fn -> forget_moments(forget_ids(selector, opts), opts) end)
+    {:reply, result, state}
+  end
+
+  def handle_call({:forget_ids, forget_ids, opts}, _from, state) do
+    result = safe_focus_call(fn -> forget_moments(forget_ids, opts) end)
+    {:reply, result, state}
+  end
+
+  @spec record_signal_checked(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
+  defp record_signal_checked(input, opts) do
+    with :ok <- validate_signal_options(opts) do
+      if Keyword.get(opts, :secret?, false),
+        do: record_secret_signal(input, opts),
+        else: record_plain_signal(input, opts)
+    end
+  end
+
+  @spec link_checked(binary(), atom(), binary(), keyword()) ::
+          {:ok, Association.t()} | {:error, term()}
+  defp link_checked(source_id, relation, target_id, opts) do
+    with {:ok, association_opts} <- association_context(source_id, target_id, opts) do
+      association = build_association(source_id, relation, target_id, association_opts)
+
+      case maybe_persist_value(:associations, association, association_opts) do
+        {:ok, _association} = result ->
+          insert_association(association)
+          result
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  @spec artifact_checked(term(), keyword()) ::
+          {:ok, Artifact.t() | %{artifact: Artifact.t(), action_recipe: ActionRecipe.t()}}
+          | {:error, term()}
+  defp artifact_checked(path_or_binary, opts) do
+    with :ok <- validate_structured_options(opts),
+         artifact <- build_artifact(path_or_binary, opts),
+         {:ok, artifact} <- persist_value(:artifacts, artifact, opts),
+         {:ok, action_bundle} <-
+           maybe_attach_action_recipe(artifact.id, opts, artifact.inserted_at) do
+      :ets.insert(:mnemonic_artifacts, {artifact.id, artifact})
+      insert_action_bundle(action_bundle)
+      {:ok, artifact_result(artifact, action_recipe(action_bundle))}
+    end
   end
 
   @spec record_plain_signal(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
@@ -1148,7 +1177,14 @@ defmodule SpectreMnemonic.Active.Focus do
   defp payload_id(_payload), do: nil
 
   @spec selected?(Moment.t() | Secret.t(), selector()) :: boolean()
-  defp selected?(moment, fun) when is_function(fun, 1), do: fun.(moment)
+  defp selected?(moment, fun) when is_function(fun, 1) do
+    fun.(moment) == true
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
   defp selected?(_moment, _selector), do: false
 
   @spec artifact_source(term()) :: term()
@@ -1161,9 +1197,93 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec secret_label(keyword(), map()) :: binary()
   defp secret_label(opts, metadata) do
-    opts
-    |> Keyword.get(:label, Map.get(metadata, :label, Map.get(metadata, "label", "secret")))
-    |> to_string()
+    case Keyword.get(
+           opts,
+           :label,
+           Map.get(metadata, :label, Map.get(metadata, "label", "secret"))
+         ) do
+      label when is_binary(label) -> label
+      label when is_atom(label) or is_number(label) -> to_string(label)
+      label -> inspect(label)
+    end
+  end
+
+  @spec validate_signal_options(keyword()) :: :ok | {:error, term()}
+  defp validate_signal_options(opts) do
+    with :ok <- validate_structured_options(opts),
+         :ok <- validate_boolean_option(opts, :secret?),
+         :ok <- validate_number_option(opts, :attention) do
+      validate_number_option(opts, :confidence)
+    end
+  end
+
+  @spec validate_structured_options(keyword()) :: :ok | {:error, term()}
+  defp validate_structured_options(opts) do
+    with :ok <- validate_map_option(opts, :metadata),
+         :ok <- validate_map_option(opts, :action_recipe_metadata),
+         :ok <- validate_boolean_option(opts, :persist?) do
+      validate_action_recipe(Keyword.get(opts, :action_recipe))
+    end
+  end
+
+  @spec validate_map_option(keyword(), atom()) :: :ok | {:error, term()}
+  defp validate_map_option(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error ->
+        :ok
+
+      {:ok, value} when is_map(value) ->
+        :ok
+
+      {:ok, value} when is_list(value) ->
+        if Keyword.keyword?(value),
+          do: :ok,
+          else: {:error, {:invalid_focus_option, key, value}}
+
+      {:ok, value} ->
+        {:error, {:invalid_focus_option, key, value}}
+    end
+  end
+
+  @spec validate_boolean_option(keyword(), atom()) :: :ok | {:error, term()}
+  defp validate_boolean_option(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error -> :ok
+      {:ok, value} when is_boolean(value) -> :ok
+      {:ok, value} -> {:error, {:invalid_focus_option, key, value}}
+    end
+  end
+
+  @spec validate_number_option(keyword(), atom()) :: :ok | {:error, term()}
+  defp validate_number_option(opts, key) do
+    case Keyword.fetch(opts, key) do
+      :error -> :ok
+      {:ok, value} when is_number(value) -> :ok
+      {:ok, value} -> {:error, {:invalid_focus_option, key, value}}
+    end
+  end
+
+  @spec validate_action_recipe(term()) :: :ok | {:error, term()}
+  defp validate_action_recipe(nil), do: :ok
+  defp validate_action_recipe(recipe) when is_binary(recipe) or is_map(recipe), do: :ok
+
+  defp validate_action_recipe(recipe) when is_list(recipe) do
+    if Keyword.keyword?(recipe),
+      do: :ok,
+      else: {:error, {:invalid_focus_option, :action_recipe, recipe}}
+  end
+
+  defp validate_action_recipe(recipe),
+    do: {:error, {:invalid_focus_option, :action_recipe, recipe}}
+
+  @spec safe_focus_call((-> result)) :: result | {:error, term()} when result: term()
+  defp safe_focus_call(fun) do
+    fun.()
+  rescue
+    exception ->
+      {:error, {:active_focus_failed, exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:active_focus_failed, kind, reason}}
   end
 
   @spec redacted_secret_text(binary()) :: binary()

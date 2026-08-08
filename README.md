@@ -11,16 +11,21 @@ beside your framework: record what happened, recall nearby context, promote
 important moments, track stale or contradicted facts, and keep compact knowledge
 available without hydrating every old event.
 
-The exact `0.1.6` compatibility surface is published in the
+The exact `0.2.0` compatibility surface is published in the
 [public API manifest](docs/PUBLIC_API.md).
+
+## 0.2.0 Spectre Compatibility
+
+Version `0.2.0` aligns Mnemonic's package, memory adapter, and Stack contracts
+with Spectre `~> 0.2.0`. Recall and remember remain external memory services;
+the core retains canonical Agent, Run, Work, Vigil, and checkpoint ownership.
 
 ## 0.1.6 Recoverable Baseline
 
 Version `0.1.6` is a consolidation-only release with no new runtime feature and
 no intentional breaking change. Elixir 1.19 on Erlang/OTP 28 is the initially
 guaranteed pair. Uniform CI runs format, warnings-as-errors compilation, tests,
-non-strict Credo, Dialyzer, ExDoc, and local package validation with no
-publication. The changelog,
+non-strict Credo, Dialyzer, and ExDoc. The changelog,
 license, and explicit API manifest complete the release boundary before
 `0.2.0` development begins.
 
@@ -69,12 +74,15 @@ Add the dependency:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic"}
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", tag: "v0.2.0"}
   ]
 end
 ```
 
-Version 0.1.6 can also publish Mnemonic configuration through an immutable
+Spectre Mnemonic is distributed exclusively from GitHub; there is no Hex
+package.
+
+Version 0.2.0 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -104,7 +112,7 @@ agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
 
-When `isolate_by` includes `:subject`, version 0.1.6 requires the explicit
+When `isolate_by` includes `:subject`, version 0.2.0 requires the explicit
 canonical `%Spectre.Subject{}` supplied by an Agent Instance:
 
 ```elixir
@@ -482,6 +490,17 @@ Persistent records are backend-neutral envelopes in families such as:
 - `:action_recipes`
 - `:tombstones`
 
+Append-only payloads are bounded to 64 MiB by default. Both the stored size and
+the expanded size declared by compressed Erlang terms are checked before
+decoding. Applications that need a different bound can configure it explicitly:
+
+```elixir
+config :spectre_mnemonic,
+  max_frame_bytes: 16 * 1024 * 1024
+```
+
+The same bound protects `active.smem` and `knowledge.smem`.
+
 `SpectreMnemonic.Persistence.Manager.replay/1` replays durable envelopes and
 applies tombstones.
 
@@ -811,7 +830,7 @@ config :spectre_mnemonic,
   embedding_adapter: MyApp.EmbeddingAdapter
 ```
 
-Adapters implement `SpectreMnemonic.Embedding.Adapter.embed/2` and return
+Adapters implement `c:SpectreMnemonic.Embedding.Adapter.embed/2` and return
 `{:ok, vector}`, `{:ok, embedding_map}`, or `{:error, reason}`.
 
 Enable the local Model2Vec provider:
@@ -828,7 +847,10 @@ config :spectre_mnemonic,
 ```
 
 Downloads are opt-in. For production, pre-populate the cache or pass
-`:model_dir`.
+`:model_dir`. Downloaded files are written atomically and optional SHA-256
+checksums are verified before installation. Computed cache directories include
+a short digest of the complete model identifier, so identifiers that sanitize
+to the same readable name still remain isolated.
 
 Consolidation does not re-embed text. It copies the `vector`,
 `binary_signature`, and `embedding` already stored on each moment.

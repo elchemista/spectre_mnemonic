@@ -99,13 +99,13 @@ defmodule SpectreMnemonic.SearchResult do
       event: Map.get(values, :event),
       text: Map.get(values, :text),
       type: Map.get(values, :type),
-      provenance: Map.get(values, :provenance, %{}) || %{},
+      provenance: normalize_map(Map.get(values, :provenance)),
       inserted_at: Map.get(values, :inserted_at),
-      scores: Map.get(values, :scores, %{}) || %{},
+      scores: normalize_map(Map.get(values, :scores)),
       metadata:
         values
         |> Map.drop(MapSet.to_list(@known_keys))
-        |> Map.merge(Map.get(values, :metadata, %{}) || %{})
+        |> Map.merge(normalize_map(Map.get(values, :metadata)))
     })
   end
 
@@ -120,4 +120,8 @@ defmodule SpectreMnemonic.SearchResult do
   @spec key(t()) :: term()
   def key(%__MODULE__{} = result),
     do: {result.source, result.family, result.id || result.record_id}
+
+  @spec normalize_map(term()) :: map()
+  defp normalize_map(value) when is_map(value), do: value
+  defp normalize_map(_value), do: %{}
 end

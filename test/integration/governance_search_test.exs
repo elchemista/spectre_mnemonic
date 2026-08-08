@@ -109,6 +109,25 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
     restart_scheduler()
   end
 
+  test "scheduler normalizes malformed configuration before scheduling" do
+    Application.put_env(:spectre_mnemonic, :consolidation_scheduler, %{
+      enabled: :invalid,
+      interval_ms: :invalid,
+      min_attention: :invalid,
+      stale_after_ms: -1
+    })
+
+    restart_scheduler()
+    status = ConsolidationScheduler.status()
+
+    assert status.running?
+    refute status.enabled?
+    assert status.interval_ms == 300_000
+  after
+    Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
+    restart_scheduler()
+  end
+
   test "evaluation harness returns recall and latency metrics" do
     result = SpectreMnemonic.Evaluation.run(size: 6)
 

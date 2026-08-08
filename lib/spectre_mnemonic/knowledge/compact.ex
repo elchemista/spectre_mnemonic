@@ -82,15 +82,15 @@ defmodule SpectreMnemonic.Knowledge.Compact do
   defp run_adapter(nil, input, _opts), do: {:ok, default_compact(input)}
   defp run_adapter(module, input, opts), do: compact_with_adapter(module, input, opts)
 
-  @spec adapter(keyword()) :: module() | nil
+  @spec adapter(keyword()) :: term()
   defp adapter(opts) do
     Keyword.get(opts, :compact_adapter) ||
       Application.get_env(:spectre_mnemonic, :compact_adapter)
   end
 
-  @spec compact_with_adapter(module(), map(), keyword()) :: {:ok, term()} | {:error, term()}
+  @spec compact_with_adapter(term(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp compact_with_adapter(module, input, opts) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
+    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
       module.compact(input, opts) |> normalize_adapter_result()
     else
       {:error, {:invalid_compact_adapter, module}}

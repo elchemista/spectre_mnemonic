@@ -722,7 +722,7 @@ defmodule SpectreMnemonic.IntegrationTest do
                download: true
              )
 
-    assert model_dir == Path.join(cache_root, "fixture--model")
+    assert model_dir == ModelDownloader.cache_dir("fixture/model", cache_dir: cache_root)
 
     for file <- ModelDownloader.required_files() do
       assert File.regular?(Path.join(model_dir, file))
@@ -782,6 +782,22 @@ defmodule SpectreMnemonic.IntegrationTest do
              )
 
     assert File.regular?(Path.join(model_dir, "tokenizer.json"))
+
+    assert {:ok, ^model_dir} =
+             ModelDownloader.ensure_model(
+               model_id: "fixture/atom-checksum",
+               cache_dir: cache_root,
+               checksums: %{"tokenizer.json" => expected}
+             )
+
+    File.write!(Path.join(model_dir, "tokenizer.json"), "corrupted")
+
+    assert {:error, {:model_checksum_verification_failed, ^model_dir}} =
+             ModelDownloader.ensure_model(
+               model_id: "fixture/atom-checksum",
+               cache_dir: cache_root,
+               checksums: %{"tokenizer.json" => expected}
+             )
   after
     cleanup_tmp_dirs()
   end
@@ -797,6 +813,7 @@ defmodule SpectreMnemonic.IntegrationTest do
                model_id: "fixture/http-model",
                cache_dir: cache_root,
                base_url: base_url,
+               headers: [{"x-spectre-test", "model-fixture"}],
                download: true
              )
 
@@ -824,7 +841,13 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert is_binary(embedding.vector)
     assert Vector.dimensions(embedding.vector) == 2
-    assert File.regular?(Path.join([cache_root, "fixture--downloaded", "model.safetensors"]))
+
+    assert File.regular?(
+             Path.join(
+               ModelDownloader.cache_dir("fixture/downloaded", cache_dir: cache_root),
+               "model.safetensors"
+             )
+           )
   after
     cleanup_tmp_dirs()
   end

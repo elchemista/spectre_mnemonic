@@ -43,6 +43,51 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert second_seq > first_seq
   end
 
+  test "knowledge writer contains malformed events and unusable roots" do
+    writer = Process.whereis(SMEM)
+
+    assert {:error, {:knowledge_write_failed, Protocol.UndefinedError, _message}} =
+             SMEM.append(%{type: :fact, text: "invalid metadata", metadata: :invalid})
+
+    root = Path.join(System.tmp_dir!(), "smem-root-#{System.unique_integer([:positive])}")
+    File.write!(root, "not a directory")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    assert {:error, _reason} = SMEM.append(%{type: :fact, text: "not written"}, data_root: root)
+    assert {:error, _reason} = SMEM.replay(data_root: root)
+
+    assert {:ok, _sequence} = SMEM.append(%{type: :fact, text: "writer remains healthy"})
+    assert Process.whereis(SMEM) == writer
+    assert Process.alive?(writer)
+  end
+
+  test "knowledge frames reject oversized compressed and expanded payloads" do
+    Application.put_env(:spectre_mnemonic, :max_frame_bytes, 256)
+
+    assert {:error, {:frame_too_large, size, 256}} =
+             SMEM.append(%{
+               type: :fact,
+               text: String.duplicate("highly compressible knowledge ", 100)
+             })
+
+    assert size > 256
+    Application.delete_env(:spectre_mnemonic, :max_frame_bytes)
+    assert {:ok, _sequence} = SMEM.append(%{type: :fact, text: "bounded knowledge"})
+
+    path = SMEM.path()
+    :persistent_term.put({SMEM, :seq, path}, 41)
+    assert {:ok, 42} = SMEM.append(%{type: :fact, text: "legacy sequence cache"})
+
+    root = Path.join(System.tmp_dir!(), "smem-frame-limit-#{System.unique_integer([:positive])}")
+    path = Path.join([root, "knowledge", "knowledge.smem"])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, <<"SKNW", 1, 1::unsigned-64, 100::signed-64, 257::32, 0::32>>)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    Application.put_env(:spectre_mnemonic, :max_frame_bytes, 256)
+    assert {:ok, []} = SMEM.replay(data_root: root)
+  end
+
   test "load knowledge respects item and byte budgets" do
     Application.put_env(:spectre_mnemonic, :knowledge,
       max_loaded_bytes: 1_200,

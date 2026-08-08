@@ -28,15 +28,27 @@ defmodule SpectreMnemonic.Knowledge.Base do
   }
 
   @packet_types [:skill, :procedure, :fact, :latest_ingestion]
+  @budget_keys [
+    :max_loaded_bytes,
+    :max_latest_ingestions,
+    :max_skills,
+    :max_facts,
+    :max_procedures
+  ]
 
   @doc "Returns the effective knowledge config."
   @spec config(keyword()) :: keyword()
   def config(opts \\ []) do
-    configured = Application.get_env(:spectre_mnemonic, :knowledge, [])
+    configured =
+      :spectre_mnemonic
+      |> Application.get_env(:knowledge, [])
+      |> normalize_keyword_config()
+
+    local = opts |> Keyword.get(:knowledge, []) |> normalize_keyword_config()
 
     @default_config
     |> Keyword.merge(configured)
-    |> Keyword.merge(Keyword.get(opts, :knowledge, []))
+    |> Keyword.merge(local)
     |> Keyword.merge(
       Keyword.take(
         opts,
@@ -44,18 +56,43 @@ defmodule SpectreMnemonic.Knowledge.Base do
           [:data_root, :namespace, :scope]
       )
     )
+    |> normalize_config_values()
   end
+
+  @spec normalize_config_values(keyword()) :: keyword()
+  defp normalize_config_values(config) do
+    config =
+      if is_boolean(Keyword.get(config, :enabled)),
+        do: config,
+        else: Keyword.put(config, :enabled, Keyword.fetch!(@default_config, :enabled))
+
+    Enum.reduce(@budget_keys, config, fn key, config ->
+      case Keyword.get(config, key) do
+        value when is_integer(value) and value >= 0 -> config
+        _invalid -> Keyword.put(config, key, Keyword.fetch!(@default_config, key))
+      end
+    end)
+  end
+
+  @spec normalize_keyword_config(term()) :: keyword()
+  defp normalize_keyword_config(config) when is_map(config), do: Map.to_list(config)
+
+  defp normalize_keyword_config(config) when is_list(config) do
+    if Keyword.keyword?(config), do: config, else: []
+  end
+
+  defp normalize_keyword_config(_config), do: []
 
   @doc "Appends one compact knowledge event."
   @spec append(map(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
   def append(event, opts \\ []), do: SMEM.append(event, opts)
 
   @doc "Replays compact knowledge events."
-  @spec events(keyword()) :: {:ok, [map()]}
+  @spec events(keyword()) :: {:ok, [map()]} | {:error, term()}
   def events(opts \\ []), do: SMEM.replay(opts)
 
   @doc "Loads a compact, budgeted knowledge packet."
-  @spec load(keyword()) :: {:ok, Record.t()}
+  @spec load(keyword()) :: {:ok, Record.t()} | {:error, term()}
   def load(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       cfg = config(opts)
@@ -63,15 +100,16 @@ defmodule SpectreMnemonic.Knowledge.Base do
     end
   end
 
-  @spec load_with_config(keyword()) :: {:ok, Record.t()}
+  @spec load_with_config(keyword()) :: {:ok, Record.t()} | {:error, term()}
   defp load_with_config(cfg) do
     if enabled?(cfg), do: load_enabled(cfg), else: {:ok, empty_packet(%{disabled?: true}, cfg)}
   end
 
-  @spec load_enabled(keyword()) :: {:ok, Record.t()}
+  @spec load_enabled(keyword()) :: {:ok, Record.t()} | {:error, term()}
   defp load_enabled(cfg) do
-    {:ok, events} = SMEM.replay(cfg)
-    {:ok, build_packet(events, cfg)}
+    with {:ok, events} <- SMEM.replay(cfg) do
+      {:ok, build_packet(events, cfg)}
+    end
   end
 
   @doc "Searches `knowledge.smem` without loading a full knowledge packet."
@@ -83,22 +121,32 @@ defmodule SpectreMnemonic.Knowledge.Base do
     end
   end
 
-  @spec search_enabled(term(), keyword(), keyword()) :: {:ok, [SearchResult.t()]}
+  @spec search_enabled(term(), keyword(), keyword()) ::
+          {:ok, [SearchResult.t()]} | {:error, term()}
   defp search_enabled(cue, opts, cfg) do
-    {:ok, events} = SMEM.replay(cfg)
-    limit = Keyword.get(opts, :limit, 10)
-    query = cue_text(cue)
-    query_terms = query |> terms() |> MapSet.new()
+    with {:ok, events} <- SMEM.replay(cfg) do
+      limit = search_limit(opts)
+      query = cue_text(cue)
+      query_terms = query |> terms() |> MapSet.new()
 
-    results =
-      events
-      |> Enum.map(&SMEM.normalize_event/1)
-      |> Enum.map(&score_event(&1, query_terms, query))
-      |> Enum.filter(&(&1.score > 0))
-      |> Enum.sort_by(&search_sort_key/1)
-      |> Enum.take(limit)
+      results =
+        events
+        |> Enum.map(&SMEM.normalize_event/1)
+        |> Enum.map(&score_event(&1, query_terms, query))
+        |> Enum.filter(&(&1.score > 0))
+        |> Enum.sort_by(&search_sort_key/1)
+        |> Enum.take(limit)
 
-    {:ok, results}
+      {:ok, results}
+    end
+  end
+
+  @spec search_limit(keyword()) :: non_neg_integer()
+  defp search_limit(opts) do
+    case Keyword.get(opts, :limit, 10) do
+      limit when is_integer(limit) and limit >= 0 -> limit
+      _invalid -> 10
+    end
   end
 
   @doc "Builds a packet from already-loaded events."

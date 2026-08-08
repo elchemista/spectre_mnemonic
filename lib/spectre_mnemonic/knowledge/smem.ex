@@ -16,6 +16,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Persistence.Store.FileFrame
   alias SpectreMnemonic.Result
 
   @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
@@ -68,18 +69,11 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   end
 
   @doc "Replays complete events from `knowledge.smem`."
-  @spec replay(keyword()) :: {:ok, [event()]}
+  @spec replay(keyword()) :: {:ok, [event()]} | {:error, term()}
   def replay(opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
-      root = data_root(opts)
-
-      events =
-        root
-        |> active_path()
-        |> replay_path()
-        |> Enum.filter(&Scope.match?(&1, opts))
-
-      {:ok, events}
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, events} <- opts |> data_root() |> active_path() |> replay_path() do
+      {:ok, Enum.filter(events, &Scope.match?(&1, opts))}
     end
   end
 
@@ -111,24 +105,27 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @impl GenServer
   def handle_call({:append, event, opts}, _from, state) do
-    {:reply, do_append(event, opts), state}
+    {:reply, safe_write(fn -> do_append(event, opts) end), state}
   end
 
   def handle_call({:append_many, events, opts}, _from, state) do
-    result = Result.collect_ok(events, &do_append(&1, opts))
+    result = safe_write(fn -> Result.collect_ok(events, &do_append(&1, opts)) end)
     {:reply, result, state}
   end
 
   def handle_call({:replace, events, opts}, _from, state) do
-    {:reply, do_replace(events, opts), state}
+    {:reply, safe_write(fn -> do_replace(events, opts) end), state}
   end
 
   @spec do_append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
   defp do_append(event, opts) do
     root = data_root(opts)
-    ensure_root!(root)
     path = active_path(root)
-    write_event(path, event, next_seq(path), opts)
+
+    with :ok <- ensure_root(root),
+         {:ok, seq} <- next_seq(path) do
+      write_event(path, event, seq, opts)
+    end
   end
 
   @spec do_replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
@@ -136,13 +133,13 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     # Replace writes a temp file first because compact knowledge should not
     # vanish halfway through a rewrite. I like boring file moves. They pay rent.
     root = data_root(opts)
-    ensure_root!(root)
     path = active_path(root)
     tmp_path = path <> ".tmp"
-    preserved = path |> replay_path() |> Enum.reject(&Scope.match?(&1, opts))
-    replacement = preserved ++ Enum.map(events, &normalize_event(&1, opts))
 
-    with :ok <- File.write(tmp_path, "", [:binary]),
+    with :ok <- ensure_root(root),
+         {:ok, existing} <- replay_path(path),
+         replacement <- replacement_events(existing, events, opts),
+         :ok <- File.write(tmp_path, "", [:binary]),
          {:ok, _seqs} <- append_many_to_path(tmp_path, replacement),
          :ok <- File.rename(tmp_path, path) do
       reset_seq(path)
@@ -152,6 +149,12 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
         File.rm(tmp_path)
         {:error, reason}
     end
+  end
+
+  @spec replacement_events([event()], [event()], keyword()) :: [event()]
+  defp replacement_events(existing, events, opts) do
+    preserved = Enum.reject(existing, &Scope.match?(&1, opts))
+    preserved ++ Enum.map(events, &normalize_event(&1, opts))
   end
 
   @doc "Returns the configured knowledge directory."
@@ -232,61 +235,92 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec write_normalized_event(Path.t(), event(), pos_integer()) ::
           {:ok, pos_integer()} | {:error, term()}
   defp write_normalized_event(path, event, seq) do
-    case File.write(path, frame(seq, event), [:append, :binary]) do
-      :ok -> {:ok, seq}
-      {:error, reason} -> {:error, reason}
+    with {:ok, frame} <- frame(seq, event) do
+      case File.write(path, frame, [:append, :binary]) do
+        :ok -> {:ok, seq}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
-  @spec frame(pos_integer(), event()) :: binary()
+  @spec frame(pos_integer(), event()) ::
+          {:ok, binary()} | {:error, {:frame_too_large, non_neg_integer(), pos_integer()}}
   defp frame(seq, event) do
     payload = :erlang.term_to_binary(event, [:compressed])
-    crc = :erlang.crc32(payload)
-    timestamp = System.system_time(:millisecond)
+    maximum = FileFrame.max_payload_bytes()
 
-    <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32, crc::32,
-      payload::binary>>
+    if safe_payload_size?(payload, maximum) do
+      crc = :erlang.crc32(payload)
+      timestamp = System.system_time(:millisecond)
+
+      {:ok,
+       <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32,
+         crc::32, payload::binary>>}
+    else
+      {:error, {:frame_too_large, payload_size(payload), maximum}}
+    end
   end
 
-  @spec ensure_root!(Path.t()) :: :ok
-  defp ensure_root!(root), do: File.mkdir_p!(root)
+  @spec ensure_root(Path.t()) :: :ok | {:error, term()}
+  defp ensure_root(root), do: File.mkdir_p(root)
 
   @spec active_path(Path.t()) :: Path.t()
   defp active_path(root), do: Path.join(root, "knowledge.smem")
 
-  @spec next_seq(Path.t()) :: pos_integer()
+  @spec next_seq(Path.t()) :: {:ok, pos_integer()} | {:error, term()}
   defp next_seq(path) do
     key = {__MODULE__, :seq, path}
 
-    current =
-      case :persistent_term.get(key, :missing) do
-        :missing -> initial_seq(path)
-        seq -> seq
-      end
+    with {:ok, counter} <- sequence_counter(key, path) do
+      {:ok, :atomics.add_get(counter, 1, 1)}
+    end
+  end
 
-    seq = current + 1
-    :persistent_term.put(key, seq)
-    seq
+  @spec sequence_counter(term(), Path.t()) ::
+          {:ok, :atomics.atomics_ref()} | {:error, term()}
+  defp sequence_counter(key, path) do
+    case :persistent_term.get(key, :missing) do
+      {:atomics, counter} -> {:ok, counter}
+      seq when is_integer(seq) and seq >= 0 -> {:ok, install_sequence_counter(key, seq)}
+      :missing -> install_initial_sequence_counter(key, path)
+    end
+  end
+
+  @spec install_initial_sequence_counter(term(), Path.t()) ::
+          {:ok, :atomics.atomics_ref()} | {:error, term()}
+  defp install_initial_sequence_counter(key, path) do
+    with {:ok, seq} <- initial_seq(path) do
+      {:ok, install_sequence_counter(key, seq)}
+    end
+  end
+
+  @spec install_sequence_counter(term(), non_neg_integer()) :: :atomics.atomics_ref()
+  defp install_sequence_counter(key, seq) do
+    counter = :atomics.new(1, signed: false)
+    :ok = :atomics.put(counter, 1, seq)
+    :persistent_term.put(key, {:atomics, counter})
+    counter
   end
 
   @spec reset_seq(Path.t()) :: :ok
   defp reset_seq(path) do
-    :persistent_term.put({__MODULE__, :seq, path}, initial_seq(path))
+    :persistent_term.erase({__MODULE__, :seq, path})
     :ok
   end
 
-  @spec initial_seq(Path.t()) :: non_neg_integer()
+  @spec initial_seq(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   defp initial_seq(path) do
-    {:ok, seq} = reduce_path(path, 0, fn {seq, _timestamp, _event}, _acc -> {:cont, seq} end)
-    seq
+    reduce_path(path, 0, fn {seq, _timestamp, _event}, current ->
+      {:cont, max(seq, current)}
+    end)
   end
 
-  @spec replay_path(Path.t()) :: [event()]
+  @spec replay_path(Path.t()) :: {:ok, [event()]} | {:error, term()}
   defp replay_path(path) do
-    {:ok, events} =
-      reduce_path(path, [], fn {_seq, _timestamp, event}, acc -> {:cont, [event | acc]} end)
-
-    Enum.reverse(events)
+    with {:ok, events} <-
+           reduce_path(path, [], fn {_seq, _timestamp, event}, acc -> {:cont, [event | acc]} end) do
+      {:ok, Enum.reverse(events)}
+    end
   end
 
   @spec reduce_path(Path.t(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
@@ -338,12 +372,16 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
         ) :: acc
         when acc: term()
   defp read_payload(io, seq, timestamp, len, crc, acc, fun) do
-    case IO.binread(io, len) do
-      payload when is_binary(payload) and byte_size(payload) == len ->
-        read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
+    if len <= FileFrame.max_payload_bytes() do
+      case IO.binread(io, len) do
+        payload when is_binary(payload) and byte_size(payload) == len ->
+          read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
 
-      _incomplete_or_error ->
-        acc
+        _incomplete_or_error ->
+          acc
+      end
+    else
+      acc
     end
   end
 
@@ -370,10 +408,23 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @spec decode_payload(binary()) :: {:ok, term()} | :error
   defp decode_payload(payload) do
-    {:ok, :erlang.binary_to_term(payload, [:safe])}
+    if safe_payload_size?(payload, FileFrame.max_payload_bytes()) do
+      {:ok, :erlang.binary_to_term(payload, [:safe])}
+    else
+      :error
+    end
   rescue
     _exception -> :error
   end
+
+  @spec safe_payload_size?(binary(), pos_integer()) :: boolean()
+  defp safe_payload_size?(payload, maximum), do: payload_size(payload) <= maximum
+
+  @spec payload_size(binary()) :: non_neg_integer()
+  defp payload_size(<<131, 80, expanded::unsigned-big-32, _compressed::binary>> = payload),
+    do: max(byte_size(payload), expanded)
+
+  defp payload_size(payload), do: byte_size(payload)
 
   @spec continue_frame(File.io_device(), tuple(), acc, (tuple(), acc ->
                                                           {:cont, acc} | {:halt, acc})) ::
@@ -456,5 +507,15 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
       nil -> {:error, :knowledge_writer_not_started}
       _pid -> GenServer.call(__MODULE__, message, 30_000)
     end
+  end
+
+  @spec safe_write((-> result)) :: result | {:error, term()} when result: term()
+  defp safe_write(fun) do
+    fun.()
+  rescue
+    exception ->
+      {:error, {:knowledge_write_failed, exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:knowledge_write_failed, kind, reason}}
   end
 end

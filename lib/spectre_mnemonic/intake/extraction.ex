@@ -116,11 +116,13 @@ defmodule SpectreMnemonic.Intake.Extraction do
     end
   rescue
     exception -> %{empty() | metadata: %{provider: adapter, error: exception}}
+  catch
+    kind, reason -> %{empty() | metadata: %{provider: adapter, error: {kind, reason}}}
   end
 
   @spec adapter_available?(module()) :: boolean()
   defp adapter_available?(adapter) do
-    Code.ensure_loaded?(adapter) and function_exported?(adapter, :extract, 2)
+    is_atom(adapter) and Code.ensure_loaded?(adapter) and function_exported?(adapter, :extract, 2)
   end
 
   @spec normalize_adapter_result(term(), module()) :: map()

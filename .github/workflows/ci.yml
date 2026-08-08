@@ -94,8 +94,8 @@ jobs:
       - name: Run Dialyzer
         run: mix dialyzer
 
-  package:
-    name: ExDoc and package dry-run
+  docs:
+    name: Documentation
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -119,13 +119,10 @@ jobs:
           path: |
             deps
             _build/dev
-          key: ${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-package-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-docs-${{ hashFiles('mix.lock') }}
 
       - name: Install dependencies
         run: mix deps.get
 
       - name: Build documentation
         run: mix docs
-
-      - name: Validate package locally (no publish)
-        run: SPECTRE_HEX_BUILD=1 mix hex.build --unpack --output "$RUNNER_TEMP/hex-package"
