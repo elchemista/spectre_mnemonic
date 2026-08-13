@@ -38,9 +38,9 @@ defmodule SpectreMnemonic.StackInstallableTest do
   test "publishes the versioned Mnemonic Stack contract" do
     assert {:ok, package} = V1.verify_installable(Spectre.Mnemonic)
     assert package.id == :mnemonic
-    assert package.version == "0.2.0"
+    assert package.version == "0.3.0"
     assert package.contract == 1
-    assert package.spectre == "~> 0.2.0"
+    assert package.spectre == "~> 0.3.0"
     assert package.provides == [{:service, :memory}]
     assert package.operations == []
     assert package.actions == []
@@ -238,7 +238,7 @@ defmodule SpectreMnemonic.StackInstallableTest do
                run_metadata: %{agent_ref: authoritative}
              )
 
-    foreign = %AgentRef{id: "foreign", definition: String, version: 1}
+    foreign = AgentRef.from_id("foreign", definition: String, version: 1)
 
     assert {:error, {:mnemonic_agent_ref_definition_mismatch, String, Agent}} =
              Memory.options(Agent,

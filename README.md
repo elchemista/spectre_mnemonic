@@ -11,13 +11,13 @@ beside your framework: record what happened, recall nearby context, promote
 important moments, track stale or contradicted facts, and keep compact knowledge
 available without hydrating every old event.
 
-The exact `0.2.0` compatibility surface is published in the
+The exact `0.3.0` compatibility surface is published in the
 [public API manifest](docs/PUBLIC_API.md).
 
-## 0.2.0 Spectre Compatibility
+## 0.3.0 Spectre Compatibility
 
-Version `0.2.0` aligns Mnemonic's package, memory adapter, and Stack contracts
-with Spectre `~> 0.2.0`. Recall and remember remain external memory services;
+Version `0.3.0` aligns Mnemonic's package, memory adapter, and Stack contracts
+with Spectre `~> 0.3.0`. Recall and remember remain external memory services;
 the core retains canonical Agent, Run, Work, Vigil, and checkpoint ownership.
 
 ## 0.1.6 Recoverable Baseline
@@ -74,7 +74,8 @@ Add the dependency:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", tag: "v0.2.0"}
+    {:spectre, "~> 0.3.0"},
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", tag: "v0.3.0"}
   ]
 end
 ```
@@ -82,7 +83,7 @@ end
 Spectre Mnemonic is distributed exclusively from GitHub; there is no Hex
 package.
 
-Version 0.2.0 can also publish Mnemonic configuration through an immutable
+Version 0.3.0 can also publish Mnemonic configuration through an immutable
 Spectre Stack definition:
 
 ```elixir
@@ -112,7 +113,7 @@ agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
 
-When `isolate_by` includes `:subject`, version 0.2.0 requires the explicit
+When `isolate_by` includes `:subject`, version 0.3.0 requires the explicit
 canonical `%Spectre.Subject{}` supplied by an Agent Instance:
 
 ```elixir

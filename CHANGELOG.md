@@ -4,12 +4,14 @@ All notable changes to Spectre Mnemonic are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-13
+
 ### Changed
 
-- Made distribution GitHub-only by removing Hex package metadata and package
-  build CI.
-- Replaced the dynamic Spectre source selector with one direct dependency on
-  the Spectre GitHub `0.2.0` tag.
+- Retained GitHub-only distribution with no Hex package metadata.
+- Replaced the GitHub Spectre dependency with the published Hex package at
+  `~> 0.3.0`.
+- Made strict Credo analysis part of the required CI quality job.
 
 ### Fixed
 
@@ -56,6 +58,7 @@ All notable changes to Spectre Mnemonic are documented in this file.
   public API manifest and complete release documentation.
 - Added no runtime functionality and made no intentional breaking API change.
 
-[Unreleased]: https://github.com/elchemista/spectre_mnemonic/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/elchemista/spectre_mnemonic/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.6...v0.2.0
 [0.1.6]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.5...v0.1.6
