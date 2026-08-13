@@ -937,7 +937,7 @@ For development:
 
 ```bash
 mix format
-mix credo --strict
+mix credo
 mix dialyzer
 mix test
 ```
