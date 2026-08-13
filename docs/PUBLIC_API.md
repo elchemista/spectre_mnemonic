@@ -1,8 +1,8 @@
-# Spectre Mnemonic public API — 0.2.0
+# Spectre Mnemonic public API — 0.3.0
 
-This file is the normative public API manifest for Spectre Mnemonic `0.2.0`.
+This file is the normative public API manifest for Spectre Mnemonic `0.3.0`.
 It retains the recoverable `0.1.6` surface while aligning the package and Stack
-contracts with Spectre `0.2.0`. Compatibility guarantees apply only to the
+contracts with Spectre `0.3.0` from Hex. Compatibility guarantees apply only to the
 modules and callables listed below. Any module, function, macro, or callback
 not listed here is an implementation detail even when it is exported or
 visible in generated docs.

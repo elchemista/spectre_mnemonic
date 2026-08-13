@@ -59,7 +59,7 @@ jobs:
         run: mix test
 
       - name: Run Credo
-        run: mix credo
+        run: mix credo --strict
 
   dialyzer:
     name: Dialyzer
