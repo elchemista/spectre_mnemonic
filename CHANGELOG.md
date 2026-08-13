@@ -11,7 +11,7 @@ All notable changes to Spectre Mnemonic are documented in this file.
 - Retained GitHub-only distribution with no Hex package metadata.
 - Replaced the GitHub Spectre dependency with the published Hex package at
   `~> 0.3.0`.
-- Made strict Credo analysis part of the required CI quality job.
+- Made default Credo analysis part of the required CI quality job.
 
 ### Fixed
 
