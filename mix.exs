@@ -46,7 +46,7 @@ defmodule SpectreMnemonic.MixProject do
   @spec deps :: [{atom(), binary()} | {atom(), binary(), keyword()}]
   defp deps do
     [
-      {:spectre, "~> 0.3.0"},
+      spectre_dep(),
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
@@ -55,5 +55,15 @@ defmodule SpectreMnemonic.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
+  end
+
+  defp spectre_dep do
+    case System.get_env("SPECTRE_PATH") do
+      path when is_binary(path) and path != "" ->
+        {:spectre, path: Path.expand(path, __DIR__), override: true}
+
+      _unset ->
+        {:spectre, "~> 0.3.0"}
+    end
   end
 end
