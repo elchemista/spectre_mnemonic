@@ -11,23 +11,8 @@ beside your framework: record what happened, recall nearby context, promote
 important moments, track stale or contradicted facts, and keep compact knowledge
 available without hydrating every old event.
 
-The exact `0.3.0` compatibility surface is published in the
+The supported surface is documented in the
 [public API manifest](docs/PUBLIC_API.md).
-
-## 0.3.0 Spectre Compatibility
-
-Version `0.3.0` aligns Mnemonic's package, memory adapter, and Stack contracts
-with Spectre `~> 0.3.0`. Recall and remember remain external memory services;
-the core retains canonical Agent, Run, Work, Vigil, and checkpoint ownership.
-
-## 0.1.6 Recoverable Baseline
-
-Version `0.1.6` is a consolidation-only release with no new runtime feature and
-no intentional breaking change. Elixir 1.19 on Erlang/OTP 28 is the initially
-guaranteed pair. Uniform CI runs format, warnings-as-errors compilation, tests,
-non-strict Credo, Dialyzer, and ExDoc. The changelog,
-license, and explicit API manifest complete the release boundary before
-`0.2.0` development begins.
 
 ```elixir
 {:ok, memory} =
@@ -75,7 +60,7 @@ Add the dependency:
 def deps do
   [
     {:spectre, "~> 0.3.0"},
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", tag: "v0.3.0"}
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"}
   ]
 end
 ```
@@ -83,8 +68,8 @@ end
 Spectre Mnemonic is distributed exclusively from GitHub; there is no Hex
 package.
 
-Version 0.3.0 can also publish Mnemonic configuration through an immutable
-Spectre Stack definition:
+Mnemonic configuration can also be published through an immutable Spectre
+Stack definition:
 
 ```elixir
 defmodule MyApp.AI do
@@ -113,7 +98,7 @@ agent/subject/conversation/flow/task isolation. It also emits privacy-safe
 Journal outcomes containing isolation dimension names, never memory content or
 subject values. A second `use Spectre.Mnemonic` is not required.
 
-When `isolate_by` includes `:subject`, version 0.3.0 requires the explicit
+When `isolate_by` includes `:subject`, the integration requires the explicit
 canonical `%Spectre.Subject{}` supplied by an Agent Instance:
 
 ```elixir
