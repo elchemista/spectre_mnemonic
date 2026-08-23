@@ -63,7 +63,7 @@ defmodule SpectreMnemonic.MixProject do
         {:spectre, path: Path.expand(path, __DIR__), override: true}
 
       _unset ->
-        {:spectre, "~> 0.3.0"}
+        {:spectre, "~> 0.3.3"}
     end
   end
 end

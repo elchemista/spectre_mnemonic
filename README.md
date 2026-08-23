@@ -59,7 +59,7 @@ Add the dependency:
 ```elixir
 def deps do
   [
-    {:spectre, "~> 0.3.0"},
+    {:spectre, "~> 0.3.3"},
     {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"}
   ]
 end

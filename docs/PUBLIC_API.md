@@ -1,7 +1,7 @@
 # Spectre Mnemonic public API — 0.1.0
 
 This file is the normative public API manifest for Spectre Mnemonic `0.1.0`.
-Its package and Stack contracts target Spectre `0.3.0` from Hex.
+Its package and Stack contracts target Spectre `0.3.3` from Hex.
 Compatibility guarantees apply only to the
 modules and callables listed below. Any module, function, macro, or callback
 not listed here is an implementation detail even when it is exported or
