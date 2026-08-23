@@ -40,7 +40,7 @@ defmodule SpectreMnemonic.StackInstallableTest do
     assert package.id == :mnemonic
     assert package.version == "0.1.0"
     assert package.contract == 1
-    assert package.spectre == "~> 0.3.0"
+    assert package.spectre == "~> 0.3.3"
     assert package.provides == [{:service, :memory}]
     assert package.operations == []
     assert package.actions == []

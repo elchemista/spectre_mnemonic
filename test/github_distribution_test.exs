@@ -12,7 +12,7 @@ defmodule SpectreMnemonic.GitHubDistributionTest do
         assert opts[:override]
 
       _unset ->
-        assert {:spectre, "~> 0.3.0"} = dependency
+        assert {:spectre, "~> 0.3.3"} = dependency
     end
 
     refute Keyword.has_key?(config, :package)
