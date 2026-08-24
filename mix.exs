@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.4.0"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -20,7 +20,13 @@ defmodule SpectreMnemonic.MixProject do
       docs: [
         main: "readme",
         source_ref: "v#{@version}",
-        extras: ["README.md", "docs/PUBLIC_API.md", "CHANGELOG.md", "LICENSE"]
+        extras: [
+          "README.md",
+          "docs/PUBLIC_API.md",
+          "docs/MNEMONIC_FORMAT.md",
+          "CHANGELOG.md",
+          "LICENSE"
+        ]
       ],
       source_url: @source_url,
       homepage_url: @source_url
@@ -47,10 +53,10 @@ defmodule SpectreMnemonic.MixProject do
   defp deps do
     [
       spectre_dep(),
+      {:vettore, "~> 0.3.3"},
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
-      {:hnswlib, "~> 0.1", optional: true},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}

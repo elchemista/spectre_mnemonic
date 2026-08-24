@@ -10,11 +10,13 @@ defmodule SpectreMnemonic.Active.Focus do
   use GenServer
 
   alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.ActionRecipe
   alias SpectreMnemonic.Memory.Artifact
   alias SpectreMnemonic.Memory.Association
+  alias SpectreMnemonic.Memory.Episode
   alias SpectreMnemonic.Memory.Moment
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Secret
@@ -114,17 +116,59 @@ defmodule SpectreMnemonic.Active.Focus do
   @doc "Returns all active moments. Recall and consolidation use this read path."
   @spec moments(keyword()) :: [Moment.t() | Secret.t()]
   def moments(opts \\ []) do
-    :ets.tab2list(:mnemonic_moments)
-    |> Enum.map(fn {_id, moment} -> moment end)
-    |> Enum.filter(&Scope.match?(&1, opts))
+    namespace = Identity.namespace!(opts)
+
+    :mnemonic_moments_by_scope
+    |> indexed_ids({namespace, Scope.from_opts(opts)})
+    |> moments_by_ids(opts)
   end
 
   @doc "Returns all active associations."
   @spec associations(keyword()) :: [Association.t()]
   def associations(opts \\ []) do
-    :ets.tab2list(:mnemonic_associations)
-    |> Enum.map(fn {_id, association} -> association end)
+    namespace = Identity.namespace!(opts)
+
+    :mnemonic_associations_by_scope
+    |> indexed_ids({namespace, Scope.from_opts(opts)})
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup_association/1)
     |> Enum.filter(&Scope.match?(&1, opts))
+  end
+
+  @doc false
+  @spec episodes(keyword()) :: [Episode.t()]
+  def episodes(opts \\ []) do
+    namespace = Identity.namespace!(opts)
+
+    :mnemonic_episodes_by_scope
+    |> indexed_ids({namespace, Scope.from_opts(opts)})
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup_episode/1)
+    |> Enum.filter(&Scope.match?(&1, opts))
+  end
+
+  @doc false
+  @spec upsert_association(Association.t()) :: :ok
+  def upsert_association(%Association{} = association) do
+    insert_association(association)
+    :ok
+  end
+
+  @doc false
+  @spec put_episode(Episode.t()) :: :ok
+  def put_episode(%Episode{} = episode) do
+    partition = Scope.partition(episode)
+    :ets.insert(:mnemonic_episodes, {episode.id, episode})
+    :ets.insert(:mnemonic_episodes_by_scope, {partition, episode.id})
+    :ok
+  end
+
+  @doc false
+  @spec purge_partition(keyword()) :: {:ok, map()} | {:error, term()}
+  def purge_partition(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:purge_partition, opts})
+    end
   end
 
   @doc false
@@ -240,9 +284,15 @@ defmodule SpectreMnemonic.Active.Focus do
     {:reply, result, state}
   end
 
+  def handle_call({:purge_partition, opts}, _from, state) do
+    result = safe_focus_call(fn -> do_purge_partition(opts) end)
+    {:reply, result, state}
+  end
+
   @spec record_signal_checked(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
   defp record_signal_checked(input, opts) do
-    with :ok <- validate_signal_options(opts) do
+    with :ok <- Erasure.ensure_writable(opts),
+         :ok <- validate_signal_options(opts) do
       if Keyword.get(opts, :secret?, false),
         do: record_secret_signal(input, opts),
         else: record_plain_signal(input, opts)
@@ -367,6 +417,9 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec lookup_action_recipe(binary()) :: [ActionRecipe.t()]
   defp lookup_action_recipe(id), do: lookup_one(:mnemonic_action_recipes, id)
+
+  @spec lookup_episode(binary()) :: [Episode.t()]
+  defp lookup_episode(id), do: lookup_one(:mnemonic_episodes, id)
 
   @spec lookup_one(atom(), term()) :: [term()]
   defp lookup_one(table, id) do
@@ -717,14 +770,17 @@ defmodule SpectreMnemonic.Active.Focus do
     end
 
     :ets.insert(:mnemonic_moments_by_scope, {partition, moment.id})
+    :ets.insert(:mnemonic_moments_by_namespace, {moment.namespace, moment.id})
 
     :ets.insert(:mnemonic_moments_by_signal, {moment.signal_id, moment.id})
+    :ets.insert(:mnemonic_atlas_dirty, {partition, moment.id})
   end
 
   @spec insert_association(Association.t()) :: true
   defp insert_association(association) do
     partition = Scope.partition(association)
     :ets.insert(:mnemonic_associations, {association.id, association})
+    :ets.insert(:mnemonic_associations_by_scope, {partition, association.id})
 
     :ets.insert(
       :mnemonic_associations_by_memory,
@@ -735,6 +791,9 @@ defmodule SpectreMnemonic.Active.Focus do
       :mnemonic_associations_by_memory,
       {{partition, association.target_id}, association.id}
     )
+
+    :ets.insert(:mnemonic_atlas_dirty, {partition, association.source_id})
+    :ets.insert(:mnemonic_atlas_dirty, {partition, association.target_id})
   end
 
   @spec forget_moments([binary()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
@@ -919,6 +978,7 @@ defmodule SpectreMnemonic.Active.Focus do
   defp delete_association(association) do
     partition = Scope.partition(association)
     :ets.delete(:mnemonic_associations, association.id)
+    :ets.delete_object(:mnemonic_associations_by_scope, {partition, association.id})
 
     :ets.delete_object(
       :mnemonic_associations_by_memory,
@@ -941,6 +1001,7 @@ defmodule SpectreMnemonic.Active.Focus do
     end
 
     :ets.delete_object(:mnemonic_moments_by_scope, {partition, moment.id})
+    :ets.delete_object(:mnemonic_moments_by_namespace, {moment.namespace, moment.id})
 
     :ets.delete(:mnemonic_moments_by_signal, moment.signal_id)
   end
@@ -1061,10 +1122,10 @@ defmodule SpectreMnemonic.Active.Focus do
 
     namespace = Identity.namespace(moment)
 
-    :mnemonic_moments
-    |> :ets.tab2list()
-    |> Enum.map(fn {_id, candidate} -> candidate end)
-    |> Enum.filter(&(Identity.namespace(&1) == namespace))
+    :mnemonic_moments_by_namespace
+    |> indexed_ids(namespace)
+    |> Enum.uniq()
+    |> Enum.flat_map(&lookup_moment/1)
     |> evict_excess(per_namespace)
 
     :ok
@@ -1111,6 +1172,67 @@ defmodule SpectreMnemonic.Active.Focus do
     refresh_status(moment)
     Index.delete(moment.id)
     :ok
+  end
+
+  @spec do_purge_partition(keyword()) :: {:ok, map()}
+  defp do_purge_partition(opts) do
+    namespace = Identity.namespace!(opts)
+    partition = {namespace, Scope.from_opts(opts)}
+    moments = moments(opts)
+    associations = associations(opts)
+    episodes = episodes(opts)
+
+    Enum.each(associations, &delete_association/1)
+    Enum.each(moments, &evict_hot_moment/1)
+
+    Enum.each(episodes, fn episode ->
+      :ets.delete(:mnemonic_episodes, episode.id)
+      :ets.delete_object(:mnemonic_episodes_by_scope, {partition, episode.id})
+    end)
+
+    direct_tables = [
+      :mnemonic_signals,
+      :mnemonic_artifacts,
+      :mnemonic_action_recipes,
+      :mnemonic_observations,
+      :mnemonic_mental_models,
+      :mnemonic_governance_states,
+      :mnemonic_governance_facts
+    ]
+
+    direct_removed =
+      Enum.reduce(direct_tables, 0, fn table, count ->
+        count + delete_partition_rows(table, partition)
+      end)
+
+    :ets.match_delete(:mnemonic_status, {{partition, :_}, :_})
+    :ets.match_delete(:mnemonic_entity_registry, {{partition, :_}, :_})
+    :ets.match_delete(:mnemonic_atlas_dirty, {partition, :_})
+
+    {:ok,
+     %{
+       moments: length(moments),
+       associations: length(associations),
+       episodes: length(episodes),
+       other: direct_removed
+     }}
+  end
+
+  @spec delete_partition_rows(atom(), tuple()) :: non_neg_integer()
+  defp delete_partition_rows(table, partition) do
+    table
+    |> :ets.tab2list()
+    |> Enum.count(&delete_partition_row(&1, table, partition))
+  end
+
+  @spec delete_partition_row({term(), term()}, atom(), tuple()) :: boolean()
+  defp delete_partition_row({id, value}, table, partition) do
+    if Scope.partition(value) == partition do
+      :ets.delete(table, id)
+      true
+    else
+      false
+    end
   end
 
   @spec refresh_status(Moment.t() | Secret.t()) :: :ok

@@ -16,6 +16,7 @@ defmodule SpectreMnemonic.Recall.Packet do
           artifacts: [SpectreMnemonic.Memory.Artifact.t()],
           associations: [SpectreMnemonic.Memory.Association.t()],
           action_recipes: [SpectreMnemonic.Memory.ActionRecipe.t()],
+          trace: %{optional(binary()) => map()} | nil,
           confidence: float(),
           usage: map()
         }
@@ -33,6 +34,7 @@ defmodule SpectreMnemonic.Recall.Packet do
     artifacts: [],
     associations: [],
     action_recipes: [],
+    trace: nil,
     confidence: 0.0,
     usage: %{}
   ]

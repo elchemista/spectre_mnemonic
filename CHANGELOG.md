@@ -4,6 +4,42 @@ All notable changes to Spectre Mnemonic are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-24
+
+### Added
+
+- Added partition-local canonical entity resolution, weighted typed spreading
+  activation, recall traces, append-only edge reinforcement, and scheduled
+  decay.
+- Added deterministic Atlas projections and persisted Episode clusters with
+  stable membership edges, incremental dirty-component clustering, optional
+  label adapters, layout hints, graph statistics, and hard caps.
+- Added durable-first `erase_partition/1`, retention sweeps, optional
+  crypto-shredding, anti-resurrection markers, knowledge-log rewriting, and
+  erase-mode compaction that retains no previous snapshots or rotated segments.
+- Added the canonical JSON, CRC32- and SHA-256-verified `.mnemonic` v1 export
+  container with structure, full, and caller-redacted privacy modes, chunked
+  bounded frames, a lazy verified reader, and a versioned JSON Schema.
+- Added caller-provided embeddings on `signal/2` and `remember/2`, plus
+  partition-local Vettore collections for hybrid HNSW, quantized, and exact
+  semantic recall.
+
+### Changed
+
+- Replaced graph BFS with hub-damped weighted activation and made entity intake
+  reuse the existing canonical node within a partition.
+- Made hot association and namespace-bound reads use partition indexes instead
+  of scanning global ETS tables.
+- Made semantic similarity contribute to intake graph links even when two
+  memories share no useful vocabulary.
+
+### Security
+
+- Secret plaintext and ciphertext are excluded from every export mode by
+  construction; structure exports contain topology and approved labels only.
+- Export readers decode JSON only and reject mixed partitions, corrupt frames,
+  digest mismatches, oversized frames, and unsupported format versions.
+
 ## [0.3.0] - 2026-08-13
 
 ### Changed
@@ -58,7 +94,8 @@ All notable changes to Spectre Mnemonic are documented in this file.
   public API manifest and complete release documentation.
 - Added no runtime functionality and made no intentional breaking API change.
 
-[Unreleased]: https://github.com/elchemista/spectre_mnemonic/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/elchemista/spectre_mnemonic/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.6...v0.2.0
 [0.1.6]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.5...v0.1.6

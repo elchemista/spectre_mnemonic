@@ -14,6 +14,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @header_bytes byte_size(@magic) + 1 + 8 + 8 + 4 + 4
   @max_text_graphemes 2_000
 
+  alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.Store.FileFrame
@@ -54,6 +55,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
   def append(event, opts \\ []) when is_map(event) do
     with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_context(event, opts) do
       call_writer({:append, event, opts})
     end
@@ -63,6 +65,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec append_many([event()], keyword()) :: {:ok, [pos_integer()]} | {:error, term()}
   def append_many(events, opts \\ []) when is_list(events) do
     with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_contexts(events, opts) do
       call_writer({:append_many, events, opts})
     end
@@ -73,9 +76,65 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   def replay(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          {:ok, events} <- opts |> data_root() |> active_path() |> replay_path() do
-      {:ok, Enum.filter(events, &Scope.match?(&1, opts))}
+      visible =
+        events
+        |> Enum.filter(&Scope.match?(&1, opts))
+        |> apply_erasure_marker()
+        |> apply_durable_erasure_marker(opts)
+
+      {:ok, visible}
     end
   end
+
+  @spec apply_erasure_marker([event()]) :: [event()]
+  defp apply_erasure_marker(events) do
+    marker =
+      events
+      |> Enum.filter(&erasure_marker?/1)
+      |> Enum.max_by(&event_timestamp/1, fn -> nil end)
+
+    case marker do
+      nil ->
+        events
+
+      marker ->
+        marker_time = event_timestamp(marker)
+        Enum.reject(events, &(erasure_marker?(&1) or event_timestamp(&1) <= marker_time))
+    end
+  end
+
+  @spec erasure_marker?(event()) :: boolean()
+  defp erasure_marker?(event) do
+    metadata = Map.get(event, :metadata, %{})
+    Map.get(event, :type) == :compaction_marker and Map.get(metadata, :erasure?, false)
+  end
+
+  @spec event_timestamp(event()) :: integer()
+  defp event_timestamp(%{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp event_timestamp(_event), do: 0
+
+  @spec apply_durable_erasure_marker([event()], keyword()) :: [event()]
+  defp apply_durable_erasure_marker(events, opts) do
+    case Erasure.marker(opts) do
+      marker when is_map(marker) ->
+        cutoff = marker |> map_value(:erased_at) |> datetime_timestamp()
+        Enum.filter(events, &(event_timestamp(&1) > cutoff))
+
+      _missing ->
+        events
+    end
+  end
+
+  @spec datetime_timestamp(term()) :: integer()
+  defp datetime_timestamp(%DateTime{} = datetime),
+    do: DateTime.to_unix(datetime, :microsecond)
+
+  defp datetime_timestamp(_datetime), do: 0
+
+  @spec map_value(map(), atom()) :: term()
+  defp map_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
   @doc "Reduces complete framed events from `knowledge.smem` without loading the whole file."
   @spec reduce(keyword(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
@@ -88,6 +147,26 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     end
   end
 
+  @doc false
+  @spec verify_erased(keyword()) :: :ok | {:error, term()}
+  def verify_erased(opts) do
+    case reduce(opts, [], &collect_knowledge_survivor/2) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, survivors} ->
+        {:error, {:knowledge_erasure_bytes_survived, Enum.map(survivors, & &1.id)}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @spec collect_knowledge_survivor(tuple(), [event()]) :: {:cont, [event()]}
+  defp collect_knowledge_survivor({_sequence, _timestamp, event}, acc) do
+    if erasure_marker?(event), do: {:cont, acc}, else: {:cont, [event | acc]}
+  end
+
   @spec reduce_scoped_frame(tuple(), term(), keyword(), function()) ::
           {:cont, term()} | {:halt, term()}
   defp reduce_scoped_frame({_seq, _timestamp, event} = frame, acc, opts, fun) do
@@ -98,6 +177,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec replace([event()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def replace(events, opts \\ []) when is_list(events) do
     with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_contexts(events, opts) do
       call_writer({:replace, events, opts})
     end

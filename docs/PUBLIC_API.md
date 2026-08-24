@@ -1,6 +1,6 @@
-# Spectre Mnemonic public API — 0.1.0
+# Spectre Mnemonic public API — 0.4.0
 
-This file is the normative public API manifest for Spectre Mnemonic `0.1.0`.
+This file is the normative public API manifest for Spectre Mnemonic `0.4.0`.
 Its package and Stack contracts target Spectre `0.3.3` from Hex.
 Compatibility guarantees apply only to the
 modules and callables listed below. Any module, function, macro, or callback
@@ -19,7 +19,14 @@ type, and struct contract.
 - `Spectre.Mnemonic.Memory`
   - functions: `options/1`, `options/2`, `remember/4`
 - `SpectreMnemonic`
-  - functions: `artifact/1`, `artifact/2`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `forget/1`, `forget/2`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `verify_observation/1`, `verify_observation/2`
+  - functions: `artifact/1`, `artifact/2`, `atlas/0`, `atlas/1`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `erase_partition/1`, `export/1`, `export/2`, `forget/1`, `forget/2`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `merge_entities/2`, `merge_entities/3`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `sweep_expired/0`, `sweep_expired/1`, `verify_observation/1`, `verify_observation/2`
+- `SpectreMnemonic.Atlas`
+  - functions: `build/0`, `build/1`
+- `SpectreMnemonic.Atlas.LabelAdapter`
+  - callbacks: `label/2`
+- `SpectreMnemonic.Erasure.Report`
+- `SpectreMnemonic.Export`
+  - functions: `read/1`, `read/2`, `stream/1`, `stream/2`
 - `SpectreMnemonic.Actions.Runtime`
   - functions: `analyze/1`, `analyze/2`, `run/2`, `run/3`
 - `SpectreMnemonic.Actions.Runtime.Adapter`
@@ -136,9 +143,9 @@ type, and struct contract.
 - `SpectreMnemonic.SearchResult`
   - functions: `key/1`, `new/1`, `new/2`
 - `SpectreMnemonic.Secrets`
-  - functions: `encrypt/3`, `maybe_reveal/2`, `reveal/2`, `reveal_instruction/0`
+  - functions: `encrypt/3`, `maybe_reveal/2`, `reveal/2`, `reveal_instruction/0`, `shred/1`, `shred/2`
 - `SpectreMnemonic.Secrets.Authorization.Adapter`
   - callbacks: `authorize/2`
 - `SpectreMnemonic.Secrets.Crypto.AESGCM`
 - `SpectreMnemonic.Secrets.Crypto.Adapter`
-  - callbacks: `decrypt/3`, `encrypt/3`
+  - callbacks: `decrypt/3`, `encrypt/3`, `shred/2` (optional)

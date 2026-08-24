@@ -3,26 +3,21 @@ defmodule SpectreMnemonic.Recall.Index do
   Active-memory embedding index.
 
   The index keeps a small ETS mirror of dense vectors and packed binary
-  signatures. When `hnswlib` is available and enabled, it is used for dense ANN
-  candidate retrieval; the ETS mirror remains the deterministic brute-force
-  fallback and the source for binary Hamming reranking.
+  signatures. Vettore provides the partition-local dense ANN path. The ETS
+  mirror remains the deterministic brute-force fallback and the source for
+  binary Hamming reranking.
   """
 
   use GenServer
 
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
 
   @index_table :mnemonic_embedding_index
-  @label_table :mnemonic_embedding_labels
-  @hnsw_index Module.concat(HNSWLib, Index)
-  @compile {:no_warn_undefined, @hnsw_index}
 
   @type state :: %{
-          next_label: pos_integer(),
-          hnsw: term(),
-          hnsw_dim: pos_integer() | nil,
-          hnsw_max: pos_integer() | nil
+          vettore: %{optional(tuple()) => map()}
         }
 
   @doc "Starts the index process."
@@ -59,9 +54,8 @@ defmodule SpectreMnemonic.Recall.Index do
   @spec init(keyword()) :: {:ok, state()}
   def init(_opts) do
     ensure_table(@index_table)
-    ensure_table(@label_table)
 
-    {:ok, %{next_label: 1, hnsw: nil, hnsw_dim: nil, hnsw_max: nil}}
+    {:ok, %{vettore: %{}}}
   end
 
   @impl GenServer
@@ -71,12 +65,8 @@ defmodule SpectreMnemonic.Recall.Index do
     # memory; this process just keeps vector shortcuts warm.
     case indexable(moment) do
       {:ok, entry} ->
-        label = existing_label(moment.id) || state.next_label
-        :ets.insert(@index_table, {moment.id, Map.put(entry, :label, label)})
-        :ets.insert(@label_table, {label, moment.id})
-
-        state =
-          maybe_add_hnsw(%{state | next_label: max(state.next_label, label + 1)}, entry, label)
+        :ets.insert(@index_table, {moment.id, entry})
+        state = maybe_upsert_vettore(state, moment.id, entry)
 
         {:reply, :ok, state}
 
@@ -86,15 +76,7 @@ defmodule SpectreMnemonic.Recall.Index do
   end
 
   def handle_call({:delete, moment_id}, _from, state) do
-    case :ets.lookup(@index_table, moment_id) do
-      [{^moment_id, %{label: label}}] ->
-        maybe_mark_deleted(state.hnsw, label)
-        :ets.delete(@label_table, label)
-
-      _missing ->
-        :ok
-    end
-
+    state = maybe_delete_vettore(state, moment_id)
     :ets.delete(@index_table, moment_id)
     {:reply, :ok, state}
   end
@@ -103,25 +85,231 @@ defmodule SpectreMnemonic.Recall.Index do
     limit = query_limit(opts)
 
     results =
-      (query_hnsw_scoped(state, cue, limit, opts) || brute_force(cue, limit, opts))
+      (query_vettore_scoped(state, cue, limit, opts) || brute_force(cue, limit, opts))
       |> Enum.take(limit)
 
     {:reply, {:ok, results}, state}
   end
 
   def handle_call(:reset, _from, state) do
+    close_vettore_collections(state)
     :ets.delete_all_objects(@index_table)
-    :ets.delete_all_objects(@label_table)
-    {:reply, :ok, %{state | hnsw: nil, hnsw_dim: nil, hnsw_max: nil, next_label: 1}}
+
+    {:reply, :ok, %{state | vettore: %{}}}
+  end
+
+  @impl GenServer
+  def terminate(_reason, state) do
+    close_vettore_collections(state)
+    :ok
+  end
+
+  @spec maybe_upsert_vettore(state(), binary(), map()) :: state()
+  defp maybe_upsert_vettore(state, moment_id, entry) do
+    if vettore_enabled?() and vettore_available?() do
+      upsert_vettore(state, moment_id, entry)
+    else
+      state
+    end
+  rescue
+    _exception -> state
+  catch
+    _kind, _reason -> state
+  end
+
+  @spec upsert_vettore(state(), binary(), map()) :: state()
+  defp upsert_vettore(state, moment_id, entry) do
+    partition = {entry.namespace, entry.scope}
+
+    case ensure_vettore_collection(state, partition, entry.dimensions) do
+      {:ok, state, indexed} ->
+        replace_vettore_embedding(state, indexed, partition, moment_id, entry)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  @spec ensure_vettore_collection(state(), tuple(), pos_integer()) ::
+          {:ok, state(), map()} | {:error, term()}
+  defp ensure_vettore_collection(state, partition, dimensions) do
+    case Map.get(state.vettore, partition) do
+      %{dimensions: ^dimensions} = indexed ->
+        {:ok, state, indexed}
+
+      %{dimensions: _other} ->
+        {:error, :dimension_mismatch}
+
+      nil ->
+        new_vettore_collection(state, partition, dimensions)
+    end
+  end
+
+  @spec new_vettore_collection(state(), tuple(), pos_integer()) ::
+          {:ok, state(), map()} | {:error, term()}
+  defp new_vettore_collection(state, partition, dimensions) do
+    config = index_config()
+
+    opts = [
+      name: vettore_collection_name(partition),
+      dimensions: dimensions,
+      metric: :cosine,
+      normalize: :l2,
+      index: Map.get(config, :vettore_index, :hnsw),
+      index_options: vettore_index_options(config)
+    ]
+
+    case Vettore.new(opts) do
+      {:ok, collection} ->
+        indexed = %{collection: collection, dimensions: dimensions, count: 0}
+        state = put_in(state, [:vettore, partition], indexed)
+        {:ok, state, indexed}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec replace_vettore_embedding(state(), map(), tuple(), binary(), map()) :: state()
+  defp replace_vettore_embedding(state, indexed, partition, moment_id, entry) do
+    existing? = match?({:ok, _embedding}, Vettore.get(indexed.collection, moment_id))
+    if existing?, do: Vettore.delete(indexed.collection, moment_id)
+
+    embedding = %{
+      id: moment_id,
+      value: moment_id,
+      vector: Vector.to_list(entry.vector),
+      metadata: %{namespace: entry.namespace, scope: entry.scope}
+    }
+
+    case Vettore.put(indexed.collection, embedding) do
+      :ok ->
+        count = if existing?, do: indexed.count, else: indexed.count + 1
+        put_in(state, [:vettore, partition], %{indexed | count: count})
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  @spec maybe_delete_vettore(state(), binary()) :: state()
+  defp maybe_delete_vettore(state, moment_id) do
+    case :ets.lookup(@index_table, moment_id) do
+      [{^moment_id, entry}] -> delete_vettore_entry(state, moment_id, entry)
+      _missing -> state
+    end
+  end
+
+  @spec delete_vettore_entry(state(), binary(), map()) :: state()
+  defp delete_vettore_entry(state, moment_id, entry) do
+    partition = {entry.namespace, entry.scope}
+
+    case Map.get(state.vettore, partition) do
+      nil ->
+        state
+
+      indexed ->
+        _result = Vettore.delete(indexed.collection, moment_id)
+        put_in(state, [:vettore, partition], %{indexed | count: max(indexed.count - 1, 0)})
+    end
+  rescue
+    _exception -> state
+  end
+
+  @spec query_vettore_scoped(state(), map(), non_neg_integer(), keyword()) :: [map()] | nil
+  defp query_vettore_scoped(_state, %{vector: nil}, _limit, _opts), do: nil
+  defp query_vettore_scoped(_state, _cue, limit, _opts) when limit <= 0, do: []
+
+  defp query_vettore_scoped(state, cue, limit, opts) do
+    partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
+
+    with true <- vettore_enabled?(),
+         %{count: count} = indexed when count > 0 <- Map.get(state.vettore, partition),
+         query when query != [] <- Vector.to_list(cue.vector),
+         {:ok, results} <- search_vettore(indexed, query, min(limit, count)) do
+      results
+      |> Enum.flat_map(&vettore_result(&1, cue))
+      |> Enum.sort_by(&entry_rank_key/1)
+    else
+      _fallback -> nil
+    end
+  rescue
+    _exception -> nil
+  catch
+    _kind, _reason -> nil
+  end
+
+  @spec search_vettore(map(), [float()], pos_integer()) ::
+          {:ok, [Vettore.Result.t()]} | {:error, term()}
+  defp search_vettore(indexed, query, limit) do
+    case Map.get(index_config(), :strategy, :hybrid) do
+      :hybrid ->
+        case Vettore.hybrid_search(indexed.collection, query, limit: limit, rerank: :exact) do
+          {:ok, _results} = ok -> ok
+          {:error, _reason} -> Vettore.search(indexed.collection, query, limit: limit)
+        end
+
+      :quantized ->
+        Vettore.quantized_search(indexed.collection, query,
+          candidates: max(limit * 4, limit),
+          limit: limit
+        )
+
+      _exact_or_ann ->
+        Vettore.search(indexed.collection, query, limit: limit)
+    end
+  end
+
+  @spec vettore_result(Vettore.Result.t(), map()) :: [map()]
+  defp vettore_result(%Vettore.Result{id: moment_id}, cue) do
+    case :ets.lookup(@index_table, moment_id) do
+      [{^moment_id, entry}] ->
+        [score_entry(moment_id, entry, cue.vector, Map.get(cue, :binary_signature))]
+
+      _missing ->
+        []
+    end
+  end
+
+  @spec close_vettore_collections(state()) :: :ok
+  defp close_vettore_collections(state) do
+    state.vettore
+    |> Map.values()
+    |> Enum.each(fn indexed -> Vettore.close(indexed.collection) end)
+
+    :ok
+  rescue
+    _exception -> :ok
+  end
+
+  @spec vettore_enabled? :: boolean()
+  defp vettore_enabled? do
+    config = index_config()
+    Map.get(config, :enabled, true) and Map.get(config, :backend, :vettore) == :vettore
+  end
+
+  @spec vettore_available? :: boolean()
+  defp vettore_available?, do: Code.ensure_loaded?(Vettore)
+
+  @spec vettore_collection_name(tuple()) :: binary()
+  defp vettore_collection_name(partition) do
+    digest = :crypto.hash(:sha256, :erlang.term_to_binary(partition, [:deterministic]))
+    "mnemonic_" <> (digest |> Base.encode16(case: :lower) |> binary_part(0, 24))
+  end
+
+  @spec vettore_index_options(map()) :: keyword()
+  defp vettore_index_options(config) do
+    case Map.get(config, :vettore_index_options, []) do
+      opts when is_list(opts) -> opts
+      _invalid -> []
+    end
   end
 
   @spec brute_force(map(), non_neg_integer(), keyword()) :: [map()]
   defp brute_force(%{vector: nil}, _limit, _opts), do: []
-  defp brute_force(_cue, limit, _opts) when limit <= 0, do: []
 
   defp brute_force(cue, limit, opts) do
-    # HNSW is nice when available. Brute force is the fallback with work boots.
-    # Small hot sets can survive without a fancy neighbor oracle.
+    # Small hot sets can survive without an approximate neighbor oracle.
     cue_vector = Map.get(cue, :vector)
     cue_signature = Map.get(cue, :binary_signature)
 
@@ -150,55 +338,6 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec entry_rank_key(map()) :: {number(), non_neg_integer() | :infinity, binary()}
   defp entry_rank_key(entry), do: {-entry.score, entry.hamming_distance, entry.id}
-
-  @spec query_hnsw_scoped(state(), map(), non_neg_integer(), keyword()) :: [map()] | nil
-  defp query_hnsw_scoped(%{hnsw: nil}, _cue, _limit, _opts), do: nil
-  defp query_hnsw_scoped(_state, %{vector: nil}, _limit, _opts), do: nil
-  defp query_hnsw_scoped(_state, _cue, limit, _opts) when limit <= 0, do: []
-
-  defp query_hnsw_scoped(state, cue, limit, opts) do
-    total = indexed_count()
-    initial = min(total, max(limit, limit * 4))
-
-    if initial > 0, do: query_hnsw_scoped(state, cue, limit, opts, initial, total)
-  rescue
-    _exception -> nil
-  end
-
-  @spec query_hnsw_scoped(state(), map(), pos_integer(), keyword(), pos_integer(), pos_integer()) ::
-          [map()] | nil
-  defp query_hnsw_scoped(state, cue, limit, opts, k, total) do
-    case query_hnsw_neighbors(state, cue, k) do
-      nil ->
-        nil
-
-      results ->
-        scoped = Enum.filter(results, &Scope.match?(&1, opts))
-
-        if length(scoped) >= limit or k >= total do
-          scoped
-        else
-          query_hnsw_scoped(state, cue, limit, opts, min(total, k * 2), total)
-        end
-    end
-  end
-
-  @spec query_hnsw_neighbors(state(), map(), pos_integer()) :: [map()] | nil
-  defp query_hnsw_neighbors(state, cue, k) do
-    case hnsw_knn_query(state.hnsw, cue.vector, k) do
-      {:ok, labels, _distances} ->
-        labels
-        |> Nx.to_flat_list()
-        |> Enum.flat_map(&entry_for_label/1)
-        |> Enum.map(fn {moment_id, entry} ->
-          score_entry(moment_id, entry, cue.vector, cue.binary_signature)
-        end)
-        |> Enum.sort_by(&{-&1.score, &1.hamming_distance, &1.id})
-
-      {:error, _reason} ->
-        nil
-    end
-  end
 
   @spec score_entry(binary(), map(), binary() | nil, binary() | nil) :: map()
   defp score_entry(moment_id, entry, cue_vector, cue_signature) do
@@ -248,137 +387,12 @@ defmodule SpectreMnemonic.Recall.Index do
   defp embedding_metadata(%{metadata: metadata}) when is_map(metadata), do: metadata
   defp embedding_metadata(_embedding), do: %{}
 
-  @spec existing_label(binary()) :: pos_integer() | nil
-  defp existing_label(moment_id) do
-    case :ets.lookup(@index_table, moment_id) do
-      [{^moment_id, %{label: label}}] -> label
-      _missing -> nil
-    end
-  end
-
-  @spec maybe_add_hnsw(state(), map(), pos_integer()) :: state()
-  defp maybe_add_hnsw(state, entry, label) do
-    # ANN setup is best-effort. If dimensions disagree or the NIF sulks, ETS
-    # still has every vector. Nobody gets to break recall because an index sneezed.
-    with true <- hnsw_enabled?(),
-         true <- hnsw_available?(),
-         true <- Code.ensure_loaded?(Nx),
-         {:ok, state} <- ensure_hnsw(state, entry.dimensions),
-         :ok <- ensure_hnsw_capacity(state, label),
-         tensor <- Nx.tensor([Vector.to_list(entry.vector)], type: :f32),
-         :ok <- hnsw_add_items(state.hnsw, tensor, label) do
-      state
-    else
-      _fallback -> state
-    end
-  rescue
-    _exception -> state
-  end
-
-  @spec ensure_hnsw(state(), pos_integer()) :: {:ok, state()} | {:error, term()}
-  defp ensure_hnsw(%{hnsw: nil} = state, dimensions) do
-    config = index_config()
-    max_elements = Map.get(config, :max_elements, 10_000)
-
-    opts = [
-      m: Map.get(config, :m, 16),
-      ef_construction: Map.get(config, :ef_construction, 200),
-      allow_replace_deleted: true
-    ]
-
-    case hnsw_new(Map.get(config, :space, :cosine), dimensions, max_elements, opts) do
-      {:ok, index} ->
-        if ef = Map.get(config, :ef) do
-          hnsw_set_ef(index, ef)
-        end
-
-        {:ok, %{state | hnsw: index, hnsw_dim: dimensions, hnsw_max: max_elements}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp ensure_hnsw(%{hnsw_dim: dimensions} = state, dimensions), do: {:ok, state}
-  defp ensure_hnsw(_state, _dimensions), do: {:error, :dimension_mismatch}
-
-  @spec ensure_hnsw_capacity(state(), pos_integer()) :: :ok | {:error, term()}
-  defp ensure_hnsw_capacity(%{hnsw: index, hnsw_max: max_elements}, label)
-       when is_integer(max_elements) and label >= max_elements do
-    hnsw_resize_index(index, max(max_elements * 2, label + 1))
-  end
-
-  defp ensure_hnsw_capacity(_state, _label), do: :ok
-
-  @spec maybe_mark_deleted(term(), pos_integer()) :: :ok
-  defp maybe_mark_deleted(nil, _label), do: :ok
-
-  defp maybe_mark_deleted(index, label) do
-    hnsw_mark_deleted(index, label)
-  rescue
-    _exception -> :ok
-  end
-
-  @spec entry_for_label(pos_integer()) :: [{binary(), map()}]
-  defp entry_for_label(label) do
-    with [{^label, moment_id}] <- :ets.lookup(@label_table, label),
-         [{^moment_id, entry}] <- :ets.lookup(@index_table, moment_id) do
-      [{moment_id, entry}]
-    else
-      _missing -> []
-    end
-  end
-
-  @spec indexed_count :: non_neg_integer()
-  defp indexed_count, do: :ets.info(@index_table, :size) || 0
-
   @spec query_limit(keyword()) :: non_neg_integer()
   defp query_limit(opts) do
     case Keyword.get(opts, :overfetch) || get_in(index_config(), [:overfetch]) || 40 do
       limit when is_integer(limit) and limit >= 0 -> limit
       _invalid -> 40
     end
-  end
-
-  @spec hnsw_enabled? :: boolean()
-  defp hnsw_enabled? do
-    config = index_config()
-    Map.get(config, :enabled, true) and Map.get(config, :backend, :hnsw) == :hnsw
-  end
-
-  @spec hnsw_available? :: boolean()
-  defp hnsw_available?, do: Code.ensure_loaded?(@hnsw_index)
-
-  @spec hnsw_new(atom(), pos_integer(), pos_integer(), keyword()) ::
-          {:ok, term()} | {:error, term()}
-  defp hnsw_new(space, dimensions, max_elements, opts) do
-    @hnsw_index.new(space, dimensions, max_elements, opts)
-  end
-
-  @spec hnsw_set_ef(term(), non_neg_integer()) :: :ok | {:error, term()}
-  defp hnsw_set_ef(index, ef) do
-    @hnsw_index.set_ef(index, ef)
-  end
-
-  @spec hnsw_knn_query(term(), binary(), pos_integer()) ::
-          {:ok, Nx.Tensor.t(), Nx.Tensor.t()} | {:error, term()}
-  defp hnsw_knn_query(index, vector, k) do
-    @hnsw_index.knn_query(index, vector, k: k)
-  end
-
-  @spec hnsw_add_items(term(), Nx.Tensor.t(), pos_integer()) :: :ok | {:error, term()}
-  defp hnsw_add_items(index, tensor, label) do
-    @hnsw_index.add_items(index, tensor, ids: [label], replace_deleted: false)
-  end
-
-  @spec hnsw_resize_index(term(), pos_integer()) :: :ok | {:error, term()}
-  defp hnsw_resize_index(index, max_elements) do
-    @hnsw_index.resize_index(index, max_elements)
-  end
-
-  @spec hnsw_mark_deleted(term(), pos_integer()) :: :ok | {:error, term()}
-  defp hnsw_mark_deleted(index, label) do
-    @hnsw_index.mark_deleted(index, label)
   end
 
   @spec index_config :: map()

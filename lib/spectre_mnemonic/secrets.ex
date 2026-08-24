@@ -120,6 +120,43 @@ defmodule SpectreMnemonic.Secrets do
     %{module: SpectreMnemonic, function: :reveal, arity: 2}
   end
 
+  @doc "Requests crypto-shredding for one partition from the configured adapter."
+  @spec shred(term(), keyword()) :: {:ok, term()} | {:error, term()}
+  def shred(scope, opts \\ []) do
+    with {:ok, opts} <- Identity.put_namespace(Keyword.put(opts, :scope, scope)) do
+      adapter =
+        Keyword.get(opts, :crypto_adapter) ||
+          Application.get_env(:spectre_mnemonic, :secret_crypto_adapter) || AESGCM
+
+      context = %{
+        namespace: Identity.namespace!(opts),
+        scope: scope,
+        operation: :crypto_shred
+      }
+
+      call_shred(adapter, context, opts)
+    end
+  rescue
+    exception -> {:error, {:secret_crypto_failed, :shred, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:secret_crypto_failed, :shred, {kind, reason}}}
+  end
+
+  @spec call_shred(term(), map(), keyword()) :: {:ok, term()} | {:error, term()}
+  defp call_shred(adapter, context, opts) do
+    if is_atom(adapter) and Code.ensure_loaded?(adapter) and
+         function_exported?(adapter, :shred, 2),
+       do: normalize_shred_result(adapter.shred(context, opts)),
+       else: {:ok, :unsupported}
+  end
+
+  @spec normalize_shred_result(term()) :: {:ok, term()} | {:error, term()}
+  defp normalize_shred_result({:ok, result}), do: {:ok, result}
+  defp normalize_shred_result({:error, _reason} = error), do: error
+
+  defp normalize_shred_result(other),
+    do: {:error, {:unexpected_secret_crypto_result, :shred, other}}
+
   @spec crypto_adapter(keyword(), :encrypt | :decrypt) :: {:ok, module()} | {:error, term()}
   defp crypto_adapter(opts, operation) do
     adapter =

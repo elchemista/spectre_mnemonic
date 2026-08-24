@@ -24,4 +24,9 @@ defmodule SpectreMnemonic.Secrets.Crypto.Adapter do
   @doc "Decrypts a locked secret and returns plaintext."
   @callback decrypt(Secret.t(), context :: map(), opts :: keyword()) ::
               {:ok, binary()} | {:error, term()}
+
+  @doc "Destroys the key material for one namespace/scope partition when supported."
+  @callback shred(context :: map(), opts :: keyword()) :: {:ok, term()} | {:error, term()}
+
+  @optional_callbacks shred: 2
 end

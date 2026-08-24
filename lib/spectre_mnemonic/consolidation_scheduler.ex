@@ -7,6 +7,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
 
   alias SpectreMnemonic.Durable.Index
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Graph.Plasticity
   alias SpectreMnemonic.Knowledge.Consolidator
   alias SpectreMnemonic.Persistence.Manager
 
@@ -88,6 +89,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
       end
 
     decay = Governance.decay(stale_after_ms: Keyword.get(cfg, :stale_after_ms))
+    graph_decay = Plasticity.decay_all()
 
     compact =
       case Keyword.get(cfg, :mode, :all) do
@@ -97,7 +99,7 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
 
     Index.rebuild()
 
-    %{consolidation: consolidation, decay: decay, compact: compact}
+    %{consolidation: consolidation, decay: decay, graph_decay: graph_decay, compact: compact}
   end
 
   @spec config :: keyword()

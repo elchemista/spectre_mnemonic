@@ -20,6 +20,8 @@ defmodule SpectreMnemonic.Intake do
   """
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Graph.Resolver
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Intake.Extraction
   alias SpectreMnemonic.Intake.Memory
@@ -56,6 +58,8 @@ defmodule SpectreMnemonic.Intake do
     * `:task_id` - associates all root memory with a task.
     * `:stream` - groups memory with an activity lane.
     * `:persist?` - immediately writes created moments through persistence.
+    * `:embedding` or `:vector` - attaches a caller-computed embedding to the
+      root moment.
     * `:extract_entities?` - enables or disables extraction.
     * `:mission` - stores mission metadata; add
       `SpectreMnemonic.Intake.MissionPolicy` as a plug to make it affect
@@ -130,8 +134,9 @@ defmodule SpectreMnemonic.Intake do
       {:ok,
        %Packet{
          root: root_result.moment,
-         events: Enum.map(results, & &1.signal),
-         moments: Enum.map(results, & &1.moment),
+         events:
+           results |> Enum.map(& &1.signal) |> Enum.reject(&is_nil/1) |> Enum.uniq_by(& &1.id),
+         moments: results |> Enum.map(& &1.moment) |> Enum.uniq_by(& &1.id),
          chunks: Enum.map(chunk_results, & &1.moment),
          summaries: Enum.map(summary_results, & &1.moment),
          categories: Enum.map(category_results, & &1.moment),
@@ -281,6 +286,7 @@ defmodule SpectreMnemonic.Intake do
     SpectreMnemonic.signal(
       root_text(envelope),
       memory_context_opts(envelope, opts)
+      |> Keyword.merge(Keyword.take(opts, [:embedding, :vector, :signature_bits]))
       |> Keyword.merge(
         stream: envelope.stream,
         kind: envelope.kind,
@@ -489,8 +495,51 @@ defmodule SpectreMnemonic.Intake do
           metadata: metadata
         )
 
-      signal_memory(text, signal_opts)
+      record_extraction_node(local_id, text, kind, metadata, attention, signal_opts, opts)
     end)
+  end
+
+  @spec record_extraction_node(binary(), binary(), atom(), map(), number(), keyword(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  defp record_extraction_node(
+         local_id,
+         _text,
+         :memory_entity,
+         metadata,
+         _attention,
+         signal_opts,
+         opts
+       ) do
+    canonical = Map.get(metadata, :canonical)
+    aliases = Map.get(metadata, :aliases, [])
+
+    case Resolver.resolve(canonical, aliases, opts) do
+      {:ok, moment} ->
+        {:ok,
+         %{
+           signal: Resolver.signal_for(moment),
+           moment: moment,
+           extraction_local_id: local_id,
+           reused?: true
+         }}
+
+      :miss ->
+        text = "Entity: #{canonical}"
+
+        with {:ok, result} <- signal_memory(text, signal_opts),
+             :ok <- Resolver.register(result.moment) do
+          {:ok, Map.put(result, :extraction_local_id, local_id)}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp record_extraction_node(local_id, text, _kind, _metadata, _attention, signal_opts, _opts) do
+    with {:ok, result} <- signal_memory(text, signal_opts) do
+      {:ok, Map.put(result, :extraction_local_id, local_id)}
+    end
   end
 
   @spec extraction_items(map()) :: [{binary(), binary(), atom(), map(), number()}]
@@ -582,7 +631,13 @@ defmodule SpectreMnemonic.Intake do
   @spec link_extraction_graph(map(), Moment.t(), [map()], keyword()) ::
           {:ok, [Association.t()]} | {:error, term()}
   defp link_extraction_graph(graph, root, results, opts) do
-    node_by_local_id = Map.new(results, &{&1.moment.metadata.extraction_local_id, &1.moment})
+    node_by_local_id =
+      Map.new(results, fn result ->
+        local_id =
+          Map.get(result, :extraction_local_id, result.moment.metadata.extraction_local_id)
+
+        {local_id, result.moment}
+      end)
 
     graph
     |> extraction_edge_plan(root, node_by_local_id, opts)
@@ -885,11 +940,22 @@ defmodule SpectreMnemonic.Intake do
   defp relationship_score(left, right) do
     keyword_score = keyword_similarity(left, right)
     entity_score = set_similarity(left.entities, right.entities)
+    semantic_score = semantic_similarity(left, right)
     category_score = metadata_category_similarity(left, right)
     task_bonus = if left.task_id && left.task_id == right.task_id, do: 0.12, else: 0.0
 
-    min(1.0, max(keyword_score, entity_score) + category_score * 0.25 + task_bonus)
+    min(
+      1.0,
+      max(max(keyword_score, entity_score), semantic_score) + category_score * 0.25 + task_bonus
+    )
   end
+
+  @spec semantic_similarity(Moment.t(), Moment.t()) :: float()
+  defp semantic_similarity(%{vector: left}, %{vector: right})
+       when is_binary(left) and is_binary(right),
+       do: max(0.0, Vector.cosine(left, right))
+
+  defp semantic_similarity(_left, _right), do: 0.0
 
   @spec memory_context_opts(Memory.t(), keyword()) :: keyword()
   defp memory_context_opts(envelope, _opts) do
