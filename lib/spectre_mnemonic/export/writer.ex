@@ -37,6 +37,11 @@ defmodule SpectreMnemonic.Export.Writer do
          mode: privacy_mode(opts)
        }}
     end
+  rescue
+    exception ->
+      {:error, {:mnemonic_export_failed, exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:mnemonic_export_failed, kind, reason}}
   end
 
   @spec validate_write_options(term(), term()) :: :ok | {:error, term()}
@@ -111,60 +116,63 @@ defmodule SpectreMnemonic.Export.Writer do
              {:cont, Map.update(grouped, record.family, [record], &[record | &1])}
            end),
          {:ok, knowledge_events} <- SMEM.replay(opts),
-         {:ok, atlas} <- Atlas.build(opts) do
-      included = included_sections(opts)
-      active? = Keyword.get(opts, :active?, true)
+         {:ok, atlas} <- Atlas.build(opts),
+         active? = Keyword.get(opts, :active?, true),
+         :ok <- validate_atlas_for_export(atlas, active?) do
+      build_sections(durable, knowledge_events, atlas, active?, opts)
+    end
+  end
 
-      nodes =
+  @spec build_sections(map(), [term()], Atlas.t(), boolean(), keyword()) ::
+          {:ok, map(), DateTime.t()}
+  defp build_sections(durable, knowledge_events, atlas, active?, opts) do
+    included = included_sections(opts)
+
+    all = %{
+      nodes:
         durable
         |> values([:signals, :moments, :artifacts])
         |> merge_active(active?, :moments, Focus.moments(opts))
-        |> project_records(opts)
-
-      edges =
+        |> project_records(opts),
+      edges:
         durable
         |> values([:associations])
         |> merge_active(active?, :associations, atlas.edges)
-        |> project_records(opts)
-
-      clusters =
+        |> project_records(opts),
+      clusters:
         durable
         |> cluster_values(atlas.clusters, active?)
-        |> project_records(opts)
-
-      models = durable |> values([:observations, :mental_models]) |> project_records(opts)
-
-      knowledge =
+        |> project_records(opts),
+      models: durable |> values([:observations, :mental_models]) |> project_records(opts),
+      knowledge:
         (values(durable, [:knowledge]) ++
            Enum.map(knowledge_events, &record_value(:knowledge_events, &1)))
-        |> project_records(opts)
+        |> project_records(opts),
+      governance: durable |> values([:memory_states]) |> project_records(opts)
+    }
 
-      governance = durable |> values([:memory_states]) |> project_records(opts)
+    sections =
+      Map.new(@all_sections, fn section ->
+        {section, section_values(section, included, all)}
+      end)
 
-      all = %{
-        nodes: nodes,
-        edges: edges,
-        clusters: clusters,
-        models: models,
-        knowledge: knowledge,
-        governance: governance
-      }
-
-      sections =
-        Map.new(@all_sections, fn section ->
-          {section, section_values(section, included, all)}
-        end)
-
-      {:ok, sections, snapshot_at(sections)}
-    end
+    {:ok, sections, snapshot_at(sections)}
   end
+
+  @spec validate_atlas_for_export(Atlas.t(), boolean()) :: :ok | {:error, term()}
+  defp validate_atlas_for_export(_atlas, false), do: :ok
+
+  defp validate_atlas_for_export(%Atlas{truncated: %{nodes: false, edges: false}}, true),
+    do: :ok
+
+  defp validate_atlas_for_export(%Atlas{truncated: truncated}, true),
+    do: {:error, {:mnemonic_export_truncated, truncated}}
 
   @spec cluster_values(map(), [term()], boolean()) :: list()
   defp cluster_values(durable, _active_clusters, false), do: values(durable, [:episodes])
 
-  defp cluster_values(_durable, active_clusters, true) do
-    Enum.map(active_clusters, &record_value(:episodes, &1))
-  end
+  defp cluster_values(durable, active_clusters, true),
+    do: merge_active(values(durable, [:episodes]), true, :episodes, active_clusters)
 
   @spec section_values(atom(), [atom()], map()) :: [map()]
   defp section_values(section, included, all) do
@@ -208,7 +216,7 @@ defmodule SpectreMnemonic.Export.Writer do
     base = projection_base(family, payload, timestamp, opts)
 
     cond do
-      secret?(payload) -> Map.merge(base, secret_projection(payload))
+      secret?(payload) -> Map.merge(base, secret_projection(payload, opts))
       privacy_mode(opts) == :structure -> Map.merge(base, structure_projection(payload))
       match?({:redacted, _fun}, privacy_mode(opts)) -> redacted_projection(base, payload, opts)
       true -> Map.merge(base, full_projection(payload, opts))
@@ -238,7 +246,6 @@ defmodule SpectreMnemonic.Export.Writer do
       "target_id" => value(payload, :target_id),
       "weight" => value(payload, :weight),
       "moment_ids" => value(payload, :moment_ids),
-      "title" => if(episode?(payload), do: value(payload, :title), else: nil),
       "state" => value(payload, :state),
       "occurred_at" => value(payload, :occurred_at),
       "observed_at" => value(payload, :observed_at),
@@ -254,11 +261,7 @@ defmodule SpectreMnemonic.Export.Writer do
   @spec structural_metadata(term()) :: map()
   defp structural_metadata(metadata) when is_map(metadata) do
     keys = [
-      :canonical,
-      :aliases,
       :entity_type,
-      :categories,
-      :category,
       :algorithm,
       :deterministic?,
       :size,
@@ -282,7 +285,7 @@ defmodule SpectreMnemonic.Export.Writer do
     |> stringify_keys()
   end
 
-  defp full_projection(payload, _opts), do: %{"value" => inspect(payload)}
+  defp full_projection(payload, _opts), do: %{"value" => payload}
 
   @spec redacted_projection(map(), term(), keyword()) :: map()
   defp redacted_projection(base, payload, opts) do
@@ -296,19 +299,25 @@ defmodule SpectreMnemonic.Export.Writer do
     exception -> Map.put(base, "redaction_error", Exception.message(exception))
   end
 
-  @spec secret_projection(term()) :: map()
-  defp secret_projection(payload) do
-    %{
+  @spec secret_projection(term(), keyword()) :: map()
+  defp secret_projection(payload, opts) do
+    projection = %{
       "secret" => true,
       "present" => true,
-      "label" => value(payload, :label) || secret_label_from_metadata(payload),
       "locked" => true,
       "occurred_at" => value(payload, :occurred_at),
       "observed_at" => value(payload, :observed_at),
       "valid_from" => value(payload, :valid_from),
       "valid_until" => value(payload, :valid_until)
     }
-    |> compact_map()
+
+    if privacy_mode(opts) == :structure do
+      compact_map(projection)
+    else
+      projection
+      |> Map.put("label", value(payload, :label) || secret_label_from_metadata(payload))
+      |> compact_map()
+    end
   end
 
   @spec secret?(term()) :: boolean()
@@ -392,8 +401,10 @@ defmodule SpectreMnemonic.Export.Writer do
   @spec content_digest([map()]) :: binary()
   defp content_digest(frames) do
     frames
-    |> Enum.map_join("", &CanonicalJSON.encode/1)
-    |> then(&:crypto.hash(:sha256, &1))
+    |> Enum.reduce(:crypto.hash_init(:sha256), fn frame, context ->
+      :crypto.hash_update(context, CanonicalJSON.encode(frame))
+    end)
+    |> :crypto.hash_final()
     |> Base.encode16(case: :lower)
   end
 
@@ -598,12 +609,6 @@ defmodule SpectreMnemonic.Export.Writer do
   @spec value(map(), atom()) :: term()
   defp value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
-  @spec episode?(map()) :: boolean()
-  defp episode?(%{__struct__: module}), do: module == SpectreMnemonic.Memory.Episode
-
-  defp episode?(payload),
-    do: not is_nil(value(payload, :moment_ids)) and not is_nil(value(payload, :title))
-
   @spec compact_map(map()) :: map()
   defp compact_map(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
 
@@ -654,5 +659,15 @@ defmodule SpectreMnemonic.Export.Writer do
   end
 
   defp json_safe(value) when is_number(value) or is_boolean(value) or is_nil(value), do: value
-  defp json_safe(value), do: inspect(value, limit: :infinity)
+
+  defp json_safe(value) do
+    raise ArgumentError, "unsupported JSON value: #{inspect(json_shape(value))}"
+  end
+
+  @spec json_shape(term()) :: atom()
+  defp json_shape(value) when is_pid(value), do: :pid
+  defp json_shape(value) when is_reference(value), do: :reference
+  defp json_shape(value) when is_function(value), do: :function
+  defp json_shape(value) when is_port(value), do: :port
+  defp json_shape(_value), do: :unsupported
 end

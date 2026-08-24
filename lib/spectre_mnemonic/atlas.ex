@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.Atlas do
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Association
   alias SpectreMnemonic.Memory.Episode
+  alias SpectreMnemonic.Memory.Moment
+  alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
 
   defstruct nodes: [],
@@ -33,27 +35,80 @@ defmodule SpectreMnemonic.Atlas do
   @doc "Builds a bounded atlas for exactly one namespace/scope partition."
   @spec build(keyword()) :: {:ok, t()} | {:error, term()}
   def build(opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
-      build_from_nodes(Focus.moments(opts), opts)
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, nodes} <- atlas_moments(opts) do
+      build_from_nodes(nodes, opts)
     end
+  end
+
+  @spec atlas_moments(keyword()) :: {:ok, [term()]} | {:error, term()}
+  defp atlas_moments(opts) do
+    case Manager.replay(opts) do
+      {:ok, records} ->
+        durable =
+          records
+          |> Enum.filter(&(&1.family == :moments))
+          |> Enum.map(& &1.payload)
+          |> Enum.filter(&(match?(%Moment{}, &1) or match?(%Secret{}, &1)))
+
+        {:ok, merge_memory_values(Focus.moments(opts), durable)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @spec atlas_associations(keyword()) :: {:ok, [Association.t()]} | {:error, term()}
+  defp atlas_associations(opts) do
+    case Manager.replay(opts) do
+      {:ok, records} ->
+        durable =
+          records
+          |> Enum.filter(&(&1.family == :associations))
+          |> Enum.map(& &1.payload)
+          |> Enum.filter(&match?(%Association{}, &1))
+
+        {:ok, merge_memory_values(Focus.associations(opts), durable)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @spec merge_memory_values([map()], [map()]) :: [map()]
+  defp merge_memory_values(hot, durable) do
+    (durable ++ hot)
+    |> Map.new(&{&1.id, &1})
+    |> Map.values()
   end
 
   @doc false
   @spec materialize(keyword()) :: {:ok, [Episode.t()]} | {:error, term()}
   def materialize(opts) do
     with {:ok, opts} <- Identity.put_namespace(opts),
-         dirty_ids <- clustering_ids(opts),
-         {:ok, clusters} <- materialize_dirty(dirty_ids, opts) do
-      clear_dirty(opts)
-      {:ok, clusters}
+         {:ok, dirty_ids} <- clustering_ids(opts),
+         claimed_ids <- claim_dirty(dirty_ids, opts) do
+      case materialize_dirty(claimed_ids, opts) do
+        {:ok, clusters} ->
+          {:ok, clusters}
+
+        {:error, _reason} = error ->
+          restore_dirty(claimed_ids, opts)
+          error
+      end
     end
   end
 
-  @spec clustering_ids(keyword()) :: [binary()]
+  @spec clustering_ids(keyword()) :: {:ok, [binary()]} | {:error, term()}
   defp clustering_ids(opts) do
-    if Keyword.get(opts, :recluster, false),
-      do: Enum.map(Focus.moments(opts), & &1.id),
-      else: dirty_ids(opts)
+    if Keyword.get(opts, :recluster, false) do
+      case atlas_moments(opts) do
+        {:ok, moments} -> {:ok, Enum.map(moments, & &1.id)}
+        {:error, _reason} = error -> error
+      end
+    else
+      {:ok, dirty_ids(opts)}
+    end
   end
 
   @doc false
@@ -74,26 +129,40 @@ defmodule SpectreMnemonic.Atlas do
           {:ok, [Episode.t()]} | {:error, term()}
   defp materialize_dirty([], opts) do
     if Keyword.get(opts, :recluster, false),
-      do: persist_atlas(Focus.moments(opts), opts),
+      do: persist_all_moments(opts),
       else: {:ok, []}
   end
 
   defp materialize_dirty(dirty_ids, opts) do
-    nodes =
-      dirty_ids
-      |> expanded_dirty_ids(opts)
-      |> Focus.moments_by_ids(opts)
+    ids = dirty_ids |> expanded_dirty_ids(opts) |> MapSet.new()
 
-    persist_atlas(nodes, opts)
+    with {:ok, moments} <- atlas_moments(opts) do
+      moments
+      |> Enum.filter(&MapSet.member?(ids, &1.id))
+      |> persist_atlas(opts)
+    end
+  end
+
+  @spec persist_all_moments(keyword()) :: {:ok, [Episode.t()]} | {:error, term()}
+  defp persist_all_moments(opts) do
+    with {:ok, moments} <- atlas_moments(opts), do: persist_atlas(moments, opts)
   end
 
   @spec persist_atlas([term()], keyword()) :: {:ok, [Episode.t()]} | {:error, term()}
   defp persist_atlas(nodes, opts) do
     with {:ok, atlas} <- build_from_nodes(nodes, opts),
+         :ok <- ensure_complete_atlas(atlas),
+         :ok <- supersede_clusters(atlas.clusters, atlas.nodes, opts),
          :ok <- persist_clusters(atlas.clusters, opts) do
       {:ok, atlas.clusters}
     end
   end
+
+  @spec ensure_complete_atlas(t()) :: :ok | {:error, term()}
+  defp ensure_complete_atlas(%__MODULE__{truncated: %{nodes: false, edges: false}}), do: :ok
+
+  defp ensure_complete_atlas(%__MODULE__{truncated: truncated}),
+    do: {:error, {:atlas_truncated, truncated}}
 
   @spec expanded_dirty_ids([binary()], keyword()) :: [binary()]
   defp expanded_dirty_ids(dirty_ids, opts) do
@@ -113,7 +182,9 @@ defmodule SpectreMnemonic.Atlas do
       discovered =
         frontier
         |> Focus.associations_for_ids(opts)
-        |> Enum.reject(&(&1.relation in [:attached_action, :member_of] or &1.weight <= 0.03))
+        |> Enum.reject(
+          &(&1.relation in [:attached_action, :member_of, :same_as] or &1.weight <= 0.03)
+        )
         |> Enum.flat_map(&[&1.source_id, &1.target_id])
         |> MapSet.new()
         |> MapSet.difference(seen)
@@ -124,42 +195,63 @@ defmodule SpectreMnemonic.Atlas do
     end
   end
 
-  @spec clear_dirty(keyword()) :: true
-  defp clear_dirty(opts) do
+  @spec claim_dirty([binary()], keyword()) :: [binary()]
+  defp claim_dirty(ids, opts) do
+    limit = positive_limit(opts, :max_nodes, 10_000)
+    claimed = Enum.take(ids, limit)
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
-    :ets.match_delete(:mnemonic_atlas_dirty, {partition, :_})
+
+    Enum.each(claimed, &:ets.delete_object(:mnemonic_atlas_dirty, {partition, &1}))
+    claimed
   end
 
-  @spec build_from_nodes([term()], keyword()) :: {:ok, t()}
+  @spec restore_dirty([binary()], keyword()) :: :ok
+  defp restore_dirty(ids, opts) do
+    partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
+    Enum.each(ids, &:ets.insert(:mnemonic_atlas_dirty, {partition, &1}))
+  end
+
+  @spec build_from_nodes([term()], keyword()) :: {:ok, t()} | {:error, term()}
   defp build_from_nodes(source_nodes, opts) do
-    all_nodes = Enum.sort_by(source_nodes, & &1.id)
+    all_nodes =
+      Enum.sort_by(source_nodes, fn node ->
+        {-timestamp(node), node.id}
+      end)
+
     node_limit = positive_limit(opts, :max_nodes, 10_000)
     edge_limit = positive_limit(opts, :max_edges, 30_000)
-    nodes = Enum.take(all_nodes, node_limit)
+    nodes = all_nodes |> Enum.take(node_limit) |> Enum.sort_by(& &1.id)
     node_ids = MapSet.new(Enum.map(nodes, & &1.id))
 
-    all_edges =
-      opts
-      |> Focus.associations()
-      |> Enum.filter(&cluster_edge?(&1, node_ids))
-      |> Enum.sort_by(& &1.id)
+    with {:ok, associations} <- atlas_associations(opts) do
+      all_edges =
+        associations
+        |> Enum.filter(&cluster_edge?(&1, node_ids))
+        |> Enum.sort_by(& &1.id)
 
-    edges = Enum.take(all_edges, edge_limit)
-    clusters = clusters(nodes, edges, opts)
+      edges = Enum.take(all_edges, edge_limit)
+      clusters = clusters(nodes, edges, opts)
 
-    {:ok,
-     %__MODULE__{
-       nodes: nodes,
-       edges: edges,
-       clusters: clusters,
-       stats: stats(nodes, edges, clusters, opts),
-       layout_hints: layout_hints(nodes),
-       truncated: %{
-         nodes: length(all_nodes) > length(nodes),
-         edges: length(all_edges) > length(edges)
-       }
-     }}
+      {:ok,
+       %__MODULE__{
+         nodes: nodes,
+         edges: edges,
+         clusters: clusters,
+         stats: stats(nodes, edges, clusters, opts),
+         layout_hints: layout_hints(nodes),
+         truncated: %{
+           nodes: length(all_nodes) > length(nodes),
+           edges: length(all_edges) > length(edges)
+         }
+       }}
+    end
   end
+
+  @spec timestamp(term()) :: integer()
+  defp timestamp(%{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp timestamp(_node), do: 0
 
   @spec clusters([term()], [Association.t()], keyword()) :: [Episode.t()]
   defp clusters(nodes, edges, opts) do
@@ -382,6 +474,69 @@ defmodule SpectreMnemonic.Atlas do
     end)
   end
 
+  @spec supersede_clusters([Episode.t()], [term()], keyword()) :: :ok | {:error, term()}
+  defp supersede_clusters(clusters, nodes, opts) do
+    current_ids = MapSet.new(Enum.map(clusters, & &1.id))
+    affected_ids = MapSet.new(Enum.map(nodes, & &1.id))
+
+    obsolete =
+      opts
+      |> Focus.episodes()
+      |> Enum.filter(fn episode ->
+        not MapSet.member?(current_ids, episode.id) and
+          Enum.any?(episode.moment_ids, &MapSet.member?(affected_ids, &1))
+      end)
+
+    Enum.reduce_while(obsolete, :ok, fn episode, :ok ->
+      case tombstone_episode(episode, opts) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  @spec tombstone_episode(Episode.t(), keyword()) :: :ok | {:error, term()}
+  defp tombstone_episode(episode, opts) do
+    with {:ok, records} <- Manager.replay(opts),
+         targets <- episode_targets(episode, records),
+         :ok <- append_episode_tombstones(targets, opts) do
+      Focus.drop_episode(episode, opts)
+    end
+  end
+
+  @spec episode_targets(Episode.t(), [term()]) :: [{atom(), binary()}]
+  defp episode_targets(episode, records) do
+    memberships =
+      records
+      |> Enum.flat_map(fn
+        %{
+          family: :associations,
+          payload: %{id: id, relation: :member_of, target_id: target_id}
+        }
+        when target_id == episode.id ->
+          [{:associations, id}]
+
+        _record ->
+          []
+      end)
+
+    [{:episodes, episode.id} | memberships]
+  end
+
+  @spec append_episode_tombstones([{atom(), binary()}], keyword()) :: :ok | {:error, term()}
+  defp append_episode_tombstones(targets, opts) do
+    now = DateTime.utc_now()
+
+    Enum.reduce_while(targets, :ok, fn {family, id}, :ok ->
+      payload = %{family: family, id: id, forgotten_at: now, reason: :episode_superseded}
+
+      case Manager.append(:tombstones, payload, opts) do
+        {:ok, _result} -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
   @spec put_episode_membership(Episode.t(), keyword()) :: :ok | {:error, term()}
   defp put_episode_membership(episode, opts) do
     Enum.reduce_while(episode.moment_ids, :ok, fn moment_id, :ok ->
@@ -410,14 +565,14 @@ defmodule SpectreMnemonic.Atlas do
       relation: :member_of,
       target_id: episode.id,
       weight: 1.0,
-      metadata: Identity.put_context(%{episode_id: episode.id}, opts),
+      metadata: Identity.put_context(%{episode_id: episode.id, durable?: true}, opts),
       inserted_at: episode.inserted_at
     }
   end
 
   @spec cluster_edge?(Association.t(), MapSet.t(binary())) :: boolean()
   defp cluster_edge?(edge, node_ids) do
-    edge.relation not in [:attached_action, :member_of] and edge.weight > 0.03 and
+    edge.relation not in [:attached_action, :member_of, :same_as] and edge.weight > 0.03 and
       MapSet.member?(node_ids, edge.source_id) and MapSet.member?(node_ids, edge.target_id)
   end
 

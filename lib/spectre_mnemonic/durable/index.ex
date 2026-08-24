@@ -231,8 +231,11 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec absorb_tombstone(term(), Record.t(), map(), map()) :: map()
   defp absorb_tombstone(memory_id, record, payload, state) when is_binary(memory_id) do
     doc_key = {record.namespace, record.scope, payload_family(payload), memory_id}
+    state_key = {record.namespace, record.scope, memory_id}
 
-    Map.update!(state, :docs, &Map.delete(&1, doc_key))
+    state
+    |> Map.update!(:docs, &Map.delete(&1, doc_key))
+    |> Map.update!(:states, &Map.delete(&1, state_key))
   end
 
   defp absorb_tombstone(_memory_id, _record, _payload, state), do: state

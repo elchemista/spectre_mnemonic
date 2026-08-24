@@ -17,6 +17,7 @@ defmodule SpectreMnemonic.MentalModels do
   alias SpectreMnemonic.Persistence.Manager
 
   @mental_model_table :mnemonic_mental_models
+  @mental_model_scope_table :mnemonic_mental_models_by_scope
 
   @doc """
   Stores or replaces a curated mental model.
@@ -63,7 +64,16 @@ defmodule SpectreMnemonic.MentalModels do
 
   @spec store_model(MentalModel.t()) :: {:ok, MentalModel.t()}
   defp store_model(model) do
+    case :ets.lookup(@mental_model_table, model.id) do
+      [{_id, existing}] ->
+        :ets.delete_object(@mental_model_scope_table, {Scope.partition(existing), model.id})
+
+      [] ->
+        :ok
+    end
+
     :ets.insert(@mental_model_table, {model.id, model})
+    :ets.insert(@mental_model_scope_table, {Scope.partition(model), model.id})
     {:ok, model}
   end
 
@@ -83,9 +93,8 @@ defmodule SpectreMnemonic.MentalModels do
   def search(cue, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       active =
-        @mental_model_table
-        |> safe_tab2list()
-        |> Enum.map(fn {_id, model} -> model end)
+        opts
+        |> scoped_models()
         |> Enum.filter(&visible?(&1, opts))
         |> score_models(cue)
 
@@ -94,6 +103,22 @@ defmodule SpectreMnemonic.MentalModels do
       limit = search_limit(opts)
       {:ok, (active ++ durable) |> Enum.uniq_by(&Map.get(&1, :id)) |> Enum.take(limit)}
     end
+  end
+
+  @spec scoped_models(keyword()) :: [MentalModel.t()]
+  defp scoped_models(opts) do
+    partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
+
+    @mental_model_scope_table
+    |> :ets.lookup(partition)
+    |> Enum.flat_map(fn {^partition, id} ->
+      case :ets.lookup(@mental_model_table, id) do
+        [{^id, model}] -> [model]
+        [] -> []
+      end
+    end)
+  rescue
+    ArgumentError -> []
   end
 
   @spec search_limit(keyword()) :: non_neg_integer()
@@ -259,13 +284,6 @@ defmodule SpectreMnemonic.MentalModels do
   defp stable_model_id(namespace, scope, query, answer) do
     hash = :crypto.hash(:sha256, :erlang.term_to_binary({namespace, scope, query, answer}))
     "mm_#{Base.encode16(hash, case: :lower) |> binary_part(0, 24)}"
-  end
-
-  @spec safe_tab2list(atom()) :: list()
-  defp safe_tab2list(table) do
-    :ets.tab2list(table)
-  rescue
-    ArgumentError -> []
   end
 
   @spec keywords(binary()) :: [binary()]

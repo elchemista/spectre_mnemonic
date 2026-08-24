@@ -54,7 +54,12 @@ defmodule SpectreMnemonic.Export do
     end
   end
 
-  @doc "Returns a verified enumerable of section frames."
+  @doc """
+  Returns a verified enumerable of section frames.
+
+  If the file changes after initial verification, the enumerable emits one
+  `{:error, reason}` item and halts instead of raising during enumeration.
+  """
   @spec stream(Path.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(path, opts \\ []) do
     Reader.stream(path, opts)

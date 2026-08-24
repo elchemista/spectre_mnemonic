@@ -9,6 +9,8 @@ defmodule SpectreMnemonic.Graph.Traversal do
 
   alias SpectreMnemonic.Active.Focus
 
+  @non_traversable_relations [:member_of, :same_as]
+
   @type result :: %{
           moments: [term()],
           activations: %{optional(binary()) => float()},
@@ -141,7 +143,19 @@ defmodule SpectreMnemonic.Graph.Traversal do
   @spec traversable?(term(), keyword()) :: boolean()
   defp traversable?(association, opts) do
     included = Keyword.get(opts, :relations, Keyword.get(opts, :relation_types, :all))
-    excluded = MapSet.new(List.wrap(Keyword.get(opts, :exclude_relations, [])))
+
+    defaults =
+      if Keyword.has_key?(opts, :relations) or Keyword.has_key?(opts, :relation_types),
+        do: [],
+        else: @non_traversable_relations
+
+    excluded =
+      opts
+      |> Keyword.get(:exclude_relations, [])
+      |> List.wrap()
+      |> Kernel.++(defaults)
+      |> MapSet.new()
+
     prune = bounded_float(opts, :prune_threshold, 0.03, 0.0, 1.0)
 
     association.weight >= prune and not MapSet.member?(excluded, association.relation) and

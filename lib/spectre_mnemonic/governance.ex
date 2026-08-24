@@ -15,6 +15,7 @@ defmodule SpectreMnemonic.Governance do
   alias SpectreMnemonic.Persistence.Manager
 
   @state_table :mnemonic_governance_states
+  @state_scope_table :mnemonic_governance_states_by_scope
   @fact_table :mnemonic_governance_facts
   @states [:candidate, :short_term, :promoted, :pinned, :stale, :contradicted, :forgotten]
   @terminal_states [:contradicted, :forgotten]
@@ -152,9 +153,8 @@ defmodule SpectreMnemonic.Governance do
     cutoff = DateTime.add(now, -stale_after_ms, :millisecond)
 
     candidates =
-      @state_table
-      |> safe_tab2list()
-      |> Enum.map(fn {_key, event} -> event end)
+      opts
+      |> scoped_state_events()
       |> Enum.filter(fn event ->
         Scope.match?(event, opts) and fact_state?(event) and should_stale?(event, cutoff)
       end)
@@ -302,6 +302,7 @@ defmodule SpectreMnemonic.Governance do
   @spec rebuild_materialized() :: :ok | {:error, term()}
   defp rebuild_materialized do
     :ets.delete_all_objects(@state_table)
+    :ets.delete_all_objects(@state_scope_table)
     :ets.delete_all_objects(@fact_table)
 
     case Manager.replay_all() do
@@ -334,6 +335,7 @@ defmodule SpectreMnemonic.Governance do
   defp materialize(event) do
     key = state_key(event.namespace, event.scope, event.memory_id)
     :ets.insert(@state_table, {key, event})
+    :ets.insert(@state_scope_table, {{event.namespace, event.scope}, event.memory_id})
     materialize_fact(event)
     :ok
   end
@@ -597,9 +599,20 @@ defmodule SpectreMnemonic.Governance do
     ArgumentError -> []
   end
 
-  @spec safe_tab2list(atom()) :: list()
-  defp safe_tab2list(table) do
-    :ets.tab2list(table)
+  @spec scoped_state_events(keyword()) :: [map()]
+  defp scoped_state_events(opts) do
+    partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
+
+    @state_scope_table
+    |> :ets.lookup(partition)
+    |> Enum.flat_map(fn {^partition, memory_id} ->
+      key = state_key(elem(partition, 0), elem(partition, 1), memory_id)
+
+      case :ets.lookup(@state_table, key) do
+        [{^key, event}] -> [event]
+        [] -> []
+      end
+    end)
   rescue
     ArgumentError -> []
   end

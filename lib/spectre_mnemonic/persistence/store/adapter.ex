@@ -19,6 +19,8 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
           | :fulltext_search
           | :artifact_blob
           | :event_log
+          | :erase_partition
+          | :verify_erasure
           | :semantic_compact
 
   @callback put(Record.t(), keyword()) :: :ok | {:ok, term()} | {:error, term()}
@@ -32,6 +34,10 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
               :ok | {:ok, term()} | {:error, term()}
   @callback semantic_compact(input :: map(), opts :: keyword()) ::
               {:ok, map()} | {:error, term()}
+  @callback erase_partition(binary(), term(), MapSet.t({atom(), binary()}), keyword()) ::
+              {:ok, term()} | {:error, term()}
+  @callback verify_erased(binary(), term(), MapSet.t({atom(), binary()}), keyword()) ::
+              :ok | {:error, term()}
   @callback capabilities(keyword()) :: [capability()]
 
   @optional_callbacks replay: 1,
@@ -39,5 +45,7 @@ defmodule SpectreMnemonic.Persistence.Store.Adapter do
                       get: 3,
                       search: 2,
                       delete_or_tombstone: 3,
-                      semantic_compact: 2
+                      semantic_compact: 2,
+                      erase_partition: 4,
+                      verify_erased: 4
 end

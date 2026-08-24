@@ -78,7 +78,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   def append(family, payload, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(family, opts) do
-      GenServer.call(__MODULE__, {:append, family, payload, opts})
+      opts = put_erasure_generation(opts)
+      manager_call({:append, family, payload, opts}, operation_timeout(opts, :write_timeout))
     end
   end
 
@@ -107,7 +108,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   def put(%Record{} = record, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(record.family, opts) do
-      GenServer.call(__MODULE__, {:put, record, opts})
+      opts = put_erasure_generation(opts)
+      manager_call({:put, record, opts}, operation_timeout(opts, :write_timeout))
     end
   end
 
@@ -126,7 +128,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec replay(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def replay(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:replay, opts})
+      manager_call({:replay, opts}, operation_timeout(opts, :replay_timeout))
     end
   end
 
@@ -136,7 +138,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
         when acc: term()
   def replay_fold(opts \\ [], acc, fun) when is_function(fun, 2) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:replay_fold, opts, acc, fun}, 30_000)
+      manager_call({:replay_fold, opts, acc, fun}, operation_timeout(opts, :replay_timeout))
     end
   end
 
@@ -144,7 +146,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec replay_all(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def replay_all(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:replay_all, opts})
+      manager_call({:replay_all, opts}, operation_timeout(opts, :replay_timeout))
     end
   end
 
@@ -210,7 +212,18 @@ defmodule SpectreMnemonic.Persistence.Manager do
           | {:error, term()}
   def compact(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:compact, opts})
+      manager_call({:compact, opts}, operation_timeout(opts, :compact_timeout))
+    end
+  end
+
+  @doc false
+  @spec ensure_erasure_supported(keyword()) :: :ok | {:error, term()}
+  def ensure_erasure_supported(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      manager_call(
+        {:ensure_erasure_supported, opts},
+        operation_timeout(opts, :erasure_timeout)
+      )
     end
   end
 
@@ -218,7 +231,18 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec verify_erased([{atom(), binary()}], keyword()) :: :ok | {:error, term()}
   def verify_erased(targets, opts) when is_list(targets) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:verify_erased, MapSet.new(targets), opts}, 30_000)
+      manager_call(
+        {:verify_erased, MapSet.new(targets), opts},
+        operation_timeout(opts, :erasure_timeout)
+      )
+    end
+  end
+
+  @doc false
+  @spec evict_dedupe(keyword()) :: :ok | {:error, term()}
+  def evict_dedupe(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      manager_call({:evict_dedupe, opts}, operation_timeout(opts, :erasure_timeout))
     end
   end
 
@@ -373,12 +397,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
           {:ok, %{mode: :all, semantic: semantic, physical: physical}}
 
         :erase ->
-          erase_opts =
-            opts
-            |> Keyword.put(:retain_compacted_segments, 0)
-            |> Keyword.put(:erase?, true)
-
-          {:ok, physical_compact(cfg, erase_opts)}
+          {:ok, physical_erase(cfg, opts)}
 
         mode ->
           {:error, {:invalid_compact_mode, mode}}
@@ -387,29 +406,62 @@ defmodule SpectreMnemonic.Persistence.Manager do
     {:reply, reply, state}
   end
 
+  def handle_call({:ensure_erasure_supported, opts}, _from, state) do
+    failures = opts |> effective_config() |> erasure_support_failures()
+
+    reply =
+      if failures == [],
+        do: :ok,
+        else: {:error, {:erasure_unsupported_stores, failures}}
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:verify_erased, targets, opts}, _from, state) do
     namespace = Identity.namespace!(opts)
     scope = Scope.from_opts(opts)
 
-    failures =
-      opts
-      |> effective_config()
-      |> replayable_stores()
-      |> Enum.filter(&(&1.adapter == StoreFile))
-      |> Enum.flat_map(fn store ->
-        store_opts = Keyword.merge(store.opts, Keyword.take(opts, [:data_root]))
-
-        case StoreFile.verify_erased(store_opts, namespace, scope, targets) do
-          :ok -> []
-          {:error, reason} -> [%{store: store.id, reason: reason}]
-        end
-      end)
+    failures = opts |> effective_config() |> verify_erased_stores(namespace, scope, targets, opts)
 
     reply = if failures == [], do: :ok, else: {:error, {:erasure_verification_failed, failures}}
     {:reply, reply, state}
   end
 
+  def handle_call({:evict_dedupe, opts}, _from, state) do
+    namespace = Identity.namespace!(opts)
+    scope = Scope.from_opts(opts)
+
+    dedupe =
+      Map.new(state.dedupe, fn {config_key, records} ->
+        retained =
+          Map.reject(records, fn {_dedupe_key, {_digest, record}} ->
+            record.namespace == namespace and record.scope == scope
+          end)
+
+        {config_key, retained}
+      end)
+
+    {:reply, :ok, %{state | dedupe: dedupe}}
+  end
+
   def handle_call(:reset_dedupe, _from, _state), do: {:reply, :ok, %{dedupe: %{}}}
+
+  @spec manager_call(term(), timeout()) :: term()
+  defp manager_call(request, timeout) do
+    GenServer.call(__MODULE__, request, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, {:persistent_memory_timeout, timeout}}
+    :exit, reason -> {:error, {:persistent_memory_manager_unavailable, reason}}
+  end
+
+  @spec operation_timeout(keyword(), atom()) :: timeout()
+  defp operation_timeout(opts, key) do
+    case Keyword.get(opts, key, :infinity) do
+      :infinity -> :infinity
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _invalid -> :infinity
+    end
+  end
 
   @spec persist_once(Record.t(), keyword(), manager_state()) ::
           {{:ok, map()} | {:error, term()}, manager_state()}
@@ -501,6 +553,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
         |> Keyword.get(:metadata, %{})
         |> Map.new()
         |> Identity.put_context(Keyword.put(opts, :scope, scope))
+        |> maybe_put_erasure_generation(opts)
     }
   end
 
@@ -534,6 +587,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
         record.metadata
         |> Map.new()
         |> Identity.put_context(Keyword.put(opts, :scope, scope))
+        |> maybe_put_erasure_generation(opts)
 
       {:ok,
        %{
@@ -545,6 +599,22 @@ defmodule SpectreMnemonic.Persistence.Manager do
            dedupe_key: dedupe_key,
            metadata: metadata
        }}
+    end
+  end
+
+  @spec put_erasure_generation(keyword()) :: keyword()
+  defp put_erasure_generation(opts) do
+    case Erasure.generation(opts) do
+      generation when is_binary(generation) -> Keyword.put(opts, :erasure_generation, generation)
+      _missing -> Keyword.delete(opts, :erasure_generation)
+    end
+  end
+
+  @spec maybe_put_erasure_generation(map(), keyword()) :: map()
+  defp maybe_put_erasure_generation(metadata, opts) do
+    case Keyword.get(opts, :erasure_generation) do
+      generation when is_binary(generation) -> Map.put(metadata, :erasure_generation, generation)
+      _missing -> metadata
     end
   end
 
@@ -848,6 +918,83 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
       {store.id, StoreFile.compact(compact_opts)}
     end)
+  end
+
+  @spec physical_erase(config(), keyword()) :: [{term(), {:ok, term()} | {:error, term()}}]
+  defp physical_erase(cfg, opts) do
+    namespace = Identity.namespace!(opts)
+    scope = Scope.from_opts(opts)
+    targets = opts |> Keyword.get(:erasure_targets, []) |> MapSet.new()
+
+    cfg
+    |> Keyword.fetch!(:stores)
+    |> Enum.map(fn store ->
+      store_opts = Keyword.merge(store.opts, Keyword.take(opts, [:data_root]))
+
+      result =
+        safe_store_call(fn ->
+          store.adapter.erase_partition(namespace, scope, targets, store_opts)
+        end)
+
+      {store.id, result}
+    end)
+  end
+
+  @spec erasure_support_failures(config()) :: [map()]
+  defp erasure_support_failures(cfg) do
+    cfg
+    |> Keyword.fetch!(:stores)
+    |> Enum.flat_map(fn store ->
+      capabilities = safe_capabilities(store)
+
+      missing =
+        []
+        |> maybe_missing_capability(
+          :erase_partition,
+          :erase_partition in capabilities and
+            function_exported?(store.adapter, :erase_partition, 4)
+        )
+        |> maybe_missing_capability(
+          :verify_erasure,
+          :verify_erasure in capabilities and
+            function_exported?(store.adapter, :verify_erased, 4)
+        )
+
+      if missing == [], do: [], else: [%{store: store.id, missing: Enum.reverse(missing)}]
+    end)
+  end
+
+  @spec maybe_missing_capability([atom()], atom(), boolean()) :: [atom()]
+  defp maybe_missing_capability(missing, _capability, true), do: missing
+  defp maybe_missing_capability(missing, capability, false), do: [capability | missing]
+
+  @spec verify_erased_stores(config(), binary(), term(), MapSet.t(), keyword()) :: [map()]
+  defp verify_erased_stores(cfg, namespace, scope, targets, opts) do
+    cfg
+    |> Keyword.fetch!(:stores)
+    |> Enum.flat_map(&verify_erased_store(&1, namespace, scope, targets, opts))
+  end
+
+  @spec verify_erased_store(store(), binary(), term(), MapSet.t(), keyword()) :: [map()]
+  defp verify_erased_store(store, namespace, scope, targets, opts) do
+    store_opts = Keyword.merge(store.opts, Keyword.take(opts, [:data_root]))
+
+    case safe_store_call(fn ->
+           store.adapter.verify_erased(namespace, scope, targets, store_opts)
+         end) do
+      :ok -> []
+      {:error, reason} -> [%{store: store.id, reason: reason}]
+      other -> [%{store: store.id, reason: {:unexpected_erasure_verification, other}}]
+    end
+  end
+
+  @spec safe_store_call((-> term())) :: term()
+  defp safe_store_call(fun) do
+    fun.()
+  rescue
+    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   @spec semantic_compact(config(), keyword()) :: map()
@@ -1648,8 +1795,18 @@ defmodule SpectreMnemonic.Persistence.Manager do
   defp erased_record?(record, markers) do
     marker = Map.get(markers, {record.namespace, record.scope})
 
-    not is_nil(marker) and record.family != :erasure_markers and
-      record_time(record) <= record_time(marker)
+    not is_nil(marker) and record.family != :erasure_markers and erased_by_marker?(record, marker)
+  end
+
+  @spec erased_by_marker?(Record.t(), Record.t()) :: boolean()
+  defp erased_by_marker?(record, marker) do
+    case map_value(marker.payload, :generation) do
+      generation when is_binary(generation) ->
+        map_value(record.metadata, :erasure_generation) != generation
+
+      _legacy_marker ->
+        record_time(record) <= record_time(marker)
+    end
   end
 
   @spec record_time(Record.t()) :: integer()

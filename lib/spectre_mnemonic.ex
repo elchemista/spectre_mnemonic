@@ -468,6 +468,12 @@ defmodule SpectreMnemonic do
     Resolver.merge_entities(winner_id, loser_id, opts)
   end
 
+  @doc "Reverses one append-only entity merge by tombstoning its `:same_as` edge."
+  @spec unmerge_entities(binary(), binary(), keyword()) :: :ok | {:error, term()}
+  def unmerge_entities(winner_id, loser_id, opts \\ []) do
+    Resolver.unmerge_entities(winner_id, loser_id, opts)
+  end
+
   @doc "Returns the deterministic mind-map projection for one partition."
   @spec atlas(keyword()) :: {:ok, Atlas.t()} | {:error, term()}
   def atlas(opts \\ []) do

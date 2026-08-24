@@ -14,7 +14,7 @@ defmodule Spectre.Mnemonic do
 
   use Spectre.Stack.Installable,
     id: :mnemonic,
-    version: "0.4.0",
+    version: "0.1.0",
     contract: 1,
     spectre: "~> 0.3.3",
     provides: [{:service, :memory}],
