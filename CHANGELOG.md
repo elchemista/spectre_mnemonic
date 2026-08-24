@@ -11,6 +11,9 @@ All notable changes to Spectre Mnemonic are documented in this file.
   partition isolation, graph aggregation, and durable rebuilds.
 - Added broad `.mnemonic`, graph, aggregation, entity-resolution, traversal,
   Atlas, plasticity, and parameter-conformance test matrices.
+- Added a Spectre `0.3.3` Agent end-to-end test covering automatic turn
+  persistence, cross-conversation recall, exact email/reference/question
+  answers, subject isolation, and real local semantic retrieval.
 
 ### Changed
 
@@ -19,6 +22,8 @@ All notable changes to Spectre Mnemonic are documented in this file.
   includes seed memories.
 - Centralized English and Italian stopword handling so sentence-leading
   articles do not create false keyword/entity boosts.
+- Documented that `.mnemonic` readers validate detached exports but do not
+  import or restore records into live memory.
 
 ### Security
 

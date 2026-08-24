@@ -151,3 +151,18 @@ The trailer also repeats per-section counts. A conforming reader verifies, in
 order: frame structure, sequence, bounds, CRC, gzip, JSON, version, section
 order, digest, counts, and partition agreement. No partially verified export is
 returned.
+
+## Reader and restore boundary
+
+A format-v1 reader decodes and verifies a detached representation. Successful
+verification does not authorize the reader to mutate active memory, replay a
+record into a durable store, merge identities, or apply governance state.
+`SpectreMnemonic.Export.read/2` and `SpectreMnemonic.Export.stream/2` are
+read-only implementations of this contract.
+
+Format version 1 defines no import or live-memory restore semantics. In
+particular, it does not define conflict resolution, idempotency keys, tombstone
+precedence, entity merging, governance transitions, or replacement rules for
+records already present in the destination partition. Implementations must not
+infer those operations from frame order or timestamps. A future rehydration API
+must define and validate those rules explicitly before writing any record.

@@ -12,6 +12,11 @@ modules, documented types, opaque types, and documented struct fields are also
 public. Modules with no callable row expose only their documented module,
 type, and struct contract.
 
+`SpectreMnemonic.Export.read/1,2` and `stream/1,2` decode and verify detached
+`.mnemonic` exports. Version `0.4.0` exposes no `.mnemonic` import or live-memory
+restore callable; persistent runtime recovery remains the responsibility of the
+configured store replay path.
+
 ## Manifest
 
 - `Spectre.Mnemonic`

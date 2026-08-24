@@ -311,6 +311,19 @@ reappear through that path either.
 `sealed: true` also refuses future writes to that partition. Exported files are
 host-owned copies and remain outside runtime erasure.
 
+### Reading versus restoring an export
+
+`SpectreMnemonic.Export.read/2` fully decodes and verifies a `.mnemonic` file;
+`SpectreMnemonic.Export.stream/2` exposes the same verified frames lazily. Both
+APIs are read-only: they return a detached export projection and never insert,
+replace, or merge records in active ETS memory or a durable store.
+
+Format version 1 does not define an import/restore operation. Reading a valid
+file is therefore not a memory round trip. Runtime recovery uses the configured
+persistent-store replay path. A future `.mnemonic` importer will need an
+explicit API and conflict, idempotency, tombstone, governance, and partition
+rules before it can safely rehydrate live memory.
+
 ## Remember Plug Pipeline
 
 `remember/2` can run a composable plug pipeline before normal intake. This is
@@ -1079,6 +1092,36 @@ This opt-in suite uses `ex_fastembed` with a local BGE model and verifies real
 semantic ranking, similarity floors, partition isolation, Vettore strategies,
 cross-memory aggregation, and durable-index rebuilds. The downloaded model
 cache is local-only and ignored by Git.
+
+### Spectre agent memory end-to-end
+
+The integration suite includes a real Spectre `0.3.3` Agent and Stack that run
+through the public `Spectre.turn/3` boundary. Consecutive turns let the runtime
+recall and persist Mnemonic memory normally; the test never injects a prepared
+memory packet. It verifies exact answers for an email address, a deployment
+reference and owner, a previously asked question, cross-conversation recall,
+and subject isolation.
+
+The responder is deliberately deterministic and builds its answers only from
+the `%SpectreMnemonic.Recall.Packet{}` supplied by the runtime. This keeps the
+assertions stable without a remote language model while still exercising the
+real Agent, turn lifecycle, memory adapter, persistence callback, and recall
+path.
+
+Run the offline scenarios with:
+
+```bash
+mix test test/integration/spectre_agent_memory_e2e_test.exs
+```
+
+The same file contains an opt-in semantic scenario. It uses `ex_fastembed`
+locally and proves that the Agent retrieves the email when the follow-up has no
+lexical overlap with the remembered text:
+
+```bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/integration/spectre_agent_memory_e2e_test.exs --only real_embedding
+```
 
 ## Project Layout
 
