@@ -4,6 +4,28 @@ All notable changes to Spectre Mnemonic are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `ex_fastembed` system tests with a real local BGE model covering
+  semantic top-result accuracy, Vettore strategies, similarity filtering,
+  partition isolation, graph aggregation, and durable rebuilds.
+- Added broad `.mnemonic`, graph, aggregation, entity-resolution, traversal,
+  Atlas, plasticity, and parameter-conformance test matrices.
+
+### Changed
+
+- Added `min_vector_similarity` for recall, strict aggregation and traversal
+  option validation, link shape validation, and a hard graph-node cap that
+  includes seed memories.
+- Centralized English and Italian stopword handling so sentence-leading
+  articles do not create false keyword/entity boosts.
+
+### Security
+
+- Reject non-finite and out-of-range float32 embeddings before indexing.
+- Validate `.mnemonic` manifest, trailer, record envelopes, section-specific
+  fields, and privacy invariants before returning decoded content.
+
 ## [0.4.0] - 2026-08-24
 
 ### Added

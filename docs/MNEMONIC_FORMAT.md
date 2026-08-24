@@ -1,6 +1,6 @@
 # `.mnemonic` format version 1
 
-This document is the normative contract for Spectre Mnemonic 0.4.x exports.
+This document is the normative contract for Spectre Mnemonic format-v1 exports.
 Readers in Spectre Lab, Spectre Studio, or another implementation must follow
 this document rather than depending on SpectreMnemonic runtime internals.
 
@@ -42,6 +42,11 @@ The machine-readable Draft 2020-12 schema is
 the manifest, every content section, the common record envelope, edges,
 clusters, and the trailer. Implementations apply it to every decoded frame in
 addition to the semantic checks below.
+
+The bundled reader validates required fields, field types, digest syntax,
+timestamps, exact count keys, normalized edge weights, cluster member ids, and
+privacy-forbidden fields before returning any data. Schema failures identify
+the frame sequence, section, record index when applicable, and failed rule.
 
 Object keys are serialized in ascending Unicode codepoint order. Arrays retain
 their specified order. Records are ordered by `family`, then `inserted_at`, then
@@ -130,7 +135,8 @@ function.
 Secrets are structurally special in every mode. A secret record may contain
 only presence, label, lock status, and temporal fields. Plaintext, ciphertext,
 IV, authentication tag, AAD, vectors, and arbitrary secret metadata are never
-exported.
+exported. A reader rejects a file containing any of these fields even if its
+framing, checksums, digest, and counts are otherwise valid.
 
 ## Digest and verification
 

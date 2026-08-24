@@ -10,6 +10,7 @@ defmodule SpectreMnemonic.QueryContext do
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Recall.Fingerprint
+  alias SpectreMnemonic.Recall.Lexical
 
   @type t :: %__MODULE__{
           input: term(),
@@ -55,8 +56,8 @@ defmodule SpectreMnemonic.QueryContext do
          namespace: Identity.namespace!(opts),
          scope: Keyword.get(opts, :scope),
          scopes: requested_scopes(opts),
-         keywords: keywords(text),
-         entities: entities(text),
+         keywords: Lexical.keywords(text),
+         entities: Lexical.entities(text),
          vector: Map.get(embedding, :vector),
          binary_signature: Map.get(embedding, :binary_signature),
          embedding: embedding,
@@ -111,21 +112,5 @@ defmodule SpectreMnemonic.QueryContext do
       true ->
         :ok
     end
-  end
-
-  @spec keywords(binary()) :: [binary()]
-  defp keywords(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 3))
-    |> Enum.uniq()
-  end
-
-  @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
-    |> List.flatten()
-    |> Enum.uniq()
   end
 end

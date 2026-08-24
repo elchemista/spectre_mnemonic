@@ -28,7 +28,7 @@ defmodule SpectreMnemonic.Graph.Traversal do
     adjacency = adjacency(associations)
     degree = Map.new(adjacency, fn {id, edges} -> {id, length(edges)} end)
 
-    seed_ids = seeds |> Enum.map(& &1.id) |> Enum.uniq()
+    seed_ids = seeds |> Enum.map(& &1.id) |> Enum.uniq() |> Enum.take(max_nodes)
     activations = Map.new(seed_ids, &{&1, 1.0})
     paths = Map.new(seed_ids, &{&1, %{seed_id: &1, activation: 1.0, hops: []}})
 

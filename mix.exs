@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.1.0"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -53,7 +53,12 @@ defmodule SpectreMnemonic.MixProject do
   defp deps do
     [
       spectre_dep(),
-      {:vettore, "~> 0.3.3"},
+      {:vettore, "~> 0.3.4"},
+      {:ex_fastembed,
+       github: "elchemista/ex_fastembed",
+       ref: "dddbf068d0202ba6d0a3788cc03992dc95203eaf",
+       only: :test,
+       runtime: false},
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},

@@ -80,7 +80,8 @@ defmodule SpectreMnemonic.Intake do
   """
   @spec remember(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts),
+    with :ok <- validate_remember_options(opts),
+         {:ok, opts} <- Identity.put_namespace(opts),
          {:ok, memory} <- normalize(input, opts),
          memory <- attach_recent_moments(memory, opts),
          {:ok, memory} <- run_plugs(memory, opts) do
@@ -1181,6 +1182,67 @@ defmodule SpectreMnemonic.Intake do
   @spec overlap_words(keyword()) :: non_neg_integer()
   defp overlap_words(opts),
     do: opts |> Keyword.get(:overlap_words, @default_overlap_words) |> max(0)
+
+  @spec validate_remember_options(term()) :: :ok | {:error, term()}
+  defp validate_remember_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      validators = [
+        {:chunk_words, &positive_integer?/1},
+        {:overlap_words, &non_negative_integer?/1},
+        {:summary_words, &positive_integer?/1},
+        {:max_related_edges, &non_negative_integer?/1},
+        {:max_cross_memory_edges, &non_negative_integer?/1},
+        {:similarity_threshold, &bounded_ratio?/1},
+        {:cross_memory_similarity_threshold, &bounded_ratio?/1},
+        {:extract_entities?, &is_boolean/1},
+        {:cross_memory?, &is_boolean/1},
+        {:persist?, &is_boolean/1},
+        {:metadata, &map_or_keyword?/1},
+        {:root_attention, &is_number/1},
+        {:chunk_attention, &is_number/1},
+        {:summary_attention, &is_number/1},
+        {:category_attention, &is_number/1},
+        {:extraction_attention, &is_number/1}
+      ]
+
+      Enum.reduce_while(validators, :ok, &validate_remember_option(&1, &2, opts))
+    else
+      {:error, {:invalid_remember_options, opts}}
+    end
+  end
+
+  defp validate_remember_options(opts), do: {:error, {:invalid_remember_options, opts}}
+
+  @spec validate_remember_option({atom(), (term() -> boolean())}, :ok, keyword()) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_remember_option({key, validator}, :ok, opts) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> validate_remember_option_value(key, value, validator)
+      :error -> {:cont, :ok}
+    end
+  end
+
+  @spec validate_remember_option_value(atom(), term(), (term() -> boolean())) ::
+          {:cont, :ok} | {:halt, {:error, term()}}
+  defp validate_remember_option_value(key, value, validator) do
+    if validator.(value),
+      do: {:cont, :ok},
+      else: {:halt, {:error, {:invalid_remember_option, key, value}}}
+  end
+
+  @spec positive_integer?(term()) :: boolean()
+  defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  @spec non_negative_integer?(term()) :: boolean()
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  @spec bounded_ratio?(term()) :: boolean()
+  defp bounded_ratio?(value), do: is_number(value) and value >= 0 and value <= 1
+
+  @spec map_or_keyword?(term()) :: boolean()
+  defp map_or_keyword?(value) when is_map(value), do: true
+  defp map_or_keyword?(value) when is_list(value), do: Keyword.keyword?(value)
+  defp map_or_keyword?(_value), do: false
 
   @spec words(binary()) :: [binary()]
   defp words(text) do

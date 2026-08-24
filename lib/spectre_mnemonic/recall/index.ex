@@ -86,6 +86,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
     results =
       (query_vettore_scoped(state, cue, limit, opts) || brute_force(cue, limit, opts))
+      |> filter_similarity(opts)
       |> Enum.take(limit)
 
     {:reply, {:ok, results}, state}
@@ -395,12 +396,36 @@ defmodule SpectreMnemonic.Recall.Index do
     end
   end
 
+  @spec filter_similarity([map()], keyword()) :: [map()]
+  defp filter_similarity(results, opts) do
+    minimum = similarity_floor(opts)
+    Enum.filter(results, &(Map.get(&1, :cosine, 0.0) >= minimum))
+  end
+
+  @spec similarity_floor(keyword()) :: float()
+  defp similarity_floor(opts) do
+    case Keyword.get(opts, :min_vector_similarity, 0.0) do
+      value when is_number(value) -> (value * 1.0) |> max(0.0) |> min(1.0)
+      _invalid -> 0.0
+    end
+  end
+
   @spec index_config :: map()
   defp index_config do
-    :spectre_mnemonic
-    |> Application.get_env(:embedding, [])
-    |> Keyword.get(:index, [])
-    |> Map.new()
+    embedding = Application.get_env(:spectre_mnemonic, :embedding, [])
+
+    index =
+      cond do
+        is_list(embedding) and Keyword.keyword?(embedding) -> Keyword.get(embedding, :index, [])
+        is_map(embedding) -> Map.get(embedding, :index, Map.get(embedding, "index", %{}))
+        true -> []
+      end
+
+    cond do
+      is_map(index) -> index
+      is_list(index) and Keyword.keyword?(index) -> Map.new(index)
+      true -> %{}
+    end
   end
 
   @spec call_if_running(term(), term()) :: term()

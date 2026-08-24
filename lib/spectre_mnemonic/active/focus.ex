@@ -25,6 +25,7 @@ defmodule SpectreMnemonic.Active.Focus do
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Index
+  alias SpectreMnemonic.Recall.Lexical
   alias SpectreMnemonic.Secrets
 
   @default_attention 1.0
@@ -302,7 +303,8 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec link_checked(binary(), atom(), binary(), keyword()) ::
           {:ok, Association.t()} | {:error, term()}
   defp link_checked(source_id, relation, target_id, opts) do
-    with {:ok, association_opts} <- association_context(source_id, target_id, opts) do
+    with :ok <- validate_link_request(source_id, relation, target_id, opts),
+         {:ok, association_opts} <- association_context(source_id, target_id, opts) do
       association = build_association(source_id, relation, target_id, association_opts)
 
       case maybe_persist_value(:associations, association, association_opts) do
@@ -1339,6 +1341,33 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
+  @spec validate_link_request(term(), term(), term(), keyword()) :: :ok | {:error, term()}
+  defp validate_link_request(source_id, relation, target_id, opts) do
+    with :ok <- validate_link_endpoint(:source_id, source_id),
+         :ok <- validate_link_endpoint(:target_id, target_id),
+         :ok <- validate_link_relation(relation),
+         :ok <- validate_link_weight(Keyword.get(opts, :weight, 1.0)) do
+      validate_structured_options(opts)
+    end
+  end
+
+  @spec validate_link_endpoint(atom(), term()) :: :ok | {:error, term()}
+  defp validate_link_endpoint(_key, value) when is_binary(value) and value != "", do: :ok
+  defp validate_link_endpoint(key, value), do: {:error, {:invalid_link_endpoint, key, value}}
+
+  @spec validate_link_relation(term()) :: :ok | {:error, term()}
+  defp validate_link_relation(relation)
+       when is_atom(relation) and relation not in [nil, true, false],
+       do: :ok
+
+  defp validate_link_relation(relation), do: {:error, {:invalid_link_relation, relation}}
+
+  @spec validate_link_weight(term()) :: :ok | {:error, term()}
+  defp validate_link_weight(weight) when is_number(weight) and weight >= 0 and weight <= 1,
+    do: :ok
+
+  defp validate_link_weight(weight), do: {:error, {:invalid_link_weight, weight}}
+
   @spec validate_structured_options(keyword()) :: :ok | {:error, term()}
   defp validate_structured_options(opts) do
     with :ok <- validate_map_option(opts, :metadata),
@@ -1429,21 +1458,10 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @spec keywords(term()) :: [binary()]
-  defp keywords(input) do
-    input
-    |> to_text()
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 3))
-    |> Enum.uniq()
-  end
+  defp keywords(input), do: Lexical.keywords(to_text(input))
 
   @spec entities(term()) :: [binary()]
-  defp entities(input) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, to_text(input))
-    |> Enum.concat()
-    |> Enum.uniq()
-  end
+  defp entities(input), do: Lexical.entities(to_text(input))
 
   @spec fingerprint(term()) :: non_neg_integer()
   defp fingerprint(input) do

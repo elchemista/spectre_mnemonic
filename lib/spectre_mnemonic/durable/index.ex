@@ -19,6 +19,7 @@ defmodule SpectreMnemonic.Durable.Index do
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
   alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.Recall.Lexical
   alias SpectreMnemonic.SearchResult
 
   @indexed_families [
@@ -562,19 +563,10 @@ defmodule SpectreMnemonic.Durable.Index do
   end
 
   @spec terms(binary()) :: [binary()]
-  defp terms(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 2))
-  end
+  defp terms(text), do: Lexical.keywords(text, 2)
 
   @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
-    |> List.flatten()
-    |> Enum.uniq()
-  end
+  defp entities(text), do: Lexical.entities(text)
 
   @spec cue_text(term()) :: binary()
   defp cue_text(%QueryContext{text: text}), do: String.downcase(text)

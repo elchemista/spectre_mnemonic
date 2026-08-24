@@ -515,12 +515,17 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     counts = Map.new(sections, &{&1, 0})
     content = Enum.map(sections, &%{"section" => &1, "data" => []})
     digest = content_digest(content)
+    scope_digest = String.duplicate("a", 64)
 
     manifest = %{
       "format" => "spectre-mnemonic",
       "format_version" => 1,
+      "library_version" => "0.4.0",
       "namespace" => @namespace,
-      "scope_digest" => "brain",
+      "scope" => "{:subject, \"conformance\"}",
+      "scope_digest" => scope_digest,
+      "privacy_mode" => "structure",
+      "created_at" => "1970-01-01T00:00:00Z",
       "content_digest" => digest,
       "counts" => counts
     }
@@ -551,8 +556,16 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
 
     write_mnemonic(
       path,
-      [%{manifest_frame | "data" => %{manifest | "content_digest" => "wrong"}} | content] ++
-        [%{trailer_frame | "data" => %{trailer | "content_digest" => "wrong"}}]
+      [
+        %{manifest_frame | "data" => %{manifest | "content_digest" => String.duplicate("0", 64)}}
+        | content
+      ] ++
+        [
+          %{
+            trailer_frame
+            | "data" => %{trailer | "content_digest" => String.duplicate("0", 64)}
+          }
+        ]
     )
 
     assert {:error, :mnemonic_digest_mismatch} = Export.read(path)
@@ -571,7 +584,15 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     mixed = [
       %{
         "section" => "nodes",
-        "data" => [%{"namespace" => "another", "scope_digest" => "brain"}]
+        "data" => [
+          %{
+            "family" => "moments",
+            "id" => "mixed",
+            "inserted_at" => "1970-01-01T00:00:00Z",
+            "namespace" => "another",
+            "scope_digest" => scope_digest
+          }
+        ]
       }
       | Enum.drop(content, 1)
     ]

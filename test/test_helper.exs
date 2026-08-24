@@ -1,4 +1,7 @@
-ExUnit.start()
+real_embedding_tests? = System.get_env("MNEMONIC_REAL_EMBEDDING_TESTS") == "1"
+exclude = if real_embedding_tests?, do: [], else: [real_embedding: true]
+
+ExUnit.start(exclude: exclude)
 
 defmodule SpectreMnemonic.MemoryCase do
   @moduledoc """

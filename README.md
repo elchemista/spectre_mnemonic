@@ -198,6 +198,17 @@ packet.knowledge
 
 `max_tokens` is a best-effort packet budget. Recall may include one oversized
 primary evidence item when excluding it would make the packet empty.
+`min_vector_similarity` can reject weak semantic candidates before fusion;
+it accepts a cosine threshold from `0.0` to `1.0`:
+
+```elixir
+SpectreMnemonic.recall("how is alpha going?",
+  scope: {:project, "alpha"},
+  min_vector_similarity: 0.55,
+  graph_depth: 2,
+  max_graph_nodes: 200
+)
+```
 
 Use `search/2` when you want active recall plus durable persisted memory:
 
@@ -434,6 +445,10 @@ associations, artifacts, action recipes, attention, and task status.
 `remember/2` is the higher-level intake path. It normalizes input, creates a
 root moment, chunks long text, creates summaries and categories, extracts an
 entity timeline graph, and links the graph with typed associations.
+
+Cross-memory aggregation is partition-local and bounded. Tune it with
+`cross_memory_similarity_threshold` (`0.0..1.0`) and
+`max_cross_memory_edges`, or disable it with `cross_memory?: false`.
 
 The deterministic extractor handles names, ISO/month dates, simple events,
 emails, ages, numbers, and phone-like values. Phone-like values are redacted by
@@ -908,6 +923,8 @@ The `vector: [...]` shorthand is also accepted. Caller-provided vectors take
 priority over configured providers, are normalized into the internal float32
 form, and receive a compact binary signature automatically. Invalid vectors do
 not abort ingestion: the memory remains available to text and graph recall.
+Malformed, non-finite, empty, and out-of-range float32 vectors are rejected at
+this boundary instead of entering the index.
 
 Configure a custom adapter:
 
@@ -1049,6 +1066,19 @@ mix credo
 mix dialyzer
 mix test
 ```
+
+The default suite is offline and excludes model-backed system tests. Run the
+real local embedding and retrieval matrix explicitly with:
+
+```bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/system/real_embedding_retrieval_test.exs --include real_embedding
+```
+
+This opt-in suite uses `ex_fastembed` with a local BGE model and verifies real
+semantic ranking, similarity floors, partition isolation, Vettore strategies,
+cross-memory aggregation, and durable-index rebuilds. The downloaded model
+cache is local-only and ignored by Git.
 
 ## Project Layout
 

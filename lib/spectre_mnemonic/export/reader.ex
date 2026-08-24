@@ -8,19 +8,40 @@ defmodule SpectreMnemonic.Export.Reader do
   @version 1
   @header_bytes 4 + 1 + 8 + 4 + 4
   @content_sections ~w(nodes edges clusters models knowledge governance)
+  @manifest_fields ~w(format format_version library_version namespace scope scope_digest privacy_mode created_at counts content_digest)
+  @record_fields ~w(family id namespace scope_digest inserted_at)
+  @forbidden_structure_fields ~w(text input summary statement answer vector binary_signature embedding ciphertext iv tag aad)
+  @secret_forbidden_fields ~w(text input summary statement answer vector binary_signature embedding ciphertext iv tag aad plaintext)
+  @digest_regex ~r/^[0-9a-f]{64}$/
 
   @spec read(Path.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
-  def read(path, _opts \\ []) do
-    with :ok <- verify_file(path),
+  def read(path, opts \\ []) do
+    with :ok <- validate_reader_options(path, opts),
+         :ok <- verify_file(path),
          {:ok, frames} <- fold_frames(path, [], fn frame, acc -> {:cont, [frame | acc]} end) do
       {:ok, Enum.reverse(frames)}
     end
   end
 
   @spec stream(Path.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
-  def stream(path, _opts \\ []) do
-    with :ok <- verify_file(path) do
+  def stream(path, opts \\ []) do
+    with :ok <- validate_reader_options(path, opts),
+         :ok <- verify_file(path) do
       {:ok, frame_stream(path)}
+    end
+  end
+
+  @spec validate_reader_options(term(), term()) :: :ok | {:error, term()}
+  defp validate_reader_options(path, opts) do
+    cond do
+      not is_binary(path) or path == "" ->
+        {:error, {:invalid_mnemonic_path, path}}
+
+      not is_list(opts) or not Keyword.keyword?(opts) ->
+        {:error, {:invalid_mnemonic_options, opts}}
+
+      true ->
+        :ok
     end
   end
 
@@ -70,6 +91,7 @@ defmodule SpectreMnemonic.Export.Reader do
           end)
         )
         |> Map.update!(:digest, &:crypto.hash_update(&1, CanonicalJSON.encode(frame)))
+        |> verify_privacy_data(data)
         |> verify_partition_data(data)
 
       {:cont, state}
@@ -94,6 +116,48 @@ defmodule SpectreMnemonic.Export.Reader do
          end) do
       nil -> state
       invalid -> Map.put(state, :error, {:mixed_mnemonic_partition, invalid})
+    end
+  end
+
+  @spec verify_privacy_data(map(), [term()]) :: map()
+  defp verify_privacy_data(%{error: _reason} = state, _data), do: state
+
+  defp verify_privacy_data(state, data) do
+    mode = Map.get(state.manifest, "privacy_mode")
+
+    case Enum.find_value(data, &privacy_violation(&1, mode)) do
+      nil -> state
+      violation -> Map.put(state, :error, violation)
+    end
+  end
+
+  @spec privacy_violation(map(), binary()) :: term() | nil
+  defp privacy_violation(record, mode) do
+    fields = Map.keys(record)
+
+    cond do
+      secret_record?(record) ->
+        forbidden_field(fields, @secret_forbidden_fields, record)
+
+      mode == "structure" ->
+        forbidden_field(fields, @forbidden_structure_fields, record)
+
+      true ->
+        nil
+    end
+  end
+
+  @spec secret_record?(map()) :: boolean()
+  defp secret_record?(record) do
+    Map.get(record, "secret") == true or Map.get(record, "kind") == "secret" or
+      Map.get(record, "family") == "secrets"
+  end
+
+  @spec forbidden_field([term()], [binary()], map()) :: term() | nil
+  defp forbidden_field(fields, forbidden, record) do
+    case Enum.find(forbidden, &(&1 in fields)) do
+      nil -> nil
+      field -> {:mnemonic_privacy_violation, Map.get(record, "id"), field}
     end
   end
 
@@ -265,11 +329,149 @@ defmodule SpectreMnemonic.Export.Reader do
   end
 
   @spec validate_frame(term(), pos_integer()) :: :ok | {:error, term()}
-  defp validate_frame(%{"section" => section, "data" => _data}, _sequence)
-       when is_binary(section),
-       do: :ok
+  defp validate_frame(%{"section" => section, "data" => data} = frame, sequence)
+       when is_binary(section) and map_size(frame) == 2 do
+    result =
+      case section do
+        "manifest" -> validate_manifest_schema(data)
+        "trailer" -> validate_trailer_schema(data)
+        content when content in @content_sections -> validate_content_schema(content, data)
+        _unknown -> :ok
+      end
+
+    case result do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_mnemonic_schema, sequence, section, reason}}
+    end
+  end
 
   defp validate_frame(_frame, sequence), do: {:error, {:invalid_mnemonic_frame, sequence}}
+
+  @spec validate_manifest_schema(term()) :: :ok | {:error, term()}
+  defp validate_manifest_schema(manifest) when is_map(manifest) do
+    checks = [
+      {:required_fields, Enum.all?(@manifest_fields, &Map.has_key?(manifest, &1))},
+      {:format, is_binary(Map.get(manifest, "format"))},
+      {:format_version, is_integer(Map.get(manifest, "format_version"))},
+      {:library_version, nonempty_string?(Map.get(manifest, "library_version"))},
+      {:namespace, nonempty_string?(Map.get(manifest, "namespace"))},
+      {:scope, is_binary(Map.get(manifest, "scope"))},
+      {:scope_digest, valid_digest?(Map.get(manifest, "scope_digest"))},
+      {:privacy_mode, Map.get(manifest, "privacy_mode") in ~w(structure full redacted)},
+      {:created_at, valid_datetime?(Map.get(manifest, "created_at"))},
+      {:counts, valid_counts?(Map.get(manifest, "counts"))},
+      {:content_digest, valid_digest?(Map.get(manifest, "content_digest"))}
+    ]
+
+    schema_checks(checks)
+  end
+
+  defp validate_manifest_schema(_manifest), do: {:error, :manifest_not_an_object}
+
+  @spec validate_trailer_schema(term()) :: :ok | {:error, term()}
+  defp validate_trailer_schema(trailer) when is_map(trailer) do
+    schema_checks([
+      {:required_fields, Enum.all?(~w(counts content_digest), &Map.has_key?(trailer, &1))},
+      {:only_known_fields,
+       trailer |> Map.keys() |> Enum.sort() == Enum.sort(~w(counts content_digest))},
+      {:counts, valid_counts?(Map.get(trailer, "counts"))},
+      {:content_digest, valid_digest?(Map.get(trailer, "content_digest"))}
+    ])
+  end
+
+  defp validate_trailer_schema(_trailer), do: {:error, :trailer_not_an_object}
+
+  @spec validate_content_schema(binary(), term()) :: :ok | {:error, term()}
+  defp validate_content_schema(section, data) when is_list(data) do
+    data
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {record, index}, :ok ->
+      case validate_record_schema(section, record) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:record, index, reason}}}
+      end
+    end)
+  end
+
+  defp validate_content_schema(_section, _data), do: {:error, :content_not_an_array}
+
+  @spec validate_record_schema(binary(), term()) :: :ok | {:error, term()}
+  defp validate_record_schema(section, record) when is_map(record) do
+    envelope = [
+      {:required_fields, Enum.all?(@record_fields, &Map.has_key?(record, &1))},
+      {:family, nonempty_string?(Map.get(record, "family"))},
+      {:id, nonempty_string?(Map.get(record, "id"))},
+      {:namespace, nonempty_string?(Map.get(record, "namespace"))},
+      {:scope_digest, valid_digest?(Map.get(record, "scope_digest"))},
+      {:inserted_at, valid_optional_datetime?(Map.get(record, "inserted_at"))}
+    ]
+
+    with :ok <- schema_checks(envelope) do
+      validate_section_record(section, record)
+    end
+  end
+
+  defp validate_record_schema(_section, _record), do: {:error, :record_not_an_object}
+
+  @spec validate_section_record(binary(), map()) :: :ok | {:error, term()}
+  defp validate_section_record("edges", record) do
+    weight = Map.get(record, "weight")
+
+    schema_checks([
+      {:source_id, nonempty_string?(Map.get(record, "source_id"))},
+      {:target_id, nonempty_string?(Map.get(record, "target_id"))},
+      {:relation, nonempty_string?(Map.get(record, "relation"))},
+      {:weight, is_number(weight) and weight >= 0 and weight <= 1}
+    ])
+  end
+
+  defp validate_section_record("clusters", record) do
+    moment_ids = Map.get(record, "moment_ids")
+
+    schema_checks([
+      {:title, nonempty_string?(Map.get(record, "title"))},
+      {:moment_ids, is_list(moment_ids) and Enum.all?(moment_ids, &nonempty_string?/1)}
+    ])
+  end
+
+  defp validate_section_record(_section, _record), do: :ok
+
+  @spec schema_checks([{term(), boolean()}]) :: :ok | {:error, term()}
+  defp schema_checks(checks) do
+    case Enum.find(checks, fn {_field, valid?} -> not valid? end) do
+      nil -> :ok
+      {field, false} -> {:error, field}
+    end
+  end
+
+  @spec valid_counts?(term()) :: boolean()
+  defp valid_counts?(counts) when is_map(counts) do
+    Map.keys(counts) |> Enum.sort() == Enum.sort(@content_sections) and
+      Enum.all?(@content_sections, fn section ->
+        value = Map.get(counts, section)
+        is_integer(value) and value >= 0
+      end)
+  end
+
+  defp valid_counts?(_counts), do: false
+
+  @spec valid_digest?(term()) :: boolean()
+  defp valid_digest?(digest) when is_binary(digest), do: Regex.match?(@digest_regex, digest)
+  defp valid_digest?(_digest), do: false
+
+  @spec valid_datetime?(term()) :: boolean()
+  defp valid_datetime?(value) when is_binary(value) do
+    match?({:ok, %DateTime{}, _offset}, DateTime.from_iso8601(value))
+  end
+
+  defp valid_datetime?(_value), do: false
+
+  @spec valid_optional_datetime?(term()) :: boolean()
+  defp valid_optional_datetime?(nil), do: true
+  defp valid_optional_datetime?(value), do: valid_datetime?(value)
+
+  @spec nonempty_string?(term()) :: boolean()
+  defp nonempty_string?(value), do: is_binary(value) and value != ""
 
   @spec frame_stream(Path.t()) :: Enumerable.t()
   defp frame_stream(path) do

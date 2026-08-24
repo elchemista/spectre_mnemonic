@@ -16,8 +16,9 @@ defmodule SpectreMnemonic.Export.Writer do
   @all_sections [:nodes, :edges, :clusters, :models, :knowledge, :governance]
 
   @spec write(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def write(path, opts) when is_binary(path) do
-    with {:ok, opts} <- Identity.put_namespace(opts),
+  def write(path, opts) do
+    with :ok <- validate_write_options(path, opts),
+         {:ok, opts} <- Identity.put_namespace(opts),
          {:ok, sections, snapshot_at} <- sections(opts),
          {:ok, frames} <- content_frames(sections, opts),
          digest <- content_digest(frames),
@@ -37,6 +38,71 @@ defmodule SpectreMnemonic.Export.Writer do
        }}
     end
   end
+
+  @spec validate_write_options(term(), term()) :: :ok | {:error, term()}
+  defp validate_write_options(path, opts) do
+    with :ok <- validate_export_path(path),
+         :ok <- validate_export_options(opts),
+         :ok <- validate_export_value(opts, :mode, :structure, &valid_privacy_mode?/1),
+         :ok <- validate_export_value(opts, :include, :all, &valid_include?/1),
+         :ok <- validate_optional_export_value(opts, :embeddings?, &is_boolean/1),
+         :ok <- validate_optional_export_value(opts, :active?, &is_boolean/1) do
+      validate_export_value(opts, :frame_target_bytes, nil, &valid_frame_target?/1)
+    end
+  end
+
+  @spec validate_export_path(term()) :: :ok | {:error, term()}
+  defp validate_export_path(path) when is_binary(path) and path != "", do: :ok
+  defp validate_export_path(path), do: {:error, {:invalid_export_path, path}}
+
+  @spec validate_export_options(term()) :: :ok | {:error, term()}
+  defp validate_export_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts), do: :ok, else: {:error, {:invalid_export_options, opts}}
+  end
+
+  defp validate_export_options(opts), do: {:error, {:invalid_export_options, opts}}
+
+  @spec validate_export_value(keyword(), atom(), term(), (term() -> boolean())) ::
+          :ok | {:error, term()}
+  defp validate_export_value(opts, key, default, validator) do
+    value = Keyword.get(opts, key, default)
+
+    if validator.(value),
+      do: :ok,
+      else: {:error, {:invalid_export_option, key, value}}
+  end
+
+  @spec validate_optional_export_value(keyword(), atom(), (term() -> boolean())) ::
+          :ok | {:error, term()}
+  defp validate_optional_export_value(opts, key, validator) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} ->
+        if validator.(value),
+          do: :ok,
+          else: {:error, {:invalid_export_option, key, value}}
+
+      :error ->
+        :ok
+    end
+  end
+
+  @spec valid_privacy_mode?(term()) :: boolean()
+  defp valid_privacy_mode?(mode) when mode in [:structure, :full], do: true
+  defp valid_privacy_mode?({:redacted, fun}), do: is_function(fun, 1)
+  defp valid_privacy_mode?(_mode), do: false
+
+  @spec valid_include?(term()) :: boolean()
+  defp valid_include?(:all), do: true
+
+  defp valid_include?(sections) when is_list(sections) do
+    Enum.all?(sections, &(&1 in @all_sections))
+  end
+
+  defp valid_include?(_sections), do: false
+
+  @spec valid_frame_target?(term()) :: boolean()
+  defp valid_frame_target?(nil), do: true
+  defp valid_frame_target?(value), do: is_integer(value) and value >= 256
 
   @spec sections(keyword()) :: {:ok, map(), DateTime.t()} | {:error, term()}
   defp sections(opts) do
@@ -336,7 +402,7 @@ defmodule SpectreMnemonic.Export.Writer do
     %{
       "format" => "spectre-mnemonic",
       "format_version" => @version,
-      "library_version" => "0.4.0",
+      "library_version" => library_version(),
       "namespace" => Identity.namespace!(opts),
       "scope" => inspect(Keyword.get(opts, :scope), limit: :infinity),
       "scope_digest" => scope_digest(opts),
@@ -345,6 +411,14 @@ defmodule SpectreMnemonic.Export.Writer do
       "content_digest" => digest,
       "counts" => counts(sections)
     }
+  end
+
+  @spec library_version :: binary()
+  defp library_version do
+    case Application.spec(:spectre_mnemonic, :vsn) do
+      nil -> "unknown"
+      version -> to_string(version)
+    end
   end
 
   @spec trailer(map(), binary()) :: map()

@@ -227,7 +227,7 @@ defmodule SpectreMnemonic.Recall.Engine do
           keyword()
         ) :: [{number(), recall_moment()}]
   defp maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts) do
-    score = if memory_visible?(moment, opts), do: score(moment, cue, index_scores), else: 0
+    score = if memory_visible?(moment, opts), do: score(moment, cue, index_scores, opts), else: 0
 
     if score > 0 do
       insert_ranked({score, moment}, ranked, limit)
@@ -247,11 +247,11 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec rank_key({number(), recall_moment()}) :: {number(), integer()}
   defp rank_key({score, moment}), do: {-score, DateTime.to_unix(moment.inserted_at, :microsecond)}
 
-  @spec score(recall_moment(), QueryContext.t(), map()) :: number()
-  defp score(moment, cue, index_scores) do
+  @spec score(recall_moment(), QueryContext.t(), map(), keyword()) :: number()
+  defp score(moment, cue, index_scores, opts) do
     keyword_score = overlap(moment.keywords, cue.keywords) * 2
     entity_score = overlap(moment.entities, cue.entities) * 3
-    semantic_score = semantic_score(moment, cue, index_scores)
+    semantic_score = semantic_score(moment, cue, index_scores, opts)
     status_bonus = if status_match?(moment, cue), do: 2, else: 0
 
     match_score = keyword_score + entity_score + semantic_score + status_bonus
@@ -263,7 +263,7 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp rerank_moments(moments, cue, index_scores) do
     moments
     |> Enum.map(fn moment ->
-      base_score = score(moment, cue, index_scores)
+      base_score = score(moment, cue, index_scores, cue.opts)
       {max(base_score, structured_score(moment, cue)), moment}
     end)
     |> Enum.sort_by(&rank_key/1)
@@ -777,22 +777,37 @@ defmodule SpectreMnemonic.Recall.Engine do
     MapSet.size(MapSet.intersection(left, right))
   end
 
-  @spec semantic_score(Moment.t() | map(), QueryContext.t() | map(), map()) :: number()
-  defp semantic_score(%{id: id, vector: left, binary_signature: signature}, cue, index_scores)
+  @spec semantic_score(Moment.t() | map(), QueryContext.t() | map(), map(), keyword()) :: number()
+  defp semantic_score(
+         %{id: id, vector: left, binary_signature: signature},
+         cue,
+         index_scores,
+         opts
+       )
        when is_binary(left) and is_binary(cue.vector) do
+    minimum = Keyword.get(opts, :min_vector_similarity, 0.0) * 1.0
+
     case Map.fetch(index_scores, id) do
-      {:ok, result} ->
+      {:ok, result} when result.cosine >= minimum ->
         result.score
+
+      {:ok, _below_threshold} ->
+        0.0
 
       :error ->
         cosine = max(0.0, Vector.cosine(left, cue.vector))
-        signature_bits = signature_bits(cue.embedding, signature, cue.binary_signature)
-        hamming = Vector.hamming_similarity(signature, cue.binary_signature, signature_bits)
-        cosine * 4 + hamming * 4
+
+        if cosine >= minimum do
+          signature_bits = signature_bits(cue.embedding, signature, cue.binary_signature)
+          hamming = Vector.hamming_similarity(signature, cue.binary_signature, signature_bits)
+          cosine * 4 + hamming * 4
+        else
+          0.0
+        end
     end
   end
 
-  defp semantic_score(moment, cue, _index_scores) do
+  defp semantic_score(moment, cue, _index_scores, _opts) do
     similarity =
       Fingerprint.hamming_similarity(moment.fingerprint, cue.fingerprint)
 
@@ -823,6 +838,16 @@ defmodule SpectreMnemonic.Recall.Engine do
         {:include_knowledge, &is_boolean/1},
         {:trace, &is_boolean/1},
         {:plasticity?, &is_boolean/1},
+        {:overfetch, &non_negative_integer?/1},
+        {:graph_depth, &non_negative_integer?/1},
+        {:max_graph_nodes, &non_negative_integer?/1},
+        {:hop_decay, &bounded_ratio?/1},
+        {:activation_floor, &bounded_ratio?/1},
+        {:prune_threshold, &bounded_ratio?/1},
+        {:relations, &valid_relations?/1},
+        {:relation_types, &valid_relations?/1},
+        {:exclude_relations, &valid_relation_list?/1},
+        {:min_vector_similarity, &bounded_ratio?/1},
         {:budget, &(&1 in [:low, :mid, :high])}
       ]
 
@@ -859,6 +884,19 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   @spec positive_integer?(term()) :: boolean()
   defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  @spec bounded_ratio?(term()) :: boolean()
+  defp bounded_ratio?(value), do: is_number(value) and value >= 0 and value <= 1
+
+  @spec valid_relations?(term()) :: boolean()
+  defp valid_relations?(:all), do: true
+  defp valid_relations?(relations), do: valid_relation_list?(relations)
+
+  @spec valid_relation_list?(term()) :: boolean()
+  defp valid_relation_list?(relations) when is_list(relations),
+    do: Enum.all?(relations, &is_atom/1)
+
+  defp valid_relation_list?(_relations), do: false
 
   @spec result_values(term()) :: [term()]
   defp result_values({:ok, values}) when is_list(values), do: values
