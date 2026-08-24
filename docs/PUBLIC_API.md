@@ -13,7 +13,7 @@ public. Modules with no callable row expose only their documented module,
 type, and struct contract.
 
 `SpectreMnemonic.Export.read/1,2` and `stream/1,2` decode and verify detached
-`.mnemonic` exports. Version `0.4.0` exposes no `.mnemonic` import or live-memory
+`.mnemonic` exports. Version `0.1.0` exposes no `.mnemonic` import or live-memory
 restore callable; persistent runtime recovery remains the responsibility of the
 configured store replay path.
 
@@ -24,7 +24,7 @@ configured store replay path.
 - `Spectre.Mnemonic.Memory`
   - functions: `options/1`, `options/2`, `remember/4`
 - `SpectreMnemonic`
-  - functions: `artifact/1`, `artifact/2`, `atlas/0`, `atlas/1`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `erase_partition/1`, `export/1`, `export/2`, `forget/1`, `forget/2`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `merge_entities/2`, `merge_entities/3`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `sweep_expired/0`, `sweep_expired/1`, `verify_observation/1`, `verify_observation/2`
+  - functions: `artifact/1`, `artifact/2`, `atlas/0`, `atlas/1`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `erase_partition/1`, `export/1`, `export/2`, `forget/1`, `forget/2`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `merge_entities/2`, `merge_entities/3`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `sweep_expired/0`, `sweep_expired/1`, `unmerge_entities/2`, `unmerge_entities/3`, `verify_observation/1`, `verify_observation/2`
 - `SpectreMnemonic.Atlas`
   - functions: `build/0`, `build/1`
 - `SpectreMnemonic.Atlas.LabelAdapter`

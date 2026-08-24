@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   alias SpectreMnemonic.Persistence.Manager
 
   @protected_relations [:attached_action, :member_of, :same_as]
+  @default_stale_after_ms 30 * 24 * 60 * 60 * 1_000
+  @default_persist_interval_ms 60_000
 
   @doc "Reinforces every association used by the supplied activation paths."
   @spec reinforce(map() | [map()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
@@ -33,11 +35,10 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   @doc "Decays unused association weights toward a configured floor."
   @spec decay(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def decay(opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, stale_before} <- stale_before(opts) do
       factor = bounded(opts, :decay_factor, 0.985)
       floor = bounded(opts, :weight_floor, 0.02)
-      now = DateTime.utc_now()
-      stale_before = Keyword.get(opts, :used_before, now)
 
       ids =
         opts
@@ -58,9 +59,8 @@ defmodule SpectreMnemonic.Graph.Plasticity do
 
       partitions =
         :mnemonic_associations_by_scope
-        |> :ets.tab2list()
-        |> Enum.map(fn {{record_namespace, scope}, _id} -> {record_namespace, scope} end)
-        |> Enum.filter(fn {record_namespace, _scope} -> record_namespace == namespace end)
+        |> :ets.match({{namespace, :"$1"}, :_})
+        |> Enum.map(fn [scope] -> {namespace, scope} end)
         |> Enum.uniq()
 
       decay_partitions(partitions, opts)
@@ -95,21 +95,51 @@ defmodule SpectreMnemonic.Graph.Plasticity do
           {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, term()}}
   defp reweight_id(id, count, opts, fun, activated?) do
     case :ets.lookup(:mnemonic_associations, id) do
+      [{^id, %Association{} = association}]
+      when activated? and association.relation in @protected_relations ->
+        {:cont, {:ok, count}}
+
       [{^id, %Association{} = association}] ->
-        association |> update_association(fun, activated?) |> persist_weight(count, opts)
+        persist_weight(association, update_association(association, fun, activated?), count, opts)
 
       [] ->
         {:cont, {:ok, count}}
     end
   end
 
-  @spec persist_weight(Association.t(), non_neg_integer(), keyword()) ::
+  @spec persist_weight(Association.t(), Association.t(), non_neg_integer(), keyword()) ::
           {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, term()}}
-  defp persist_weight(updated, count, opts) do
-    case Manager.append(:associations, updated, opts) do
+  defp persist_weight(original, updated, count, opts) do
+    cond do
+      updated.weight == original.weight ->
+        maybe_touch_hot(original, updated)
+        {:cont, {:ok, count}}
+
+      not persist_weight?(updated, opts) ->
+        conditional_hot_update(updated, count)
+
+      not persistence_due?(original, opts) ->
+        conditional_hot_update(updated, count)
+
+      true ->
+        persist_changed_weight(updated, count, opts)
+    end
+  end
+
+  @spec persist_changed_weight(Association.t(), non_neg_integer(), keyword()) ::
+          {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, term()}}
+  defp persist_changed_weight(updated, count, opts) do
+    now = DateTime.utc_now()
+
+    persisted = %{
+      updated
+      | inserted_at: now,
+        metadata: Map.put(updated.metadata, :last_persisted_at, now)
+    }
+
+    case Manager.append(:associations, persisted, opts) do
       {:ok, _result} ->
-        Focus.upsert_association(updated)
-        {:cont, {:ok, count + 1}}
+        conditional_hot_update(persisted, count)
 
       {:error, reason} ->
         {:halt, {:error, reason}}
@@ -128,9 +158,69 @@ defmodule SpectreMnemonic.Graph.Plasticity do
     %{
       association
       | weight: (association.weight * 1.0) |> fun.() |> max(0.0) |> min(1.0),
-        metadata: metadata,
-        inserted_at: now
+        metadata: metadata
     }
+  end
+
+  @spec maybe_touch_hot(Association.t(), Association.t()) :: :ok
+  defp maybe_touch_hot(original, updated) do
+    if original.metadata != updated.metadata,
+      do: Focus.upsert_association_if_present(updated)
+
+    :ok
+  end
+
+  @spec conditional_hot_update(Association.t(), non_neg_integer()) ::
+          {:cont, {:ok, non_neg_integer()}}
+  defp conditional_hot_update(updated, count) do
+    case Focus.upsert_association_if_present(updated) do
+      :ok -> {:cont, {:ok, count + 1}}
+      :missing -> {:cont, {:ok, count}}
+    end
+  end
+
+  @spec persist_weight?(Association.t(), keyword()) :: boolean()
+  defp persist_weight?(association, opts) do
+    Keyword.get(opts, :persist?, Map.get(association.metadata, :durable?, true)) == true
+  end
+
+  @spec persistence_due?(Association.t(), keyword()) :: boolean()
+  defp persistence_due?(association, opts) do
+    interval = non_negative_integer(opts, :reweight_min_interval_ms, @default_persist_interval_ms)
+
+    case Map.get(association.metadata, :last_persisted_at) do
+      %DateTime{} = last -> DateTime.diff(DateTime.utc_now(), last, :millisecond) >= interval
+      _missing -> true
+    end
+  end
+
+  @spec stale_before(keyword()) :: {:ok, DateTime.t()} | {:error, term()}
+  defp stale_before(opts) do
+    if Keyword.has_key?(opts, :used_before) do
+      case Keyword.get(opts, :used_before) do
+        %DateTime{} = before -> {:ok, before}
+        invalid -> {:error, {:invalid_plasticity_option, :used_before, invalid}}
+      end
+    else
+      stale_before_from_window(opts)
+    end
+  end
+
+  @spec stale_before_from_window(keyword()) :: {:ok, DateTime.t()} | {:error, term()}
+  defp stale_before_from_window(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    stale_after_ms = Keyword.get(opts, :stale_after_ms, @default_stale_after_ms)
+
+    cond do
+      not match?(%DateTime{}, now) ->
+        {:error, {:invalid_plasticity_option, :now, now}}
+
+      not (is_integer(stale_after_ms) and stale_after_ms >= 0) ->
+        {:error, {:invalid_plasticity_option, :stale_after_ms, stale_after_ms}}
+
+      true ->
+        {:ok, DateTime.add(now, -stale_after_ms, :millisecond)}
+    end
   end
 
   @spec unused_before?(Association.t(), DateTime.t()) :: boolean()
@@ -141,8 +231,6 @@ defmodule SpectreMnemonic.Graph.Plasticity do
     end
   end
 
-  defp unused_before?(_association, _before), do: true
-
   @spec path_values(map() | [map()]) :: [map()]
   defp path_values(paths) when is_map(paths), do: Map.values(paths)
   defp path_values(paths) when is_list(paths), do: paths
@@ -152,6 +240,14 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   defp bounded(opts, key, default) do
     case Keyword.get(opts, key, default) do
       value when is_number(value) -> (value * 1.0) |> max(0.0) |> min(1.0)
+      _invalid -> default
+    end
+  end
+
+  @spec non_negative_integer(keyword(), atom(), non_neg_integer()) :: non_neg_integer()
+  defp non_negative_integer(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value >= 0 -> value
       _invalid -> default
     end
   end

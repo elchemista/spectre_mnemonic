@@ -89,7 +89,9 @@ defmodule SpectreMnemonic.ConsolidationScheduler do
       end
 
     decay = Governance.decay(stale_after_ms: Keyword.get(cfg, :stale_after_ms))
-    graph_decay = Plasticity.decay_all()
+
+    graph_decay =
+      Plasticity.decay_all(stale_after_ms: Keyword.get(cfg, :stale_after_ms))
 
     compact =
       case Keyword.get(cfg, :mode, :all) do

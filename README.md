@@ -263,9 +263,16 @@ Ask recall to explain its graph path:
 packet.trace
 ```
 
-Export exactly one partition. `:structure` is the default and contains no raw
-memory text. `:full` is the subject-access/data-portability representation.
-Secrets expose at most presence, label, and dates in every mode.
+Entity merges are append-only and reversible. `merge_entities/3` writes a
+non-traversable `:same_as` edge and redirects exact resolution to the winner;
+`unmerge_entities/3` tombstones that edge and restores the loser's canonical
+aliases without rewriting old memory records.
+
+Export exactly one partition. `:structure` is the default and contains topology
+without raw memory text, entity aliases, canonical labels, cluster titles, or
+secret labels. `:full` is the subject-access/data-portability representation.
+Secrets expose at most presence, label, and dates; structure mode omits the
+label as well.
 
 ```elixir
 {:ok, report} =
@@ -283,11 +290,22 @@ The normative container contract is
 schema in
 [`priv/mnemonic_schema_v1.json`](priv/mnemonic_schema_v1.json). Large sections
 are split into bounded consecutive frames; `SpectreMnemonic.Export.stream/2`
-verifies the file before exposing a lazy frame stream.
+verifies the file before exposing a lazy frame stream. If the file changes
+after verification, the stream emits one typed `{:error, reason}` item and
+halts. Active exports fail explicitly if Atlas bounds would truncate their
+projection.
+
+Frame chunking bounds each encoded frame, not the writer's total heap usage.
+The format-v1 writer materializes the partition projection so it can deduplicate
+records, apply stable ordering, and calculate exact counts before installing the
+file. Size the exporting process for the selected partition; the reader stream
+is the lazy interface.
 
 `forget/2` suppresses selected memory from retrieval and records its lifecycle;
-it is not physical erasure. `erase_partition/1` destroys one complete partition
-and therefore requires both namespace and scope explicitly:
+it is not physical erasure. Its records and dependent episodes are absent from
+logical exports even though append-only bytes can remain until compaction.
+`erase_partition/1` destroys one complete partition and therefore requires both
+namespace and scope explicitly:
 
 ```elixir
 {:ok, report} =
@@ -305,11 +323,26 @@ Erasure enumerates durable records (including records evicted from bounded hot
 memory), tombstones every family, rewrites `knowledge.smem`, purges ETS, invokes
 optional adapter crypto-shredding, removes retained file-store snapshots and
 segments, physically replays the compacted store as a post-condition, and keeps
-a durable marker that blocks stale-history resurrection. The progressive
+a durable generation marker that blocks stale-history resurrection even when a
+restored record carries a future timestamp. Every configured store must expose
+physical partition erasure and verification capabilities or the operation
+fails before mutation. The progressive
 knowledge log receives its own erasure compaction marker, so stale events do not
 reappear through that path either.
 `sealed: true` also refuses future writes to that partition. Exported files are
 host-owned copies and remain outside runtime erasure.
+
+The built-in AES-GCM adapter does not derive or destroy per-partition keys, so
+its erasure report returns `crypto_shred: :unsupported`. Applications that use
+envelope encryption can provide an adapter implementing `shred/2`; physical
+store erasure remains mandatory independently of that optional result.
+
+For the append-only file adapter, erase-mode pruning is store-global: retained
+previous snapshots and rotated compacted segments are removed for the whole
+store so erased bytes cannot survive in recovery copies. Neighbor partitions
+remain in the current compacted snapshot, but temporarily lose that redundant
+recovery history. Deployments that require different redundancy semantics
+should use a store adapter with partition-native physical erasure.
 
 ### Reading versus restoring an export
 

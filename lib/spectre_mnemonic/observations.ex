@@ -18,6 +18,7 @@ defmodule SpectreMnemonic.Observations do
   alias SpectreMnemonic.Persistence.Manager
 
   @observation_table :mnemonic_observations
+  @observation_scope_table :mnemonic_observations_by_scope
 
   @doc """
   Consolidates observations from active and durable moments.
@@ -67,9 +68,8 @@ defmodule SpectreMnemonic.Observations do
   def search(cue, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       active =
-        @observation_table
-        |> safe_tab2list()
-        |> Enum.map(fn {_id, observation} -> observation end)
+        opts
+        |> scoped_observations()
         |> Enum.filter(&visible?(&1, opts))
         |> score_observations(cue)
 
@@ -192,13 +192,60 @@ defmodule SpectreMnemonic.Observations do
                :observation_consolidated,
                opts
              ) do
-        :ets.insert(@observation_table, {observation.id, observation})
+        put_hot_observation(observation)
         :ok
       end
     else
-      :ets.insert(@observation_table, {observation.id, observation})
+      put_hot_observation(observation)
       :ok
     end
+  end
+
+  @spec put_hot_observation(Observation.t()) :: true
+  defp put_hot_observation(observation) do
+    case :ets.lookup(@observation_table, observation.id) do
+      [{_id, existing}] ->
+        :ets.delete_object(@observation_scope_table, {Scope.partition(existing), observation.id})
+
+      [] ->
+        :ok
+    end
+
+    :ets.insert(@observation_table, {observation.id, observation})
+    :ets.insert(@observation_scope_table, {Scope.partition(observation), observation.id})
+  end
+
+  @spec scoped_observations(keyword()) :: [Observation.t()]
+  defp scoped_observations(opts) do
+    partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
+
+    case :ets.lookup(@observation_scope_table, partition) do
+      [] -> legacy_scoped_observations(partition)
+      rows -> scoped_observation_rows(rows, partition)
+    end
+  rescue
+    ArgumentError -> []
+  end
+
+  @spec scoped_observation_rows(list(), tuple()) :: [Observation.t()]
+  defp scoped_observation_rows(rows, partition) do
+    Enum.flat_map(rows, fn {^partition, id} ->
+      case :ets.lookup(@observation_table, id) do
+        [{^id, observation}] -> [observation]
+        [] -> []
+      end
+    end)
+  end
+
+  @spec legacy_scoped_observations(tuple()) :: [Observation.t()]
+  defp legacy_scoped_observations(partition) do
+    :ets.foldl(
+      fn {_id, observation}, matches ->
+        if Scope.partition(observation) == partition, do: [observation | matches], else: matches
+      end,
+      [],
+      @observation_table
+    )
   end
 
   @spec persist_observations([Observation.t()], keyword()) ::
@@ -694,13 +741,6 @@ defmodule SpectreMnemonic.Observations do
     |> Enum.map(&Map.get(&1, field))
     |> Enum.reject(&is_nil/1)
     |> Enum.max_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
-  end
-
-  @spec safe_tab2list(atom()) :: list()
-  defp safe_tab2list(table) do
-    :ets.tab2list(table)
-  rescue
-    ArgumentError -> []
   end
 
   @spec keywords(binary()) :: [binary()]

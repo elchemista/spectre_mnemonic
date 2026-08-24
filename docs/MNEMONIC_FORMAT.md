@@ -74,6 +74,12 @@ concatenate consecutive chunks of the same section. A missing, reordered, or
 non-consecutive section is invalid. An omitted content class is represented by
 one frame containing an empty array.
 
+The frame bound is a container invariant, not a constant-memory writer
+guarantee. The bundled format-v1 writer materializes the selected partition to
+deduplicate it, establish deterministic record order, and compute exact
+manifest counts. Consumers that need incremental access should use the verified
+reader stream.
+
 ## One-partition invariant
 
 One file contains exactly one `{namespace, scope}` partition. `manifest`
@@ -107,8 +113,9 @@ Every record has `family`, `id`, `namespace`, `scope_digest`, and
 
 - `nodes`: signals, moments/entities, and artifacts.
 - `edges`: association source, target, relation, weight, and approved metadata.
-- `clusters`: Episode id, title, member ids, deterministic algorithm metadata,
-  and temporal fields.
+- `clusters`: Episode id, member ids, deterministic algorithm metadata, and
+  temporal fields. The title is present only in privacy modes that permit raw
+  labels.
 - `models`: observations and mental models, including provenance in `full` mode.
 - `knowledge`: consolidated records plus compact `knowledge.smem` events.
 - `governance`: lifecycle state events and their temporal ordering.
@@ -120,9 +127,11 @@ meaning requires a format-version increment.
 ## Privacy modes
 
 `structure` is the default. It includes topology, ids, relations, weights,
-states, time fields, cluster titles, canonical entity labels, aliases, and a
-small approved structural metadata set. It excludes raw signal input, moment
-text, summaries, knowledge text, vectors, and arbitrary metadata.
+states, time fields, and a small approved structural metadata set. It excludes
+raw signal input, moment text, summaries, knowledge text, vectors, arbitrary
+metadata, cluster titles, canonical entity labels, aliases, categories, and
+secret labels. Readers scan forbidden keys recursively, including nested
+metadata.
 
 `full` is the Article 15/20 subject-access representation. It includes record
 payloads and provenance. Embedding fields remain excluded unless the writer is
@@ -133,10 +142,21 @@ payload before JSON encoding. Deterministic output requires a deterministic
 function.
 
 Secrets are structurally special in every mode. A secret record may contain
-only presence, label, lock status, and temporal fields. Plaintext, ciphertext,
-IV, authentication tag, AAD, vectors, and arbitrary secret metadata are never
-exported. A reader rejects a file containing any of these fields even if its
-framing, checksums, digest, and counts are otherwise valid.
+only presence, lock status, temporal fields, and—outside structure mode—a
+label. Plaintext, ciphertext, IV, authentication tag, AAD, vectors, and
+arbitrary secret metadata are never exported. A reader rejects a file
+containing any of these fields even if its framing, checksums, digest, and
+counts are otherwise valid.
+
+Replay applies tombstones before projection. Logically forgotten records and
+their dependent episodes therefore do not appear in an export even when their
+old append-only bytes have not yet been physically compacted. This is a logical
+subject-access view, not a forensic dump of storage bytes.
+
+When active projections are included, the writer rejects Atlas truncation with
+`{:mnemonic_export_truncated, details}` instead of silently emitting a partial
+graph. Durable Episodes are merged with active clusters, so hot eviction or a
+runtime restart does not drop cluster history.
 
 ## Digest and verification
 
@@ -159,6 +179,10 @@ verification does not authorize the reader to mutate active memory, replay a
 record into a durable store, merge identities, or apply governance state.
 `SpectreMnemonic.Export.read/2` and `SpectreMnemonic.Export.stream/2` are
 read-only implementations of this contract.
+
+The stream is verified before it is returned. If the underlying file changes
+between verification and lazy enumeration, it emits one `{:error, reason}`
+item and halts rather than raising midway through the enumerable.
 
 Format version 1 defines no import or live-memory restore semantics. In
 particular, it does not define conflict resolution, idempotency keys, tombstone

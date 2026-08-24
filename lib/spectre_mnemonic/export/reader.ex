@@ -10,7 +10,7 @@ defmodule SpectreMnemonic.Export.Reader do
   @content_sections ~w(nodes edges clusters models knowledge governance)
   @manifest_fields ~w(format format_version library_version namespace scope scope_digest privacy_mode created_at counts content_digest)
   @record_fields ~w(family id namespace scope_digest inserted_at)
-  @forbidden_structure_fields ~w(text input summary statement answer vector binary_signature embedding ciphertext iv tag aad)
+  @forbidden_structure_fields ~w(text input summary statement answer title canonical aliases category categories label vector binary_signature embedding ciphertext iv tag aad)
   @secret_forbidden_fields ~w(text input summary statement answer vector binary_signature embedding ciphertext iv tag aad plaintext)
   @digest_regex ~r/^[0-9a-f]{64}$/
 
@@ -133,14 +133,12 @@ defmodule SpectreMnemonic.Export.Reader do
 
   @spec privacy_violation(map(), binary()) :: term() | nil
   defp privacy_violation(record, mode) do
-    fields = Map.keys(record)
-
     cond do
       secret_record?(record) ->
-        forbidden_field(fields, @secret_forbidden_fields, record)
+        forbidden_field(record, @secret_forbidden_fields, record)
 
       mode == "structure" ->
-        forbidden_field(fields, @forbidden_structure_fields, record)
+        forbidden_field(record, @forbidden_structure_fields, record)
 
       true ->
         nil
@@ -153,13 +151,26 @@ defmodule SpectreMnemonic.Export.Reader do
       Map.get(record, "family") == "secrets"
   end
 
-  @spec forbidden_field([term()], [binary()], map()) :: term() | nil
-  defp forbidden_field(fields, forbidden, record) do
-    case Enum.find(forbidden, &(&1 in fields)) do
+  @spec forbidden_field(term(), [binary()], map()) :: term() | nil
+  defp forbidden_field(value, forbidden, record) do
+    case find_forbidden_field(value, MapSet.new(forbidden)) do
       nil -> nil
       field -> {:mnemonic_privacy_violation, Map.get(record, "id"), field}
     end
   end
+
+  @spec find_forbidden_field(term(), MapSet.t(binary())) :: binary() | nil
+  defp find_forbidden_field(value, forbidden) when is_map(value) do
+    Enum.find_value(value, fn {key, nested} ->
+      key = to_string(key)
+      if MapSet.member?(forbidden, key), do: key, else: find_forbidden_field(nested, forbidden)
+    end)
+  end
+
+  defp find_forbidden_field(value, forbidden) when is_list(value),
+    do: Enum.find_value(value, &find_forbidden_field(&1, forbidden))
+
+  defp find_forbidden_field(_value, _forbidden), do: nil
 
   @spec finalize_verification(map()) :: :ok | {:error, term()}
   defp finalize_verification(%{error: reason}), do: {:error, reason}
@@ -224,7 +235,7 @@ defmodule SpectreMnemonic.Export.Reader do
         end
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, {:mnemonic_open_failed, path, reason}}
     end
   end
 
@@ -289,10 +300,18 @@ defmodule SpectreMnemonic.Export.Reader do
         with {:ok, payload} <- read_payload(io, length, sequence),
              :ok <- verify_crc(payload, crc, sequence),
              {:ok, json} <- gunzip(payload, sequence, maximum),
-             {:ok, frame} <- Jason.decode(json),
+             {:ok, frame} <- decode_json(json, sequence),
              :ok <- validate_frame(frame, sequence) do
           {:ok, frame}
         end
+    end
+  end
+
+  @spec decode_json(binary(), pos_integer()) :: {:ok, term()} | {:error, term()}
+  defp decode_json(json, sequence) do
+    case Jason.decode(json) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:invalid_mnemonic_json, sequence}}
     end
   end
 
@@ -427,9 +446,10 @@ defmodule SpectreMnemonic.Export.Reader do
 
   defp validate_section_record("clusters", record) do
     moment_ids = Map.get(record, "moment_ids")
+    title = Map.get(record, "title")
 
     schema_checks([
-      {:title, nonempty_string?(Map.get(record, "title"))},
+      {:title, not Map.has_key?(record, "title") or nonempty_string?(title)},
       {:moment_ids, is_list(moment_ids) and Enum.all?(moment_ids, &nonempty_string?/1)}
     ])
   end
@@ -478,18 +498,32 @@ defmodule SpectreMnemonic.Export.Reader do
     Stream.resource(
       fn ->
         case File.open(path, [:read, :binary]) do
-          {:ok, io} -> {io, 1}
-          {:error, reason} -> raise File.Error, reason: reason, action: "open", path: path
+          {:ok, io} -> {:open, io, 1}
+          {:error, reason} -> {:error, {:mnemonic_open_failed, path, reason}}
         end
       end,
-      fn {io, expected} = state ->
-        case decode_next(io, expected) do
-          :eof -> {:halt, state}
-          {:ok, frame} -> {[frame], {io, expected + 1}}
-          {:error, reason} -> raise ArgumentError, "invalid .mnemonic stream: #{inspect(reason)}"
-        end
+      fn
+        {:open, io, expected} = state ->
+          case decode_next(io, expected) do
+            :eof -> {:halt, state}
+            {:ok, frame} -> {[frame], {:open, io, expected + 1}}
+            {:error, reason} -> {[{:error, reason}], {:halted, io}}
+          end
+
+        {:error, reason} ->
+          {[{:error, reason}], :halted}
+
+        {:halted, _io} = state ->
+          {:halt, state}
+
+        :halted ->
+          {:halt, :halted}
       end,
-      fn {io, _expected} -> File.close(io) end
+      fn
+        {:open, io, _expected} -> File.close(io)
+        {:halted, io} -> File.close(io)
+        _state -> :ok
+      end
     )
   end
 end

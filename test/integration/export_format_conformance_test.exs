@@ -1,3 +1,99 @@
+defmodule SpectreMnemonic.JSONSchemaTestValidator do
+  @moduledoc false
+
+  def valid?(schema, value), do: validate(schema, value, schema)
+
+  defp validate(%{"$ref" => reference}, value, root),
+    do: root |> resolve(reference) |> validate(value, root)
+
+  defp validate(%{"oneOf" => schemas}, value, root),
+    do: Enum.count(schemas, &validate(&1, value, root)) == 1
+
+  defp validate(%{"allOf" => schemas}, value, root),
+    do: Enum.all?(schemas, &validate(&1, value, root))
+
+  defp validate(schema, value, root) do
+    valid_type?(Map.get(schema, "type"), value) and
+      valid_const?(Map.fetch(schema, "const"), value) and
+      valid_enum?(Map.get(schema, "enum"), value) and
+      valid_object?(schema, value, root) and
+      valid_array?(schema, value, root) and
+      valid_string?(schema, value) and
+      valid_number?(schema, value)
+  end
+
+  defp resolve(root, "#/" <> pointer) do
+    pointer
+    |> String.split("/")
+    |> Enum.map(&(&1 |> String.replace("~1", "/") |> String.replace("~0", "~")))
+    |> Enum.reduce(root, &Map.fetch!(&2, &1))
+  end
+
+  defp valid_type?(nil, _value), do: true
+
+  defp valid_type?(types, value) when is_list(types),
+    do: Enum.any?(types, &valid_type?(&1, value))
+
+  defp valid_type?("object", value), do: is_map(value)
+  defp valid_type?("array", value), do: is_list(value)
+  defp valid_type?("string", value), do: is_binary(value)
+  defp valid_type?("integer", value), do: is_integer(value)
+  defp valid_type?("number", value), do: is_number(value)
+  defp valid_type?("boolean", value), do: is_boolean(value)
+  defp valid_type?("null", value), do: is_nil(value)
+  defp valid_type?(_unknown, _value), do: false
+
+  defp valid_const?(:error, _value), do: true
+  defp valid_const?({:ok, expected}, value), do: value == expected
+
+  defp valid_enum?(nil, _value), do: true
+  defp valid_enum?(values, value), do: value in values
+
+  defp valid_object?(schema, value, root) when is_map(value) do
+    properties = Map.get(schema, "properties", %{})
+    required = Map.get(schema, "required", [])
+
+    Enum.all?(required, &Map.has_key?(value, &1)) and
+      Enum.all?(properties, fn {key, property_schema} ->
+        not Map.has_key?(value, key) or validate(property_schema, Map.get(value, key), root)
+      end) and
+      (Map.get(schema, "additionalProperties", true) != false or
+         Enum.all?(Map.keys(value), &Map.has_key?(properties, &1)))
+  end
+
+  defp valid_object?(_schema, _value, _root), do: true
+
+  defp valid_array?(%{"items" => item_schema}, value, root) when is_list(value),
+    do: Enum.all?(value, &validate(item_schema, &1, root))
+
+  defp valid_array?(_schema, _value, _root), do: true
+
+  defp valid_string?(schema, value) when is_binary(value) do
+    minimum = Map.get(schema, "minLength", 0)
+    pattern = Map.get(schema, "pattern")
+    format = Map.get(schema, "format")
+
+    String.length(value) >= minimum and
+      (is_nil(pattern) or Regex.match?(Regex.compile!(pattern), value)) and
+      valid_format?(format, value)
+  end
+
+  defp valid_string?(_schema, _value), do: true
+
+  defp valid_format?(nil, _value), do: true
+
+  defp valid_format?("date-time", value),
+    do: match?({:ok, %DateTime{}, _offset}, DateTime.from_iso8601(value))
+
+  defp valid_format?(_unknown, _value), do: true
+
+  defp valid_number?(schema, value) when is_number(value) do
+    value >= Map.get(schema, "minimum", value) and value <= Map.get(schema, "maximum", value)
+  end
+
+  defp valid_number?(_schema, _value), do: true
+end
+
 defmodule SpectreMnemonic.ExportFormatConformanceTest do
   use SpectreMnemonic.MemoryCase
 
@@ -210,7 +306,11 @@ defmodule SpectreMnemonic.ExportFormatConformanceTest do
     ]
 
     Enum.with_index(invalid, fn {field, value, reason}, index ->
-      frames = valid_frames(%{"clusters" => [Map.put(cluster, field, value)]})
+      frames =
+        %{"clusters" => [Map.put(cluster, field, value)]}
+        |> valid_frames()
+        |> put_in([Access.at(0), "data", "privacy_mode"], "full")
+
       invalid_path = path("cluster-#{index}")
       write_frames(invalid_path, frames)
 
@@ -344,6 +444,24 @@ defmodule SpectreMnemonic.ExportFormatConformanceTest do
              )
   end
 
+  test "every frame emitted by the writer validates against the published JSON Schema" do
+    scope = {:subject, "schema-writer-output"}
+    output_path = path("schema-writer-output")
+
+    {:ok, %{moment: left}} = SpectreMnemonic.signal("schema left", scope: scope)
+    {:ok, %{moment: right}} = SpectreMnemonic.signal("schema right", scope: scope)
+    {:ok, _edge} = SpectreMnemonic.link(left.id, :supports, right.id, scope: scope)
+    assert {:ok, _episodes} = SpectreMnemonic.Atlas.materialize(scope: scope)
+    assert {:ok, _report} = SpectreMnemonic.export(output_path, scope: scope)
+    assert {:ok, frames} = Reader.read(output_path)
+
+    schema = "priv/mnemonic_schema_v1.json" |> File.read!() |> Jason.decode!()
+
+    Enum.each(frames, fn frame ->
+      assert SpectreMnemonic.JSONSchemaTestValidator.valid?(schema, frame)
+    end)
+  end
+
   defp valid_frames(content \\ %{}) do
     content_frames =
       Enum.map(@sections, fn section ->
@@ -356,7 +474,7 @@ defmodule SpectreMnemonic.ExportFormatConformanceTest do
     manifest = %{
       "format" => "spectre-mnemonic",
       "format_version" => 1,
-      "library_version" => "0.4.0",
+      "library_version" => "0.1.0",
       "namespace" => @namespace,
       "scope" => "{:subject, \"format\"}",
       "scope_digest" => @scope_digest,

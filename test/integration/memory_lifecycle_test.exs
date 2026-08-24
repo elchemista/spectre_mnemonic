@@ -305,8 +305,21 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
 
     assert {:ok, same_as} = SpectreMnemonic.merge_entities(alice.id, bob.id, scope: scope)
     assert same_as.relation == :same_as
+    :ets.delete_all_objects(:mnemonic_entity_registry)
     assert {:ok, redirected} = Resolver.resolve("bob", [], scope: scope)
     assert redirected.id == alice.id
+
+    assert :ok = SpectreMnemonic.unmerge_entities(alice.id, bob.id, scope: scope)
+    :ets.delete_all_objects(:mnemonic_entity_registry)
+    assert {:ok, restored_bob} = Resolver.resolve("bob", [], scope: scope)
+    assert restored_bob.id == bob.id
+
+    assert {:error, :merge_not_found} =
+             SpectreMnemonic.unmerge_entities(alice.id, bob.id, scope: scope)
+
+    assert {:error, :same_entity_id} =
+             SpectreMnemonic.unmerge_entities(alice.id, alice.id, scope: scope)
+
     assert {:error, :same_entity_id} = SpectreMnemonic.merge_entities(alice.id, alice.id)
 
     assert {:error, :unknown_entity} =
@@ -380,8 +393,9 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
 
     before_use = DateTime.add(DateTime.utc_now(), -60, :second)
     assert {:ok, 0} = Plasticity.decay(scope: plasticity_scope, used_before: before_use)
-    assert {:ok, count} = Plasticity.decay(scope: plasticity_scope, used_before: :invalid)
-    assert count > 0
+
+    assert {:error, {:invalid_plasticity_option, :used_before, :invalid}} =
+             Plasticity.decay(scope: plasticity_scope, used_before: :invalid)
   end
 
   test "export is deterministic, verified, structure-only, and never leaks secrets" do
@@ -480,7 +494,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
         invalid_json::binary>>
     )
 
-    assert {:error, %Jason.DecodeError{}} = Export.read(malformed)
+    assert {:error, {:invalid_mnemonic_json, 1}} = Export.read(malformed)
   end
 
   test "export chunks large sections and the verified stream remains lazy" do
@@ -520,7 +534,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     manifest = %{
       "format" => "spectre-mnemonic",
       "format_version" => 1,
-      "library_version" => "0.4.0",
+      "library_version" => "0.1.0",
       "namespace" => @namespace,
       "scope" => "{:subject, \"conformance\"}",
       "scope_digest" => scope_digest,
@@ -539,12 +553,14 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     assert {:ok, _frames} = Reader.read(path)
     assert {:ok, verified_stream} = Reader.stream(path)
     File.write!(path, "broken")
-    assert_raise ArgumentError, fn -> Enum.to_list(verified_stream) end
+    assert [{:error, {:truncated_mnemonic_header, 1}}] = Enum.to_list(verified_stream)
 
     write_mnemonic(path, valid_frames)
     assert {:ok, missing_stream} = Reader.stream(path)
     File.rm!(path)
-    assert_raise File.Error, fn -> Enum.to_list(missing_stream) end
+
+    assert [{:error, {:mnemonic_open_failed, ^path, :enoent}}] =
+             Enum.to_list(missing_stream)
 
     write_mnemonic(
       path,
@@ -624,7 +640,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     File.write!(path, <<"SMNE", 1, 1::unsigned-64, 0::unsigned-32, 0::unsigned-32>>)
     assert {:error, {:invalid_mnemonic_compression, 1}} = Export.read(path)
 
-    assert {:error, :enoent} = Reader.read(path <> ".missing")
+    assert {:error, {:mnemonic_open_failed, _, :enoent}} = Reader.read(path <> ".missing")
   end
 
   test "partition erasure removes evicted durable records and preserves its neighbor" do

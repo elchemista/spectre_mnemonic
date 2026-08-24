@@ -23,24 +23,33 @@ defmodule SpectreMnemonic.Erasure do
   def erase_partition(opts) do
     with :ok <- validate_explicit_partition(opts),
          {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Manager.ensure_erasure_supported(opts),
          {:ok, records} <- Manager.replay(opts),
          marker = latest_marker(records),
          targets = Enum.reject(records, &(&1.family in @internal_families)),
          target_keys = Enum.map(targets, &target_key/1),
          :ok <- write_tombstones(targets, :partition_erasure, opts),
          {:ok, knowledge_events} <- erase_knowledge(opts),
-         {:ok, hot} <- Focus.purge_partition(opts),
+         {:ok, initial_hot} <- Focus.purge_partition(opts),
          {:ok, crypto_shred} <- Secrets.shred(Scope.from_opts(opts), opts),
          {:ok, marker_record} <- install_marker(marker, opts),
-         {:ok, compaction} <- Manager.compact(Keyword.put(opts, :mode, :erase)),
+         {:ok, raced_hot} <- Focus.purge_partition(opts),
+         {:ok, compaction} <-
+           Manager.compact(
+             opts
+             |> Keyword.put(:mode, :erase)
+             |> Keyword.put(:erasure_targets, target_keys)
+           ),
          :ok <- validate_compaction(compaction),
          :ok <- Manager.verify_erased(target_keys, opts),
          :ok <- SMEM.verify_erased(opts),
-         :ok <- verify_postcondition(opts) do
+         :ok <- Manager.evict_dedupe(opts),
+         :ok <- verify_postcondition(opts),
+         {:ok, final_hot} <- Focus.purge_partition(opts) do
       {:ok,
        %Report{
          families: targets |> Enum.frequencies_by(& &1.family),
-         hot: hot,
+         hot: merge_hot_counts([initial_hot, raced_hot, final_hot]),
          knowledge_events: knowledge_events,
          compaction: :erased,
          marker_id: payload_id(marker_record.payload),
@@ -50,6 +59,13 @@ defmodule SpectreMnemonic.Erasure do
     end
   end
 
+  @spec merge_hot_counts([map()]) :: map()
+  defp merge_hot_counts(counts) do
+    Enum.reduce(counts, %{}, fn count, merged ->
+      Map.merge(merged, count, fn _key, left, right -> left + right end)
+    end)
+  end
+
   @doc "Forgets currently active records whose `valid_until` has passed."
   @spec sweep_expired(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def sweep_expired(opts \\ []) do
@@ -57,15 +73,25 @@ defmodule SpectreMnemonic.Erasure do
          %DateTime{} = now <- Keyword.get(opts, :now, DateTime.utc_now()),
          {:ok, records} <- Manager.replay(opts),
          expired_ids <- expired_moment_ids(records, now),
+         hot_expired_ids <- expired_hot_moment_ids(opts, now),
          {:ok, _active_count} <- Focus.forget(&expired?(&1, now), opts),
          {:ok, remaining} <- Manager.replay(opts),
          targets <- retention_targets(remaining, expired_ids),
          :ok <- write_tombstones(targets, :retention_expired, opts) do
-      {:ok, MapSet.size(expired_ids)}
+      {:ok, expired_ids |> MapSet.union(hot_expired_ids) |> MapSet.size()}
     else
       {:error, _reason} = error -> error
       now -> {:error, {:invalid_sweep_option, :now, now}}
     end
+  end
+
+  @spec expired_hot_moment_ids(keyword(), DateTime.t()) :: MapSet.t(binary())
+  defp expired_hot_moment_ids(opts, now) do
+    opts
+    |> Focus.moments()
+    |> Enum.filter(&expired?(&1, now))
+    |> Enum.map(& &1.id)
+    |> MapSet.new()
   end
 
   @spec expired_moment_ids([Record.t()], DateTime.t()) :: MapSet.t(binary())
@@ -148,14 +174,28 @@ defmodule SpectreMnemonic.Erasure do
   end
 
   @doc false
-  @spec ensure_writable(keyword()) :: :ok | {:error, :partition_erased}
+  @spec ensure_writable(keyword()) ::
+          :ok | {:error, :partition_erased | {:erasure_guard_unavailable, term()}}
   def ensure_writable(opts) do
     partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
 
-    case marker_for(partition, opts) do
-      %{sealed?: true} -> {:error, :partition_erased}
-      %{"sealed?" => true} -> {:error, :partition_erased}
-      _missing_or_open -> :ok
+    case checked_marker_for(partition, opts) do
+      {:ok, %{sealed?: true}} -> {:error, :partition_erased}
+      {:ok, %{"sealed?" => true}} -> {:error, :partition_erased}
+      {:ok, _missing_or_open} -> :ok
+      {:error, reason} -> {:error, {:erasure_guard_unavailable, reason}}
+    end
+  end
+
+  @doc false
+  @spec generation(keyword()) :: binary() | nil
+  def generation(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, marker} <-
+           checked_marker_for({Identity.namespace!(opts), Scope.from_opts(opts)}, opts) do
+      marker_generation(marker)
+    else
+      _unavailable -> nil
     end
   end
 
@@ -163,23 +203,29 @@ defmodule SpectreMnemonic.Erasure do
   @spec marker(keyword()) :: map() | nil
   def marker(opts) do
     case Identity.put_namespace(opts) do
-      {:ok, opts} -> marker_for({Identity.namespace!(opts), Scope.from_opts(opts)}, opts)
-      {:error, _reason} -> nil
+      {:ok, opts} ->
+        case checked_marker_for({Identity.namespace!(opts), Scope.from_opts(opts)}, opts) do
+          {:ok, marker} -> marker
+          {:error, _reason} -> nil
+        end
+
+      {:error, _reason} ->
+        nil
     end
   end
 
-  @spec marker_for(tuple(), keyword()) :: map() | nil
-  defp marker_for(partition, opts) do
+  @spec checked_marker_for(tuple(), keyword()) :: {:ok, map() | nil} | {:error, term()}
+  defp checked_marker_for(partition, opts) do
     case :ets.lookup(:mnemonic_erasure_markers, partition) do
-      [{^partition, :none}] -> nil
-      [{^partition, marker}] -> marker
+      [{^partition, :none}] -> {:ok, nil}
+      [{^partition, marker}] -> {:ok, marker}
       [] -> load_marker(partition, opts)
     end
   rescue
-    ArgumentError -> nil
+    ArgumentError -> {:error, :marker_table_unavailable}
   end
 
-  @spec load_marker(tuple(), keyword()) :: map() | nil
+  @spec load_marker(tuple(), keyword()) :: {:ok, map() | nil} | {:error, term()}
   defp load_marker(partition, opts) do
     case Manager.replay(opts) do
       {:ok, records} ->
@@ -188,16 +234,18 @@ defmodule SpectreMnemonic.Erasure do
         |> case do
           %Record{payload: marker} ->
             :ets.insert(:mnemonic_erasure_markers, {partition, marker})
-            marker
+            {:ok, marker}
 
           nil ->
             :ets.insert(:mnemonic_erasure_markers, {partition, :none})
-            nil
+            {:ok, nil}
         end
 
-      {:error, _reason} ->
-        nil
+      {:error, reason} ->
+        {:error, {:marker_replay_failed, reason}}
     end
+  rescue
+    ArgumentError -> {:error, :marker_table_unavailable}
   end
 
   @spec validate_explicit_partition(term()) :: :ok | {:error, term()}
@@ -282,6 +330,7 @@ defmodule SpectreMnemonic.Erasure do
 
     payload = %{
       id: id,
+      generation: Identity.generate("erase_generation", opts),
       namespace: namespace,
       scope: scope,
       scope_digest: scope_digest(namespace, scope),
@@ -331,6 +380,16 @@ defmodule SpectreMnemonic.Erasure do
   end
 
   defp marker_sealed?(_marker), do: false
+
+  @spec marker_generation(term()) :: binary() | nil
+  defp marker_generation(marker) when is_map(marker) do
+    case map_value(marker, :generation) do
+      generation when is_binary(generation) and generation != "" -> generation
+      _missing -> nil
+    end
+  end
+
+  defp marker_generation(_marker), do: nil
 
   @spec marker_id(binary(), term()) :: binary()
   defp marker_id(namespace, scope),

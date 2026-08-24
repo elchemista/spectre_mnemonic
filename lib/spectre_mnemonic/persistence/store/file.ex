@@ -17,7 +17,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
   @spec capabilities(keyword()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
-  def capabilities(_opts), do: [:append, :replay, :replay_fold, :event_log]
+  def capabilities(_opts),
+    do: [:append, :replay, :replay_fold, :event_log, :erase_partition, :verify_erasure]
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
   @spec put(SpectreMnemonic.Persistence.Store.Record.t(), keyword()) ::
@@ -74,6 +75,33 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     end
   end
 
+  @impl SpectreMnemonic.Persistence.Store.Adapter
+  @spec erase_partition(binary(), term(), MapSet.t({atom(), binary()}), keyword()) ::
+          {:ok, Path.t()} | {:error, term()}
+  def erase_partition(namespace, scope, targets, opts) do
+    erase_opts =
+      opts
+      |> Keyword.put(:retain_compacted_segments, 0)
+      |> Keyword.put(:erase?, true)
+
+    with {:ok, path} <- compact(erase_opts),
+         :ok <- verify_erased(erase_opts, namespace, scope, targets) do
+      {:ok, path}
+    end
+  end
+
+  @impl SpectreMnemonic.Persistence.Store.Adapter
+  @spec verify_erased(binary(), term(), MapSet.t({atom(), binary()}), keyword()) ::
+          :ok | {:error, term()}
+  def verify_erased(namespace, scope, targets, opts) when is_binary(namespace),
+    do: verify_erased_files(opts, namespace, scope, targets)
+
+  @doc false
+  @spec verify_erased(keyword(), binary(), term(), MapSet.t({atom(), binary()})) ::
+          :ok | {:error, term()}
+  def verify_erased(opts, namespace, scope, targets) when is_list(opts),
+    do: verify_erased_files(opts, namespace, scope, targets)
+
   @doc "Returns the configured data root."
   @spec data_root(keyword()) :: Path.t()
   def data_root(opts \\ []) do
@@ -81,10 +109,9 @@ defmodule SpectreMnemonic.Persistence.Store.File do
       Application.get_env(:spectre_mnemonic, :data_root, "mnemonic_data")
   end
 
-  @doc false
-  @spec verify_erased(keyword(), binary(), term(), MapSet.t({atom(), binary()})) ::
+  @spec verify_erased_files(keyword(), binary(), term(), MapSet.t({atom(), binary()})) ::
           :ok | {:error, term()}
-  def verify_erased(opts, namespace, scope, targets) do
+  defp verify_erased_files(opts, namespace, scope, targets) do
     root = data_root(opts)
 
     collector = fn frame, acc ->
@@ -486,8 +513,18 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   defp erased_record?(record, markers) do
     marker = Map.get(markers, {record.namespace, record.scope})
 
-    not is_nil(marker) and record.family != :erasure_markers and
-      record_timestamp(record) <= record_timestamp(marker)
+    not is_nil(marker) and record.family != :erasure_markers and erased_by_marker?(record, marker)
+  end
+
+  @spec erased_by_marker?(Record.t(), Record.t()) :: boolean()
+  defp erased_by_marker?(record, marker) do
+    case map_value(marker.payload, :generation) do
+      generation when is_binary(generation) ->
+        map_value(record.metadata, :erasure_generation) != generation
+
+      _legacy_marker ->
+        record_timestamp(record) <= record_timestamp(marker)
+    end
   end
 
   @spec payload_id(term()) :: term()
@@ -496,6 +533,9 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   end
 
   defp payload_id(_payload), do: nil
+
+  @spec map_value(map(), atom()) :: term()
+  defp map_value(map, key), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
 
   @spec tombstone_target(term()) :: {:ok, {atom(), binary()}} | :error
   defp tombstone_target(payload) when is_map(payload) do

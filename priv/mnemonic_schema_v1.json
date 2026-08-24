@@ -61,7 +61,7 @@
         {"$ref": "#/$defs/recordEnvelope"},
         {
           "type": "object",
-          "required": ["title", "moment_ids"],
+          "required": ["moment_ids"],
           "properties": {
             "title": {"type": "string"},
             "moment_ids": {"type": "array", "items": {"type": "string"}}

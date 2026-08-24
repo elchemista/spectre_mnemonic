@@ -17,6 +17,7 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:mnemonic_moments_by_scope, :bag},
     {:mnemonic_moments_by_namespace, :bag},
     {:mnemonic_moments_by_signal, :set},
+    {:mnemonic_moment_counts, :set},
     {:mnemonic_status, :set},
     {:mnemonic_associations, :set},
     {:mnemonic_associations_by_scope, :bag},
@@ -30,8 +31,11 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:mnemonic_artifacts, :set},
     {:mnemonic_action_recipes, :set},
     {:mnemonic_observations, :set},
+    {:mnemonic_observations_by_scope, :bag},
     {:mnemonic_mental_models, :set},
+    {:mnemonic_mental_models_by_scope, :bag},
     {:mnemonic_governance_states, :set},
+    {:mnemonic_governance_states_by_scope, :bag},
     {:mnemonic_governance_facts, :set}
   ]
 
