@@ -74,6 +74,12 @@ concatenate consecutive chunks of the same section. A missing, reordered, or
 non-consecutive section is invalid. An omitted content class is represented by
 one frame containing an empty array.
 
+The frame bound is a container invariant, not a constant-memory writer
+guarantee. The bundled format-v1 writer materializes the selected partition to
+deduplicate it, establish deterministic record order, and compute exact
+manifest counts. Consumers that need incremental access should use the verified
+reader stream.
+
 ## One-partition invariant
 
 One file contains exactly one `{namespace, scope}` partition. `manifest`

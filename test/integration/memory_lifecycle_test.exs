@@ -534,7 +534,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     manifest = %{
       "format" => "spectre-mnemonic",
       "format_version" => 1,
-      "library_version" => "0.4.0",
+      "library_version" => "0.1.0",
       "namespace" => @namespace,
       "scope" => "{:subject, \"conformance\"}",
       "scope_digest" => scope_digest,

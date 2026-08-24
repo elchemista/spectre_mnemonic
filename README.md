@@ -295,6 +295,12 @@ after verification, the stream emits one typed `{:error, reason}` item and
 halts. Active exports fail explicitly if Atlas bounds would truncate their
 projection.
 
+Frame chunking bounds each encoded frame, not the writer's total heap usage.
+The format-v1 writer materializes the partition projection so it can deduplicate
+records, apply stable ordering, and calculate exact counts before installing the
+file. Size the exporting process for the selected partition; the reader stream
+is the lazy interface.
+
 `forget/2` suppresses selected memory from retrieval and records its lifecycle;
 it is not physical erasure. Its records and dependent episodes are absent from
 logical exports even though append-only bytes can remain until compaction.
@@ -325,6 +331,11 @@ knowledge log receives its own erasure compaction marker, so stale events do not
 reappear through that path either.
 `sealed: true` also refuses future writes to that partition. Exported files are
 host-owned copies and remain outside runtime erasure.
+
+The built-in AES-GCM adapter does not derive or destroy per-partition keys, so
+its erasure report returns `crypto_shred: :unsupported`. Applications that use
+envelope encryption can provide an adapter implementing `shred/2`; physical
+store erasure remains mandatory independently of that optional result.
 
 For the append-only file adapter, erase-mode pruning is store-global: retained
 previous snapshots and rotated compacted segments are removed for the whole

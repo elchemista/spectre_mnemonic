@@ -2,6 +2,10 @@
 
 All notable changes to Spectre Mnemonic are documented in this file.
 
+The current package and public API version is `0.1.0`. The numbered sections
+below record internal development milestones; they are not published package
+release declarations.
+
 ## [Unreleased]
 
 ### Added
@@ -65,7 +69,7 @@ All notable changes to Spectre Mnemonic are documented in this file.
   reweight interval; avoid materializing the global association index during
   scheduled decay.
 
-## [0.4.0] - 2026-08-24
+## Development milestone 0.4.0 - 2026-08-24
 
 ### Added
 
@@ -101,7 +105,7 @@ All notable changes to Spectre Mnemonic are documented in this file.
 - Export readers decode JSON only and reject mixed partitions, corrupt frames,
   digest mismatches, oversized frames, and unsupported format versions.
 
-## [0.3.0] - 2026-08-13
+## Development milestone 0.3.0 - 2026-08-13
 
 ### Changed
 
@@ -133,7 +137,7 @@ All notable changes to Spectre Mnemonic are documented in this file.
 - Removed repeated indexed list scans and incremental binary copying from
   binary embedding quantization.
 
-## [0.2.0] - 2026-08-01
+## Development milestone 0.2.0 - 2026-08-01
 
 ### Changed
 
@@ -147,16 +151,10 @@ All notable changes to Spectre Mnemonic are documented in this file.
 - Memory records and runtime handles remain outside canonical Run and
   operational checkpoints.
 
-## [0.1.6] - 2026-07-31
+## Development milestone 0.1.6 - 2026-07-31
 
 ### Changed
 
 - Established a recoverable consolidation baseline with an explicit normative
   public API manifest and complete release documentation.
 - Added no runtime functionality and made no intentional breaking API change.
-
-[Unreleased]: https://github.com/elchemista/spectre_mnemonic/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.6...v0.2.0
-[0.1.6]: https://github.com/elchemista/spectre_mnemonic/compare/v0.1.5...v0.1.6

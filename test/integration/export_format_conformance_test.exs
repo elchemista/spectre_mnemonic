@@ -474,7 +474,7 @@ defmodule SpectreMnemonic.ExportFormatConformanceTest do
     manifest = %{
       "format" => "spectre-mnemonic",
       "format_version" => 1,
-      "library_version" => "0.4.0",
+      "library_version" => "0.1.0",
       "namespace" => @namespace,
       "scope" => "{:subject, \"format\"}",
       "scope_digest" => @scope_digest,
