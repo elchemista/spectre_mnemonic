@@ -395,7 +395,14 @@ defmodule SpectreMnemonic.MemoryGraphConformanceTest do
     assert Enum.uniq(weights) == weights
     assert List.last(weights) < 1.0
 
-    assert {:ok, 1} = Plasticity.decay(scope: scope, decay_factor: 0.0, weight_floor: 0.15)
+    assert {:ok, 1} =
+             Plasticity.decay(
+               scope: scope,
+               decay_factor: 0.0,
+               weight_floor: 0.15,
+               used_before: DateTime.add(DateTime.utc_now(), 1, :second)
+             )
+
     assert_in_delta association(edge.id).weight, 0.15, 1.0e-12
   end
 

@@ -24,12 +24,46 @@ All notable changes to Spectre Mnemonic are documented in this file.
   articles do not create false keyword/entity boosts.
 - Documented that `.mnemonic` readers validate detached exports but do not
   import or restore records into live memory.
+- Made graph traversal exclude cluster membership and identity-redirection
+  edges by default, with explicit relation opt-in.
+- Rehydrated durable entity aliases and Episodes after hot eviction, and made
+  reclustering supersede stale Episodes and membership edges.
+- Added reversible entity unmerge events that tombstone `:same_as` edges and
+  restore the prior winner/loser alias registries.
+- Made structure exports topology-only for entity, cluster, category, and
+  secret labels; durable clusters are retained in active exports.
+
+### Fixed
+
+- Removed persistence-manager timeouts from large replay, compaction, erasure,
+  and verification operations while preserving configurable typed timeouts.
+- Made erasure verify every configured store, evict partition dedupe state,
+  close concurrent hot-write windows, and reject stale future-dated records by
+  durable erasure generation.
+- Made forget cascade through Episodes and every membership edge, made sealed
+  partitions reject links, and counted expired hot-only memories.
+- Decayed only unused graph edges, respected hot-only persistence, throttled
+  durable reweights, and prevented reinforcement from recreating forgotten
+  hot edges.
+- Made Atlas retain overflow dirty work, preserve concurrent dirty updates,
+  prefer recent nodes, and report truncation to materialization and export.
+- Removed stale lifecycle projections from the durable index after tombstones.
+- Returned typed JSON/open/stream errors from `.mnemonic` readers.
 
 ### Security
 
 - Reject non-finite and out-of-range float32 embeddings before indexing.
 - Validate `.mnemonic` manifest, trailer, record envelopes, section-specific
   fields, and privacy invariants before returning decoded content.
+- Fail durable writes closed when the erasure marker guard cannot be checked.
+- Reject unsupported JSON runtime values instead of serializing nondeterministic
+  `inspect/1` output.
+
+### Performance
+
+- Avoid durable graph appends at stable bounds and within the configured
+  reweight interval; avoid materializing the global association index during
+  scheduled decay.
 
 ## [0.4.0] - 2026-08-24
 
