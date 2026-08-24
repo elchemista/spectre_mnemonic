@@ -22,10 +22,25 @@ defmodule SpectreMnemonic.MixProject do
         source_ref: "v#{@version}",
         extras: [
           "README.md",
+          "docs/GETTING_STARTED.md",
+          "docs/MEMORY_GUIDE.md",
+          "docs/RETRIEVAL_AND_KNOWLEDGE.md",
+          "docs/PERSISTENCE_AND_OPERATIONS.md",
+          "docs/API_GUIDE.md",
           "docs/PUBLIC_API.md",
           "docs/MNEMONIC_FORMAT.md",
           "CHANGELOG.md",
           "LICENSE"
+        ],
+        groups_for_extras: [
+          Guides: [
+            "docs/GETTING_STARTED.md",
+            "docs/MEMORY_GUIDE.md",
+            "docs/RETRIEVAL_AND_KNOWLEDGE.md",
+            "docs/PERSISTENCE_AND_OPERATIONS.md",
+            "docs/API_GUIDE.md"
+          ],
+          Reference: ["docs/PUBLIC_API.md", "docs/MNEMONIC_FORMAT.md"]
         ]
       ],
       source_url: @source_url,

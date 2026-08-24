@@ -3,6 +3,8 @@
 This document is the normative contract for Spectre Mnemonic format-v1 exports.
 Readers in Spectre Lab, Spectre Studio, or another implementation must follow
 this document rather than depending on SpectreMnemonic runtime internals.
+For writer, reader, stream, and erasure examples, see
+[Persistence and operations](PERSISTENCE_AND_OPERATIONS.md#export-a-partition).
 
 ## Trust boundary
 

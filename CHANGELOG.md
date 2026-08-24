@@ -21,6 +21,9 @@ release declarations.
 
 ### Changed
 
+- Reorganized the README as a concise entry point and added task-oriented
+  guides covering every facade call, intake, retrieval, knowledge, persistence,
+  export, erasure, and Spectre integration workflow with runnable examples.
 - Added `min_vector_similarity` for recall, strict aggregation and traversal
   option validation, link shape validation, and a hard graph-node cap that
   includes seed memories.

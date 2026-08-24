@@ -1,0 +1,486 @@
+# Persistence and operations
+
+This guide covers durable storage, hybrid search, compaction, scheduling,
+exports, logical forgetting, physical erasure, operational limits, evaluation,
+and development commands.
+
+## Durable storage
+
+The default backend is an append-only local file store. Configure it explicitly
+to choose data roots and routing behavior:
+
+~~~elixir
+config :spectre_mnemonic,
+  persistent_memory: [
+    write_mode: :all,
+    read_mode: :smart,
+    failure_mode: :strict,
+    stores: [
+      [
+        id: :local_file,
+        adapter: SpectreMnemonic.Persistence.Store.File,
+        role: :primary,
+        duplicate: true,
+        opts: [data_root: "mnemonic_data"]
+      ]
+    ]
+  ]
+~~~
+
+Persistence records are backend-neutral envelopes. Known families include:
+
+- signals, moments, summaries, and categories;
+- embeddings and associations;
+- knowledge, observations, and mental models;
+- memory states;
+- consolidation and semantic-compaction jobs;
+- artifacts and action recipes;
+- Episodes;
+- tombstones and erasure markers.
+
+The configured stores remain the source of truth. Hot ETS and the durable
+search index are rebuildable projections.
+
+### Frame safety
+
+Append-only frames are limited to 64 MiB by default. Both stored size and the
+expanded size declared by compressed Erlang terms are checked:
+
+~~~elixir
+config :spectre_mnemonic,
+  max_frame_bytes: 16 * 1024 * 1024
+~~~
+
+The same bound protects active.smem and knowledge.smem. Replay stops safely at
+incomplete or corrupt trailing frames.
+
+Inspect replayed live records:
+
+~~~elixir
+{:ok, records} =
+  SpectreMnemonic.Persistence.Manager.replay(
+    scope: {:project, "checkout"}
+  )
+~~~
+
+Replay applies tombstones, erasure generations, partition filters, and
+lifecycle visibility before returning durable records.
+
+## Durable hybrid search
+
+The local durable index is rebuilt from persistent replay. It combines:
+
+- BM25-style text ranking;
+- exact term and entity overlap;
+- vector cosine similarity;
+- binary-signature similarity;
+- lifecycle boosts and demotions.
+
+The normal entry point searches both active and durable memory:
+
+~~~elixir
+{:ok, results} =
+  SpectreMnemonic.search("payment retry decision",
+    scope: {:project, "checkout"},
+    limit: 10
+  )
+~~~
+
+Rebuild the derived index after manual store maintenance:
+
+~~~elixir
+SpectreMnemonic.Durable.Index.rebuild()
+~~~
+
+Rebuild is normally automatic during startup and configured maintenance.
+
+## Consolidation
+
+consolidate/1 promotes eligible active moments into durable knowledge, expands
+selected graph context, records a consolidation job, updates lifecycle states,
+and optionally materializes Atlas Episodes.
+
+~~~elixir
+{:ok, records} =
+  SpectreMnemonic.consolidate(
+    scope: {:project, "checkout"},
+    min_attention: 1.0,
+    graph_depth: 1,
+    cluster?: true,
+    timeout: 30_000
+  )
+~~~
+
+| Option | Purpose |
+| --- | --- |
+| min_attention | minimum source-moment attention |
+| graph_depth | nearby graph depth included in promotion |
+| cluster? | materialize Episode clusters after promotion |
+| compact? | run configured persistence compaction afterward |
+| consolidate_with | one- or two-arity per-call customization |
+| consolidation_adapter | application adapter module |
+| timeout | positive milliseconds or :infinity |
+
+Configure a reusable adapter:
+
+~~~elixir
+config :spectre_mnemonic,
+  consolidation_adapter: MyApp.MemoryConsolidator
+~~~
+
+Adapters receive a populated SpectreMnemonic.Knowledge.Consolidation struct
+containing selected moments, associations, graph windows, timestamps, options,
+and default durable outputs.
+
+## Physical and semantic compaction
+
+Physical compaction writes an atomic live-record snapshot, applies tombstones,
+rotates the active segment, and verifies replay:
+
+~~~elixir
+SpectreMnemonic.Persistence.Manager.compact(mode: :physical)
+~~~
+
+Semantic compaction delegates selection or compression to a store or configured
+adapter:
+
+~~~elixir
+SpectreMnemonic.Persistence.Manager.compact(mode: :semantic)
+SpectreMnemonic.Persistence.Manager.compact(mode: :all)
+~~~
+
+Configure an adapter and bounds:
+
+~~~elixir
+config :spectre_mnemonic,
+  persistent_memory: [
+    semantic_compact_adapter: MyApp.PersistentCompactAdapter,
+    semantic_compact_families: [
+      :moments,
+      :knowledge,
+      :summaries,
+      :categories,
+      :associations,
+      :memory_states
+    ],
+    semantic_compact_limit: 1_000
+  ]
+~~~
+
+Storage adapters can expose native compaction. Otherwise the manager replays a
+bounded selection into SpectreMnemonic.Persistence.Compact.Adapter.compact/2.
+
+## Background maintenance
+
+The supervised scheduler is disabled by default:
+
+~~~elixir
+config :spectre_mnemonic,
+  consolidation_scheduler: [
+    enabled: true,
+    interval_ms: 300_000,
+    mode: :all,
+    min_attention: 1.0,
+    stale_after_ms: 30 * 24 * 60 * 60 * 1_000
+  ]
+~~~
+
+Depending on its mode, each tick can:
+
+- consolidate active memory;
+- decay graph weights unused beyond the configured window;
+- mark old unverified facts stale;
+- compact durable storage;
+- rebuild the derived durable index.
+
+Inspect status:
+
+~~~elixir
+SpectreMnemonic.ConsolidationScheduler.status()
+~~~
+
+## Logical forgetting and retention
+
+forget/2 suppresses selected memory through lifecycle events and tombstones:
+
+~~~elixir
+scope = {:project, "checkout"}
+
+SpectreMnemonic.forget("mom_123", scope: scope)
+SpectreMnemonic.forget({:task, "deploy-42"}, scope: scope)
+SpectreMnemonic.forget({:stream, :planning}, scope: scope)
+
+SpectreMnemonic.forget(
+  fn moment -> :temporary in Map.get(moment.metadata, :tags, []) end,
+  scope: scope
+)
+~~~
+
+Selectors are a memory id, a task tuple, a stream tuple, or a predicate
+receiving each scoped moment.
+
+Forgetting cascades through dependent Episodes and membership edges. Forgotten
+records are hidden from recall, normal search, Atlas, and logical exports.
+Append-only bytes can remain until physical compaction.
+
+Sweep expired validity windows:
+
+~~~elixir
+{:ok, count} =
+  SpectreMnemonic.sweep_expired(
+    scope: {:project, "checkout"},
+    now: DateTime.utc_now()
+  )
+~~~
+
+The returned count includes active-only and durable expired moments.
+
+## Physical partition erasure
+
+erase_partition/1 requires both namespace and scope. It never interprets a
+missing scope as a wildcard:
+
+~~~elixir
+{:ok, report} =
+  SpectreMnemonic.erase_partition(
+    namespace: "my_app_memory",
+    scope: {:subject, "alice"},
+    sealed: true
+  )
+
+report.families
+report.hot
+report.knowledge_events
+report.compaction
+report.marker_id
+report.crypto_shred
+report.already_erased?
+~~~
+
+The operation:
+
+1. verifies that every configured store supports physical partition erasure and
+   post-erasure verification;
+2. replays evicted and active durable records;
+3. writes family tombstones;
+4. rewrites knowledge.smem;
+5. purges hot ETS projections;
+6. requests optional crypto-shredding;
+7. writes a durable erasure generation marker;
+8. closes concurrent hot-write windows with repeated purges;
+9. compacts stores in erase mode;
+10. replays and verifies that target records do not survive;
+11. evicts partition deduplication state and plaintext cache entries.
+
+sealed: true rejects future signals, rich intake, graph links, and durable
+writes to the partition. Generation markers also reject stale restored history,
+including records with future-skewed timestamps.
+
+### Store requirements
+
+An adapter must expose physical erase and verification capabilities. If any
+configured store cannot prove erasure, the operation fails before mutation.
+Logical hiding is never reported as successful physical deletion.
+
+The built-in File adapter rewrites the live store and verifies the result. In
+erase mode it removes retained previous snapshots and rotated segments for the
+whole store so erased bytes cannot survive in crash-recovery copies. Neighbor
+partitions remain in the current compacted snapshot but temporarily lose that
+redundant history.
+
+Deployments requiring different redundancy semantics should provide a
+partition-native adapter.
+
+### Crypto-shredding boundary
+
+The built-in AES-GCM secret adapter does not derive or destroy per-partition
+keys, so report.crypto_shred is :unsupported by default.
+
+Applications using envelope encryption can implement
+SpectreMnemonic.Secrets.Crypto.Adapter.shred/2 to destroy partition key
+material. Physical verified store erasure remains mandatory regardless of the
+optional crypto result.
+
+### Forget versus erase
+
+| Operation | Scope | Retrieval visibility | Physical bytes | Future writes |
+| --- | --- | --- | --- | --- |
+| forget/2 | selected id, task, stream, or predicate | hidden | may remain until compaction | allowed |
+| sweep_expired/1 | expired moments | hidden | may remain until compaction | allowed |
+| erase_partition/1 | entire explicit partition | absent | verified removal for supported stores | optional sealing |
+
+## Export a partition
+
+Write one verified .mnemonic file:
+
+~~~elixir
+{:ok, report} =
+  SpectreMnemonic.export("alice.mnemonic",
+    scope: {:subject, "alice"},
+    mode: :structure,
+    include: :all,
+    embeddings?: false,
+    active?: true
+  )
+
+report.path
+report.content_digest
+report.counts
+report.bytes
+report.mode
+~~~
+
+| Option | Values |
+| --- | --- |
+| mode | :structure, :full, or {:redacted, fun} |
+| include | :all or nodes, edges, clusters, models, knowledge, governance |
+| embeddings? | include vectors and signatures when privacy mode permits |
+| active? | merge active projections with durable replay; default true |
+| frame_target_bytes | frame chunk target, at least 256 bytes |
+
+structure mode is topology-only. It removes raw memory text, canonical entity
+labels, aliases, cluster titles, category labels, arbitrary metadata, vectors,
+and secret labels.
+
+full mode is the subject-access/data-portability projection. Secrets still never
+export plaintext or cryptographic material; they expose at most presence, label,
+and dates.
+
+Caller redaction receives each projected record:
+
+~~~elixir
+redactor = fn record ->
+  record
+  |> Map.drop(["input", "summary"])
+  |> Map.update("text", nil, fn _ -> "[redacted]" end)
+end
+
+SpectreMnemonic.export("alice-redacted.mnemonic",
+  scope: {:subject, "alice"},
+  mode: {:redacted, redactor}
+)
+~~~
+
+Active exports fail explicitly when Atlas caps would truncate the projection.
+
+### Read a detached export
+
+~~~elixir
+{:ok, decoded} = SpectreMnemonic.Export.read("alice.mnemonic")
+
+decoded.manifest
+decoded.nodes
+decoded.edges
+decoded.clusters
+decoded.models
+decoded.knowledge
+decoded.governance
+decoded.trailer
+~~~
+
+The reader validates framing, CRC32, gzip bounds, canonical JSON shape, section
+order, required fields, partition isolation, privacy invariants, record counts,
+and SHA-256 content digest.
+
+### Stream verified frames
+
+~~~elixir
+{:ok, frames} = SpectreMnemonic.Export.stream("alice.mnemonic")
+
+Enum.reduce_while(frames, :ok, fn
+  {:error, reason}, _acc -> {:halt, {:error, reason}}
+  frame, :ok ->
+    consume(frame)
+    {:cont, :ok}
+end)
+~~~
+
+The file is verified before the lazy stream is returned. If it changes
+afterward, enumeration emits one typed error item and halts.
+
+### Export limits and restore boundary
+
+Chunking bounds each encoded frame, not the writer's total heap. The format-v1
+writer materializes the selected partition to deduplicate records, establish
+stable ordering, and compute exact counts. Size the exporter for its partition.
+
+read/2 and stream/2 return detached data only. Format version 1 has no import or
+live-memory restore operation. Runtime recovery uses persistent-store replay.
+Exported copies are host-owned and remain outside erase_partition/1.
+
+The normative contract is [.mnemonic format version 1](MNEMONIC_FORMAT.md).
+
+## Evaluation and development
+
+Run the deterministic evaluation harness:
+
+~~~elixir
+SpectreMnemonic.Evaluation.run(size: 100)
+~~~
+
+It reports recall accuracy, exact-fact recall, and latency.
+
+Run the local demonstration:
+
+~~~bash
+mix run example/demo.exs
+~~~
+
+Standard checks:
+
+~~~bash
+mix format --check-formatted
+mix credo --strict
+mix dialyzer
+mix test
+~~~
+
+The default suite is offline and excludes model-backed system tests.
+
+Run real local embedding retrieval with ex_fastembed:
+
+~~~bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/system/real_embedding_retrieval_test.exs --include real_embedding
+~~~
+
+This matrix checks semantic ranking, similarity floors, partition isolation,
+Vettore strategies, cross-memory aggregation, and durable-index rebuild.
+
+Run the Spectre Agent end-to-end scenarios:
+
+~~~bash
+mix test test/integration/spectre_agent_memory_e2e_test.exs
+~~~
+
+The test runs through Spectre.turn/3 and verifies e-mail, reference, question,
+cross-conversation, and subject-isolation memory.
+
+Run its real semantic scenario:
+
+~~~bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/integration/spectre_agent_memory_e2e_test.exs --only real_embedding
+~~~
+
+The downloaded model cache is local-only and ignored by Git.
+
+## Project layout
+
+- lib/spectre_mnemonic.ex — high-level public facade.
+- lib/spectre/mnemonic* — Spectre Stack installation and memory adapter.
+- lib/spectre_mnemonic/active/* — hot ETS focus, routing, and streams.
+- lib/spectre_mnemonic/intake* — rich intake, plugs, extraction, and packets.
+- lib/spectre_mnemonic/recall/* — context packets, ranking, and vector index.
+- lib/spectre_mnemonic/graph/* — resolver, traversal, and plasticity.
+- lib/spectre_mnemonic/durable/* — derived durable search index.
+- lib/spectre_mnemonic/persistence/* — stores, records, replay, and compaction.
+- lib/spectre_mnemonic/knowledge/* — progressive knowledge and consolidation.
+- lib/spectre_mnemonic/export/* — verified export writer and reader.
+- lib/spectre_mnemonic/embedding/* — adapters, vectors, quantization, models.
+
+## Related guides
+
+- [Getting started](GETTING_STARTED.md)
+- [Complete facade API guide](API_GUIDE.md)
+- [Public API manifest](PUBLIC_API.md)
