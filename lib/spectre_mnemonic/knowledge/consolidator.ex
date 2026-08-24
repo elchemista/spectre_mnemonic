@@ -20,6 +20,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Consolidation
@@ -100,6 +101,7 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     with {:ok, consolidation} <- run_consolidation(consolidation, opts),
          :ok <- validate_consolidation(consolidation),
          :ok <- persist_consolidation(consolidation),
+         {:ok, _clusters} <- maybe_materialize_atlas(consolidation),
          :ok <- maybe_compact(consolidation.opts) do
       {:reply, {:ok, consolidation.knowledge}, state}
     else
@@ -112,6 +114,15 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
        state}
   catch
     kind, reason -> {:reply, {:error, {:consolidation_failed, kind, reason}}, state}
+  end
+
+  @spec maybe_materialize_atlas(Consolidation.t()) :: {:ok, [term()]}
+  defp maybe_materialize_atlas(%Consolidation{moments: []}), do: {:ok, []}
+
+  defp maybe_materialize_atlas(%Consolidation{} = consolidation) do
+    if Keyword.get(consolidation.opts, :cluster?, true),
+      do: Atlas.materialize(consolidation.opts),
+      else: {:ok, []}
   end
 
   @spec validate_options(keyword()) :: :ok | {:error, term()}

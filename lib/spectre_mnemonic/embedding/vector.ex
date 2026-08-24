@@ -8,13 +8,16 @@ defmodule SpectreMnemonic.Embedding.Vector do
   """
 
   @type vector_input :: binary() | [number()] | Nx.Tensor.t()
+  @f32_max 3.402_823_466_385_288_6e38
 
   @doc "Converts a list or f32 binary into a little-endian f32 binary."
   @spec to_f32_binary(vector_input() | term()) :: binary() | nil
-  def to_f32_binary(vector) when is_binary(vector) and rem(byte_size(vector), 4) == 0, do: vector
+  def to_f32_binary(vector) when is_binary(vector) do
+    if valid_f32_binary?(vector), do: vector
+  end
 
   def to_f32_binary(vector) do
-    if tensor?(vector) do
+    if valid_tensor?(vector) do
       vector
       |> Nx.as_type(:f32)
       |> Nx.to_binary()
@@ -35,7 +38,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Converts a little-endian f32 binary or list into a float list."
   @spec to_list(vector_input() | nil | term()) :: [float()]
   def to_list(vector) do
-    if tensor?(vector) do
+    if valid_tensor?(vector) do
       Nx.to_flat_list(vector)
     else
       to_list_without_nx(vector)
@@ -51,7 +54,11 @@ defmodule SpectreMnemonic.Embedding.Vector do
   defp to_list_without_nx(<<>>), do: []
 
   defp to_list_without_nx(binary) when is_binary(binary) do
-    for <<value::little-float-32 <- binary>>, do: value
+    if valid_f32_binary?(binary) do
+      for <<value::little-float-32 <- binary>>, do: value
+    else
+      []
+    end
   end
 
   defp to_list_without_nx(_vector), do: []
@@ -62,7 +69,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
   def to_tensor(vector) do
     if nx_available?() do
       cond do
-        tensor?(vector) -> Nx.as_type(vector, :f32)
+        valid_tensor?(vector) -> Nx.as_type(vector, :f32)
         valid_f32_binary?(vector) -> Nx.from_binary(vector, :f32)
         numeric_list?(vector) -> Nx.tensor(vector, type: :f32)
         true -> {:error, :invalid_vector}
@@ -77,9 +84,7 @@ defmodule SpectreMnemonic.Embedding.Vector do
   def dimensions(vector) do
     cond do
       tensor?(vector) ->
-        vector
-        |> Nx.shape()
-        |> Tuple.product()
+        if valid_tensor?(vector), do: vector |> Nx.shape() |> Tuple.product(), else: 0
 
       numeric_list?(vector) ->
         length(vector)
@@ -111,18 +116,18 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Normalizes a vector to unit length and returns an Nx tensor."
   @spec normalize_tensor(vector_input() | term()) :: term()
   def normalize_tensor(vector) do
-    tensor = to_tensor(vector)
+    case to_tensor(vector) do
+      {:error, _reason} = error ->
+        error
 
-    if match?({:error, :nx_not_available}, tensor) do
-      {:error, :nx_not_available}
-    else
-      norm = Nx.LinAlg.norm(tensor)
+      tensor ->
+        norm = Nx.LinAlg.norm(tensor)
 
-      if Nx.to_number(norm) == 0.0 do
-        Nx.as_type(tensor, :f32)
-      else
-        Nx.divide(tensor, norm)
-      end
+        if Nx.to_number(norm) == 0.0 do
+          Nx.as_type(tensor, :f32)
+        else
+          Nx.divide(tensor, norm)
+        end
     end
   end
 
@@ -187,8 +192,11 @@ defmodule SpectreMnemonic.Embedding.Vector do
 
   @doc "Computes cosine similarity for equally sized vectors."
   @spec cosine(vector_input(), vector_input()) :: float()
-  def cosine(left, right) when is_binary(left) and is_binary(right),
-    do: cosine_f32_binary(left, right)
+  def cosine(left, right) when is_binary(left) and is_binary(right) do
+    if valid_f32_binary?(left) and valid_f32_binary?(right),
+      do: cosine_f32_binary(left, right),
+      else: 0.0
+  end
 
   def cosine(left, right) do
     if valid_dense_vector?(left) and valid_dense_vector?(right) do
@@ -372,16 +380,48 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @spec valid_dense_vector?(term()) :: boolean()
   defp valid_dense_vector?(vector) when is_list(vector), do: numeric_list?(vector)
   defp valid_dense_vector?(vector) when is_binary(vector), do: valid_f32_binary?(vector)
-  defp valid_dense_vector?(%Nx.Tensor{} = vector), do: tensor?(vector)
+  defp valid_dense_vector?(%Nx.Tensor{} = vector), do: valid_tensor?(vector)
   defp valid_dense_vector?(_vector), do: false
 
   @spec valid_f32_binary?(term()) :: boolean()
-  defp valid_f32_binary?(binary) when is_binary(binary), do: rem(byte_size(binary), 4) == 0
+  defp valid_f32_binary?(binary) when is_binary(binary) do
+    byte_size(binary) > 0 and rem(byte_size(binary), 4) == 0 and finite_f32_binary?(binary)
+  end
+
   defp valid_f32_binary?(_binary), do: false
 
+  @spec finite_f32_binary?(binary()) :: boolean()
+  defp finite_f32_binary?(<<>>), do: true
+
+  defp finite_f32_binary?(<<bits::little-unsigned-32, rest::binary>>) do
+    Bitwise.band(bits, 0x7F800000) != 0x7F800000 and finite_f32_binary?(rest)
+  end
+
+  @spec valid_tensor?(term()) :: boolean()
+  defp valid_tensor?(%Nx.Tensor{} = vector) do
+    tensor?(vector) and
+      vector
+      |> Nx.as_type(:f32)
+      |> Nx.to_binary()
+      |> valid_f32_binary?()
+  rescue
+    _exception -> false
+  end
+
+  defp valid_tensor?(_vector), do: false
+
   @spec numeric_list?(term()) :: boolean()
-  defp numeric_list?(list) when is_list(list), do: Enum.all?(list, &is_number/1)
+  defp numeric_list?(list) when is_list(list),
+    do: list != [] and Enum.all?(list, &finite_number?/1)
+
   defp numeric_list?(_list), do: false
+
+  @spec finite_number?(term()) :: boolean()
+  defp finite_number?(value) when is_integer(value), do: abs(value) <= @f32_max
+
+  defp finite_number?(value) when is_float(value), do: abs(value) <= @f32_max
+
+  defp finite_number?(_value), do: false
 
   @spec norm([number()]) :: float()
   defp norm(vector) do

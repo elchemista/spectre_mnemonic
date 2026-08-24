@@ -20,7 +20,13 @@ defmodule SpectreMnemonic.MixProject do
       docs: [
         main: "readme",
         source_ref: "v#{@version}",
-        extras: ["README.md", "docs/PUBLIC_API.md", "CHANGELOG.md", "LICENSE"]
+        extras: [
+          "README.md",
+          "docs/PUBLIC_API.md",
+          "docs/MNEMONIC_FORMAT.md",
+          "CHANGELOG.md",
+          "LICENSE"
+        ]
       ],
       source_url: @source_url,
       homepage_url: @source_url
@@ -47,10 +53,15 @@ defmodule SpectreMnemonic.MixProject do
   defp deps do
     [
       spectre_dep(),
+      {:vettore, "~> 0.3.4"},
+      {:ex_fastembed,
+       github: "elchemista/ex_fastembed",
+       ref: "dddbf068d0202ba6d0a3788cc03992dc95203eaf",
+       only: :test,
+       runtime: false},
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
       {:nx, "~> 0.11"},
-      {:hnswlib, "~> 0.1", optional: true},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}

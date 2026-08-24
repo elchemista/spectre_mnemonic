@@ -37,7 +37,8 @@ The supported surface is documented in the
   artifacts, secrets, and action recipes.
 - Deterministic local recall through keywords, entities, fingerprints, and graph
   expansion, even with no model configured.
-- Optional embedding recall through an adapter or local Model2Vec provider.
+- Caller-provided embeddings plus optional adapter or local Model2Vec generation,
+  indexed per brain through Vettore.
 - Built-in durable hybrid search over persisted records using BM25-style text
   scoring plus vector/signature reranking when embeddings exist.
 - Scoped memory with optional `scope`, temporal validity fields, token-budget
@@ -197,6 +198,17 @@ packet.knowledge
 
 `max_tokens` is a best-effort packet budget. Recall may include one oversized
 primary evidence item when excluding it would make the packet empty.
+`min_vector_similarity` can reject weak semantic candidates before fusion;
+it accepts a cosine threshold from `0.0` to `1.0`:
+
+```elixir
+SpectreMnemonic.recall("how is alpha going?",
+  scope: {:project, "alpha"},
+  min_vector_similarity: 0.55,
+  graph_depth: 2,
+  max_graph_nodes: 200
+)
+```
 
 Use `search/2` when you want active recall plus durable persisted memory:
 
@@ -222,6 +234,95 @@ Use `forget/2` to remove active memories and write tombstones:
 SpectreMnemonic.forget({:task, "alpha"}, scope: {:project, "alpha"})
 SpectreMnemonic.forget("mom_123", scope: {:project, "alpha"})
 ```
+
+## Memory Map, Export, and Erasure
+
+One `{namespace, scope}` partition is one sealed brain. Entity extraction reuses
+the partition's canonical entity node, recall traverses weighted associations,
+and consolidation materializes deterministic Episode clusters.
+
+Inspect the map without a model:
+
+```elixir
+{:ok, atlas} = SpectreMnemonic.atlas(scope: {:subject, "acme/alice"})
+
+atlas.clusters
+atlas.stats.top_hubs
+atlas.stats.orphan_ratio
+```
+
+Ask recall to explain its graph path:
+
+```elixir
+{:ok, packet} =
+  SpectreMnemonic.recall("why was deploy moved?",
+    scope: {:subject, "acme/alice"},
+    trace: true
+  )
+
+packet.trace
+```
+
+Export exactly one partition. `:structure` is the default and contains no raw
+memory text. `:full` is the subject-access/data-portability representation.
+Secrets expose at most presence, label, and dates in every mode.
+
+```elixir
+{:ok, report} =
+  SpectreMnemonic.export("acme_alice.mnemonic",
+    scope: {:subject, "acme/alice"},
+    mode: :structure
+  )
+
+{:ok, export} = SpectreMnemonic.Export.read("acme_alice.mnemonic")
+report.content_digest == export.trailer["content_digest"]
+```
+
+The normative container contract is
+[`docs/MNEMONIC_FORMAT.md`](docs/MNEMONIC_FORMAT.md), with a machine-readable
+schema in
+[`priv/mnemonic_schema_v1.json`](priv/mnemonic_schema_v1.json). Large sections
+are split into bounded consecutive frames; `SpectreMnemonic.Export.stream/2`
+verifies the file before exposing a lazy frame stream.
+
+`forget/2` suppresses selected memory from retrieval and records its lifecycle;
+it is not physical erasure. `erase_partition/1` destroys one complete partition
+and therefore requires both namespace and scope explicitly:
+
+```elixir
+{:ok, report} =
+  SpectreMnemonic.erase_partition(
+    namespace: "my_app_memory",
+    scope: {:subject, "acme/alice"},
+    sealed: true
+  )
+
+report.compaction
+#=> :erased
+```
+
+Erasure enumerates durable records (including records evicted from bounded hot
+memory), tombstones every family, rewrites `knowledge.smem`, purges ETS, invokes
+optional adapter crypto-shredding, removes retained file-store snapshots and
+segments, physically replays the compacted store as a post-condition, and keeps
+a durable marker that blocks stale-history resurrection. The progressive
+knowledge log receives its own erasure compaction marker, so stale events do not
+reappear through that path either.
+`sealed: true` also refuses future writes to that partition. Exported files are
+host-owned copies and remain outside runtime erasure.
+
+### Reading versus restoring an export
+
+`SpectreMnemonic.Export.read/2` fully decodes and verifies a `.mnemonic` file;
+`SpectreMnemonic.Export.stream/2` exposes the same verified frames lazily. Both
+APIs are read-only: they return a detached export projection and never insert,
+replace, or merge records in active ETS memory or a durable store.
+
+Format version 1 does not define an import/restore operation. Reading a valid
+file is therefore not a memory round trip. Runtime recovery uses the configured
+persistent-store replay path. A future `.mnemonic` importer will need an
+explicit API and conflict, idempotency, tombstone, governance, and partition
+rules before it can safely rehydrate live memory.
 
 ## Remember Plug Pipeline
 
@@ -357,6 +458,10 @@ associations, artifacts, action recipes, attention, and task status.
 `remember/2` is the higher-level intake path. It normalizes input, creates a
 root moment, chunks long text, creates summaries and categories, extracts an
 entity timeline graph, and links the graph with typed associations.
+
+Cross-memory aggregation is partition-local and bounded. Tune it with
+`cross_memory_similarity_threshold` (`0.0..1.0`) and
+`max_cross_memory_edges`, or disable it with `cross_memory?: false`.
 
 The deterministic extractor handles names, ISO/month dates, simple events,
 emails, ages, numbers, and phone-like values. Phone-like values are redacted by
@@ -809,6 +914,31 @@ config :spectre_mnemonic,
 Embeddings are optional. Without an adapter, recall and search still work
 through text, fingerprints, graph associations, and durable BM25-style scoring.
 
+If your application already computes an embedding, attach it directly to a
+signal or to the root memory created by `remember/2`:
+
+```elixir
+SpectreMnemonic.signal("opaque event",
+  scope: {:subject, "alice"},
+  embedding: [0.12, -0.44, 0.91]
+)
+
+SpectreMnemonic.remember("a longer memory",
+  scope: {:subject, "alice"},
+  embedding: %{
+    vector: [0.12, -0.44, 0.91],
+    metadata: %{model: "my-embedding-model", version: 3}
+  }
+)
+```
+
+The `vector: [...]` shorthand is also accepted. Caller-provided vectors take
+priority over configured providers, are normalized into the internal float32
+form, and receive a compact binary signature automatically. Invalid vectors do
+not abort ingestion: the memory remains available to text and graph recall.
+Malformed, non-finite, empty, and out-of-range float32 vectors are rejected at
+this boundary instead of entering the index.
+
 Configure a custom adapter:
 
 ```elixir
@@ -828,6 +958,29 @@ config :spectre_mnemonic,
       enabled: true,
       model_id: "minishlab/potion-base-8M",
       download: true
+    ]
+  ]
+```
+
+Active semantic recall is indexed by Vettore. Mnemonic creates one collection
+per `{namespace, scope}` partition, so approximate search never retrieves from
+another brain and then filters the result afterward. The default hybrid path
+combines HNSW candidates, quantized candidates, and exact reranking; if an index
+cannot be created or queried, recall falls back to deterministic ETS scoring.
+
+```elixir
+config :spectre_mnemonic,
+  embedding: [
+    index: [
+      backend: :vettore,
+      vettore_index: :hnsw,
+      strategy: :hybrid,
+      vettore_index_options: [
+        m: 16,
+        m0: 32,
+        ef_construction: 100,
+        ef_search: 64
+      ]
     ]
   ]
 ```
@@ -925,6 +1078,49 @@ mix format
 mix credo
 mix dialyzer
 mix test
+```
+
+The default suite is offline and excludes model-backed system tests. Run the
+real local embedding and retrieval matrix explicitly with:
+
+```bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/system/real_embedding_retrieval_test.exs --include real_embedding
+```
+
+This opt-in suite uses `ex_fastembed` with a local BGE model and verifies real
+semantic ranking, similarity floors, partition isolation, Vettore strategies,
+cross-memory aggregation, and durable-index rebuilds. The downloaded model
+cache is local-only and ignored by Git.
+
+### Spectre agent memory end-to-end
+
+The integration suite includes a real Spectre `0.3.3` Agent and Stack that run
+through the public `Spectre.turn/3` boundary. Consecutive turns let the runtime
+recall and persist Mnemonic memory normally; the test never injects a prepared
+memory packet. It verifies exact answers for an email address, a deployment
+reference and owner, a previously asked question, cross-conversation recall,
+and subject isolation.
+
+The responder is deliberately deterministic and builds its answers only from
+the `%SpectreMnemonic.Recall.Packet{}` supplied by the runtime. This keeps the
+assertions stable without a remote language model while still exercising the
+real Agent, turn lifecycle, memory adapter, persistence callback, and recall
+path.
+
+Run the offline scenarios with:
+
+```bash
+mix test test/integration/spectre_agent_memory_e2e_test.exs
+```
+
+The same file contains an opt-in semantic scenario. It uses `ex_fastembed`
+locally and proves that the Agent retrieves the email when the follow-up has no
+lexical overlap with the remembered text:
+
+```bash
+MNEMONIC_REAL_EMBEDDING_TESTS=1 MIX_ENV=test \
+  mix test test/integration/spectre_agent_memory_e2e_test.exs --only real_embedding
 ```
 
 ## Project Layout

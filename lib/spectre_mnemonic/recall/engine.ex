@@ -24,8 +24,11 @@ defmodule SpectreMnemonic.Recall.Engine do
   use GenServer
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Graph.Plasticity
+  alias SpectreMnemonic.Graph.Traversal
   alias SpectreMnemonic.Knowledge
   alias SpectreMnemonic.Memory.ActionRecipe
   alias SpectreMnemonic.Memory.Artifact
@@ -111,7 +114,8 @@ defmodule SpectreMnemonic.Recall.Engine do
     seed_limit = max(limit, limit * budget.seed_multiplier)
 
     base_ranked = ranked_moments(cue, index_scores, seed_limit, opts)
-    graph_ranked = expand_graph(base_ranked, budget.graph_depth, opts)
+    traversal = expand_graph(base_ranked, budget, opts)
+    graph_ranked = traversal.moments
 
     # The dedicated embedding index can find candidates that text scoring misses.
     # Reciprocal-rank fusion lets those candidates compete without requiring all
@@ -163,6 +167,9 @@ defmodule SpectreMnemonic.Recall.Engine do
 
     revealed = Enum.map(components.moments, &Secrets.maybe_reveal(&1, opts))
 
+    episodes = recall_episodes(revealed, opts)
+    trace = recall_trace(traversal.paths, revealed, episodes, opts)
+
     packet = %Packet{
       cue: cue,
       query_context: context,
@@ -171,10 +178,12 @@ defmodule SpectreMnemonic.Recall.Engine do
       moments: revealed,
       observations: components.observations,
       mental_models: components.mental_models,
+      episodes: episodes,
       knowledge: components.knowledge,
       artifacts: components.artifacts,
       associations: components.associations,
       action_recipes: components.action_recipes,
+      trace: trace,
       confidence: confidence(components.moments),
       usage:
         usage(
@@ -188,6 +197,8 @@ defmodule SpectreMnemonic.Recall.Engine do
           opts
         )
     }
+
+    maybe_reinforce(traversal.paths, components.moments, opts)
 
     {:reply, {:ok, packet}, state}
   end
@@ -216,7 +227,7 @@ defmodule SpectreMnemonic.Recall.Engine do
           keyword()
         ) :: [{number(), recall_moment()}]
   defp maybe_insert_ranked_moment(moment, ranked, cue, index_scores, limit, opts) do
-    score = if memory_visible?(moment, opts), do: score(moment, cue, index_scores), else: 0
+    score = if memory_visible?(moment, opts), do: score(moment, cue, index_scores, opts), else: 0
 
     if score > 0 do
       insert_ranked({score, moment}, ranked, limit)
@@ -236,11 +247,11 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec rank_key({number(), recall_moment()}) :: {number(), integer()}
   defp rank_key({score, moment}), do: {-score, DateTime.to_unix(moment.inserted_at, :microsecond)}
 
-  @spec score(recall_moment(), QueryContext.t(), map()) :: number()
-  defp score(moment, cue, index_scores) do
+  @spec score(recall_moment(), QueryContext.t(), map(), keyword()) :: number()
+  defp score(moment, cue, index_scores, opts) do
     keyword_score = overlap(moment.keywords, cue.keywords) * 2
     entity_score = overlap(moment.entities, cue.entities) * 3
-    semantic_score = semantic_score(moment, cue, index_scores)
+    semantic_score = semantic_score(moment, cue, index_scores, opts)
     status_bonus = if status_match?(moment, cue), do: 2, else: 0
 
     match_score = keyword_score + entity_score + semantic_score + status_bonus
@@ -252,7 +263,7 @@ defmodule SpectreMnemonic.Recall.Engine do
   defp rerank_moments(moments, cue, index_scores) do
     moments
     |> Enum.map(fn moment ->
-      base_score = score(moment, cue, index_scores)
+      base_score = score(moment, cue, index_scores, cue.opts)
       {max(base_score, structured_score(moment, cue)), moment}
     end)
     |> Enum.sort_by(&rank_key/1)
@@ -295,40 +306,16 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   defp structured_score(_moment, _cue), do: 0
 
-  @spec expand_graph([recall_moment()], non_neg_integer(), keyword()) :: [recall_moment()]
-  defp expand_graph(moments, depth, opts), do: expand_graph(moments, depth, opts, MapSet.new())
+  @spec expand_graph([recall_moment()], map(), keyword()) :: Traversal.result()
+  defp expand_graph(moments, budget, opts) do
+    traversal_opts =
+      opts
+      |> Keyword.put_new(:graph_depth, budget.graph_depth)
+      |> Keyword.put_new(:hop_decay, budget.hop_decay)
+      |> Keyword.put_new(:activation_floor, budget.activation_floor)
+      |> Keyword.put_new(:max_graph_nodes, budget.max_graph_nodes)
 
-  @spec expand_graph([recall_moment()], non_neg_integer(), keyword(), MapSet.t()) ::
-          [recall_moment()]
-  defp expand_graph(moments, 0, _opts, _seen), do: moments
-
-  defp expand_graph(moments, depth, opts, _seen) do
-    # Graph expansion is where nearby context gets a chance to help. It is not
-    # permission to drag the whole attic into the prompt. Depth exists for sanity.
-    ids = MapSet.new(Enum.map(moments, & &1.id))
-    associations = Focus.associations_for_ids(ids, opts)
-
-    linked_ids =
-      associations
-      |> Enum.flat_map(fn assoc ->
-        cond do
-          MapSet.member?(ids, assoc.source_id) -> [assoc.target_id]
-          MapSet.member?(ids, assoc.target_id) -> [assoc.source_id]
-          true -> []
-        end
-      end)
-      |> MapSet.new()
-
-    next =
-      linked_ids
-      |> Enum.reject(&MapSet.member?(ids, &1))
-      |> Focus.moments_by_ids(opts)
-
-    if next == [] do
-      moments
-    else
-      expand_graph(moments ++ next, depth - 1, opts, ids)
-    end
+    Traversal.expand(moments, traversal_opts)
   end
 
   @spec active_status([recall_moment()], keyword()) :: [map()]
@@ -418,10 +405,86 @@ defmodule SpectreMnemonic.Recall.Engine do
   @spec budget(keyword()) :: map()
   defp budget(opts) do
     case Keyword.get(opts, :budget, :mid) do
-      :low -> %{seed_multiplier: 1, graph_depth: 1}
-      :high -> %{seed_multiplier: 4, graph_depth: 3}
-      _mid -> %{seed_multiplier: 2, graph_depth: 2}
+      :low ->
+        %{
+          seed_multiplier: 1,
+          graph_depth: 1,
+          hop_decay: 0.62,
+          activation_floor: 0.14,
+          max_graph_nodes: 60
+        }
+
+      :high ->
+        %{
+          seed_multiplier: 4,
+          graph_depth: 3,
+          hop_decay: 0.78,
+          activation_floor: 0.045,
+          max_graph_nodes: 400
+        }
+
+      _mid ->
+        %{
+          seed_multiplier: 2,
+          graph_depth: 2,
+          hop_decay: 0.72,
+          activation_floor: 0.08,
+          max_graph_nodes: 200
+        }
     end
+  end
+
+  @spec recall_trace(map(), [recall_moment()], [term()], keyword()) :: map() | nil
+  defp recall_trace(paths, moments, episodes, opts) do
+    if Keyword.get(opts, :trace, false) do
+      moments
+      |> Map.new(fn moment ->
+        path = Map.get(paths, moment.id)
+        clusters = clusters_for(moment.id, episodes)
+        {moment.id, if(is_nil(path), do: nil, else: Map.put(path, :clusters, clusters))}
+      end)
+      |> Enum.reject(fn {_id, path} -> is_nil(path) end)
+      |> Map.new()
+    end
+  end
+
+  @spec recall_episodes([recall_moment()], keyword()) :: [term()]
+  defp recall_episodes([], _opts), do: []
+
+  defp recall_episodes(moments, opts) do
+    ids = MapSet.new(Enum.map(moments, & &1.id))
+    materialized = Focus.episodes(opts) |> Enum.filter(&episode_intersects?(&1, ids))
+
+    if materialized == [] and Keyword.get(opts, :trace, false) do
+      case Atlas.build(opts) do
+        {:ok, atlas} -> Enum.filter(atlas.clusters, &episode_intersects?(&1, ids))
+        {:error, _reason} -> []
+      end
+    else
+      materialized
+    end
+  end
+
+  @spec episode_intersects?(term(), MapSet.t(binary())) :: boolean()
+  defp episode_intersects?(episode, ids),
+    do: Enum.any?(episode.moment_ids, &MapSet.member?(ids, &1))
+
+  @spec clusters_for(binary(), [term()]) :: [map()]
+  defp clusters_for(moment_id, episodes) do
+    episodes
+    |> Enum.filter(&(moment_id in &1.moment_ids))
+    |> Enum.map(&%{id: &1.id, title: &1.title})
+    |> Enum.sort_by(& &1.id)
+  end
+
+  @spec maybe_reinforce(map(), [recall_moment()], keyword()) :: :ok
+  defp maybe_reinforce(paths, moments, opts) do
+    if Keyword.get(opts, :plasticity?, true) do
+      selected = Map.take(paths, Enum.map(moments, & &1.id))
+      _result = Plasticity.reinforce(selected, opts)
+    end
+
+    :ok
   end
 
   @spec apply_primary_budget(
@@ -714,22 +777,37 @@ defmodule SpectreMnemonic.Recall.Engine do
     MapSet.size(MapSet.intersection(left, right))
   end
 
-  @spec semantic_score(Moment.t() | map(), QueryContext.t() | map(), map()) :: number()
-  defp semantic_score(%{id: id, vector: left, binary_signature: signature}, cue, index_scores)
+  @spec semantic_score(Moment.t() | map(), QueryContext.t() | map(), map(), keyword()) :: number()
+  defp semantic_score(
+         %{id: id, vector: left, binary_signature: signature},
+         cue,
+         index_scores,
+         opts
+       )
        when is_binary(left) and is_binary(cue.vector) do
+    minimum = Keyword.get(opts, :min_vector_similarity, 0.0) * 1.0
+
     case Map.fetch(index_scores, id) do
-      {:ok, result} ->
+      {:ok, result} when result.cosine >= minimum ->
         result.score
+
+      {:ok, _below_threshold} ->
+        0.0
 
       :error ->
         cosine = max(0.0, Vector.cosine(left, cue.vector))
-        signature_bits = signature_bits(cue.embedding, signature, cue.binary_signature)
-        hamming = Vector.hamming_similarity(signature, cue.binary_signature, signature_bits)
-        cosine * 4 + hamming * 4
+
+        if cosine >= minimum do
+          signature_bits = signature_bits(cue.embedding, signature, cue.binary_signature)
+          hamming = Vector.hamming_similarity(signature, cue.binary_signature, signature_bits)
+          cosine * 4 + hamming * 4
+        else
+          0.0
+        end
     end
   end
 
-  defp semantic_score(moment, cue, _index_scores) do
+  defp semantic_score(moment, cue, _index_scores, _opts) do
     similarity =
       Fingerprint.hamming_similarity(moment.fingerprint, cue.fingerprint)
 
@@ -758,6 +836,18 @@ defmodule SpectreMnemonic.Recall.Engine do
         {:include_observations, &is_boolean/1},
         {:include_mental_models, &is_boolean/1},
         {:include_knowledge, &is_boolean/1},
+        {:trace, &is_boolean/1},
+        {:plasticity?, &is_boolean/1},
+        {:overfetch, &non_negative_integer?/1},
+        {:graph_depth, &non_negative_integer?/1},
+        {:max_graph_nodes, &non_negative_integer?/1},
+        {:hop_decay, &bounded_ratio?/1},
+        {:activation_floor, &bounded_ratio?/1},
+        {:prune_threshold, &bounded_ratio?/1},
+        {:relations, &valid_relations?/1},
+        {:relation_types, &valid_relations?/1},
+        {:exclude_relations, &valid_relation_list?/1},
+        {:min_vector_similarity, &bounded_ratio?/1},
         {:budget, &(&1 in [:low, :mid, :high])}
       ]
 
@@ -794,6 +884,19 @@ defmodule SpectreMnemonic.Recall.Engine do
 
   @spec positive_integer?(term()) :: boolean()
   defp positive_integer?(value), do: is_integer(value) and value > 0
+
+  @spec bounded_ratio?(term()) :: boolean()
+  defp bounded_ratio?(value), do: is_number(value) and value >= 0 and value <= 1
+
+  @spec valid_relations?(term()) :: boolean()
+  defp valid_relations?(:all), do: true
+  defp valid_relations?(relations), do: valid_relation_list?(relations)
+
+  @spec valid_relation_list?(term()) :: boolean()
+  defp valid_relation_list?(relations) when is_list(relations),
+    do: Enum.all?(relations, &is_atom/1)
+
+  defp valid_relation_list?(_relations), do: false
 
   @spec result_values(term()) :: [term()]
   defp result_values({:ok, values}) when is_list(values), do: values

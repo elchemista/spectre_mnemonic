@@ -1,0 +1,168 @@
+# `.mnemonic` format version 1
+
+This document is the normative contract for Spectre Mnemonic format-v1 exports.
+Readers in Spectre Lab, Spectre Studio, or another implementation must follow
+this document rather than depending on SpectreMnemonic runtime internals.
+
+## Trust boundary
+
+A `.mnemonic` file is a host-owned, trusted/local subject-access artifact. It
+may contain personal data in `full` mode and must be protected accordingly.
+Exported copies are outside `erase_partition/1` and must be deleted by their
+owner. A reader must never decode an Erlang term from this container. Version 1
+payloads are UTF-8 canonical JSON only.
+
+## File framing
+
+The file is a sequence of frames with no bytes before the first frame or after
+the last frame. All integers are unsigned, big-endian.
+
+| Field | Bytes | Meaning |
+| --- | ---: | --- |
+| magic | 4 | ASCII `SMNE` |
+| version | 1 | `1` |
+| sequence | 8 | starts at 1 and increments by 1 |
+| payload length | 4 | compressed payload byte length |
+| CRC32 | 4 | CRC32 of the compressed payload |
+| payload | variable | gzip-compressed canonical JSON |
+
+Both the compressed and expanded JSON payload must be no larger than the
+configured frame maximum (64 MiB by default). Readers reject unknown magic,
+versions, missing sequences, truncation, invalid gzip, CRC mismatch, invalid
+JSON, and trailing partial data.
+
+Every decoded frame has this JSON shape:
+
+```json
+{"data": {}, "section": "manifest"}
+```
+
+The machine-readable Draft 2020-12 schema is
+[`priv/mnemonic_schema_v1.json`](../priv/mnemonic_schema_v1.json). It defines
+the manifest, every content section, the common record envelope, edges,
+clusters, and the trailer. Implementations apply it to every decoded frame in
+addition to the semantic checks below.
+
+The bundled reader validates required fields, field types, digest syntax,
+timestamps, exact count keys, normalized edge weights, cluster member ids, and
+privacy-forbidden fields before returning any data. Schema failures identify
+the frame sequence, section, record index when applicable, and failed rule.
+
+Object keys are serialized in ascending Unicode codepoint order. Arrays retain
+their specified order. Records are ordered by `family`, then `inserted_at`, then
+`id`. Timestamps use ISO 8601 UTC strings. Non-UTF-8 binaries, when explicitly
+included, use `{"$binary":"BASE64"}`.
+
+## Section order and chunking
+
+Logical sections occur in exactly this order:
+
+1. `manifest`
+2. `nodes`
+3. `edges`
+4. `clusters`
+5. `models`
+6. `knowledge`
+7. `governance`
+8. `trailer`
+
+`manifest` and `trailer` occur exactly once. Every content section occurs one
+or more times: writers split large arrays into consecutive frames so both the
+compressed and expanded form of each frame stays within the 64 MiB bound. A
+small export therefore has eight frames; a large export can have more. Readers
+concatenate consecutive chunks of the same section. A missing, reordered, or
+non-consecutive section is invalid. An omitted content class is represented by
+one frame containing an empty array.
+
+## One-partition invariant
+
+One file contains exactly one `{namespace, scope}` partition. `manifest`
+contains the namespace, an opaque printable scope, and
+`scope_digest = hex(sha256(deterministic_erlang_encoding({namespace, scope})))`.
+The Erlang encoding is used only by the trusted writer to derive the digest; it
+is never stored or decoded by the reader.
+
+Every content record repeats `namespace` and `scope_digest`. A reader must reject
+the entire file if any record disagrees with the manifest. No graph endpoint or
+cluster may be sourced from another partition.
+
+## Manifest
+
+The manifest object contains:
+
+- `format`: `spectre-mnemonic`
+- `format_version`: `1`
+- `library_version`: writer version
+- `namespace`, `scope`, `scope_digest`
+- `privacy_mode`: `structure`, `full`, or `redacted`
+- `created_at`: the latest included record timestamp, or the Unix epoch for an
+  empty partition; this makes unchanged exports byte-identical
+- `counts`: record count for every content section
+- `content_digest`: lowercase SHA-256 hex digest defined below
+
+## Content records
+
+Every record has `family`, `id`, `namespace`, `scope_digest`, and
+`inserted_at`. Other fields depend on its section and privacy mode.
+
+- `nodes`: signals, moments/entities, and artifacts.
+- `edges`: association source, target, relation, weight, and approved metadata.
+- `clusters`: Episode id, title, member ids, deterministic algorithm metadata,
+  and temporal fields.
+- `models`: observations and mental models, including provenance in `full` mode.
+- `knowledge`: consolidated records plus compact `knowledge.smem` events.
+- `governance`: lifecycle state events and their temporal ordering.
+
+Consumers must ignore unknown record fields. New optional fields may be added in
+a compatible 1.x writer; removing required envelope fields or changing section
+meaning requires a format-version increment.
+
+## Privacy modes
+
+`structure` is the default. It includes topology, ids, relations, weights,
+states, time fields, cluster titles, canonical entity labels, aliases, and a
+small approved structural metadata set. It excludes raw signal input, moment
+text, summaries, knowledge text, vectors, and arbitrary metadata.
+
+`full` is the Article 15/20 subject-access representation. It includes record
+payloads and provenance. Embedding fields remain excluded unless the writer is
+called with `embeddings?: true`.
+
+`redacted` applies the caller's one-arity redaction function to every non-secret
+payload before JSON encoding. Deterministic output requires a deterministic
+function.
+
+Secrets are structurally special in every mode. A secret record may contain
+only presence, label, lock status, and temporal fields. Plaintext, ciphertext,
+IV, authentication tag, AAD, vectors, and arbitrary secret metadata are never
+exported. A reader rejects a file containing any of these fields even if its
+framing, checksums, digest, and counts are otherwise valid.
+
+## Digest and verification
+
+For every content frame from `nodes` through `governance`, including every
+chunk, canonical-encode the whole decoded frame object (including `section` and
+`data`) without compression. Concatenate those byte strings in file order and
+compute SHA-256. The lowercase hex result must equal both
+`manifest.content_digest` and `trailer.content_digest`. Counts are the sum of
+records across all chunks of a logical section.
+
+The trailer also repeats per-section counts. A conforming reader verifies, in
+order: frame structure, sequence, bounds, CRC, gzip, JSON, version, section
+order, digest, counts, and partition agreement. No partially verified export is
+returned.
+
+## Reader and restore boundary
+
+A format-v1 reader decodes and verifies a detached representation. Successful
+verification does not authorize the reader to mutate active memory, replay a
+record into a durable store, merge identities, or apply governance state.
+`SpectreMnemonic.Export.read/2` and `SpectreMnemonic.Export.stream/2` are
+read-only implementations of this contract.
+
+Format version 1 defines no import or live-memory restore semantics. In
+particular, it does not define conflict resolution, idempotency keys, tombstone
+precedence, entity merging, governance transitions, or replacement rules for
+records already present in the destination partition. Implementations must not
+infer those operations from frame order or timestamps. A future rehydration API
+must define and validate those rules explicitly before writing any record.

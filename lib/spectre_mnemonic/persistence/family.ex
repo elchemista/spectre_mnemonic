@@ -16,7 +16,9 @@ defmodule SpectreMnemonic.Persistence.Family do
     :semantic_compaction_jobs,
     :artifacts,
     :action_recipes,
-    :tombstones
+    :tombstones,
+    :episodes,
+    :erasure_markers
   ]
 
   @by_string Map.new(@known, &{Atom.to_string(&1), &1})

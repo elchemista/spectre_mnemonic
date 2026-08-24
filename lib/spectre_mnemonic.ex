@@ -11,7 +11,11 @@ defmodule SpectreMnemonic do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Active.Router
+  alias SpectreMnemonic.Atlas
+  alias SpectreMnemonic.Erasure
+  alias SpectreMnemonic.Export
   alias SpectreMnemonic.Governance
+  alias SpectreMnemonic.Graph.Resolver
   alias SpectreMnemonic.Intake
   alias SpectreMnemonic.Knowledge.Base
   alias SpectreMnemonic.Knowledge.Compact
@@ -45,6 +49,8 @@ defmodule SpectreMnemonic do
     * `:task_id` - task identifier used for status and routing
     * `:kind` - signal kind, such as `:chat`, `:research`, or `:tool`
     * `:metadata` - extra context stored with the signal
+    * `:embedding` or `:vector` - a caller-computed dense vector; it takes
+      priority over configured embedding providers
     * `:action_recipe` - English-like Action Language text or map stored as data
 
   ## Examples
@@ -81,6 +87,10 @@ defmodule SpectreMnemonic do
   Durable promotion is intentionally separate: use `persist?: true` for an
   immediate durable write, or let `consolidate/1` promote important active memory
   later.
+
+  Pass `embedding: vector`, `embedding: %{vector: vector, metadata: map}`, or
+  `vector: vector` to attach a caller-computed embedding to the root moment.
+  Derived chunks continue to use their own text/provider embeddings.
 
   ## Examples
 
@@ -444,6 +454,42 @@ defmodule SpectreMnemonic do
   def link(source_id, relation, target_id, opts \\ []) do
     Focus.link(source_id, relation, target_id, opts)
   end
+
+  @doc """
+  Resolves two active entity ids as the same partition-local entity.
+
+  The merge is append-only: it writes a `:same_as` association and redirects
+  future exact canonical/alias resolution to the winner. Existing history is
+  not rewritten.
+  """
+  @spec merge_entities(binary(), binary(), keyword()) ::
+          {:ok, Association.t()} | {:error, term()}
+  def merge_entities(winner_id, loser_id, opts \\ []) do
+    Resolver.merge_entities(winner_id, loser_id, opts)
+  end
+
+  @doc "Returns the deterministic mind-map projection for one partition."
+  @spec atlas(keyword()) :: {:ok, Atlas.t()} | {:error, term()}
+  def atlas(opts \\ []) do
+    if Keyword.get(opts, :recluster, false) do
+      with {:ok, _clusters} <- Atlas.materialize(opts), do: Atlas.build(opts)
+    else
+      Atlas.build(opts)
+    end
+  end
+
+  @doc "Physically erases one explicitly named namespace/scope partition."
+  @spec erase_partition(keyword()) ::
+          {:ok, SpectreMnemonic.Erasure.Report.t()} | {:error, term()}
+  def erase_partition(opts), do: Erasure.erase_partition(opts)
+
+  @doc "Forgets active records in one partition whose validity window expired."
+  @spec sweep_expired(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def sweep_expired(opts \\ []), do: Erasure.sweep_expired(opts)
+
+  @doc "Writes one partition as a verified `.mnemonic` file."
+  @spec export(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def export(path, opts \\ []), do: Export.write(path, opts)
 
   @doc """
   Stores an artifact reference or binary payload.

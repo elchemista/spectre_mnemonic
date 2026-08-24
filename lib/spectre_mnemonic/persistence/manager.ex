@@ -31,6 +31,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   require Logger
 
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
+  alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.Family
@@ -49,7 +50,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
         }
   @type config :: keyword()
   @type write_result :: %{store: term(), role: term(), result: :ok | {:error, term()}}
-  @type compact_mode :: :physical | :semantic | :all
+  @type compact_mode :: :physical | :semantic | :all | :erase
   @type replay_state :: %{position: non_neg_integer(), records: map()}
   @type manager_state :: %{dedupe: map()}
 
@@ -75,7 +76,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec append(atom(), term(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def append(family, payload, opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Erasure.ensure_durable_write(family, opts) do
       GenServer.call(__MODULE__, {:append, family, payload, opts})
     end
   end
@@ -103,7 +105,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec put(Record.t(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def put(%Record{} = record, opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         :ok <- Erasure.ensure_durable_write(record.family, opts) do
       GenServer.call(__MODULE__, {:put, record, opts})
     end
   end
@@ -124,6 +127,16 @@ defmodule SpectreMnemonic.Persistence.Manager do
   def replay(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       GenServer.call(__MODULE__, {:replay, opts})
+    end
+  end
+
+  @doc false
+  @spec replay_fold(keyword(), acc, (Record.t(), acc -> {:cont, acc} | {:halt, acc})) ::
+          {:ok, acc} | {:error, term()}
+        when acc: term()
+  def replay_fold(opts \\ [], acc, fun) when is_function(fun, 2) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:replay_fold, opts, acc, fun}, 30_000)
     end
   end
 
@@ -198,6 +211,14 @@ defmodule SpectreMnemonic.Persistence.Manager do
   def compact(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       GenServer.call(__MODULE__, {:compact, opts})
+    end
+  end
+
+  @doc false
+  @spec verify_erased([{atom(), binary()}], keyword()) :: :ok | {:error, term()}
+  def verify_erased(targets, opts) when is_list(targets) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      GenServer.call(__MODULE__, {:verify_erased, MapSet.new(targets), opts}, 30_000)
     end
   end
 
@@ -279,6 +300,20 @@ defmodule SpectreMnemonic.Persistence.Manager do
     {:reply, reply, state}
   end
 
+  def handle_call({:replay_fold, opts, acc, fun}, _from, state) do
+    reply =
+      opts
+      |> effective_config()
+      |> replayable_stores()
+      |> replay_records_checked()
+      |> case do
+        {:ok, records} -> fold_visible_records(records, opts, acc, fun)
+        {:error, failures} -> {:error, {:persistent_memory_replay_failed, failures}}
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:replay_all, opts}, _from, state) do
     reply =
       opts
@@ -327,20 +362,50 @@ defmodule SpectreMnemonic.Persistence.Manager do
     reply =
       case compact_mode(opts, cfg) do
         :physical ->
-          {:ok, physical_compact(cfg)}
+          {:ok, physical_compact(cfg, opts)}
 
         :semantic ->
           {:ok, semantic_compact(cfg, opts)}
 
         :all ->
           semantic = semantic_compact(cfg, opts)
-          physical = physical_compact(cfg)
+          physical = physical_compact(cfg, opts)
           {:ok, %{mode: :all, semantic: semantic, physical: physical}}
+
+        :erase ->
+          erase_opts =
+            opts
+            |> Keyword.put(:retain_compacted_segments, 0)
+            |> Keyword.put(:erase?, true)
+
+          {:ok, physical_compact(cfg, erase_opts)}
 
         mode ->
           {:error, {:invalid_compact_mode, mode}}
       end
 
+    {:reply, reply, state}
+  end
+
+  def handle_call({:verify_erased, targets, opts}, _from, state) do
+    namespace = Identity.namespace!(opts)
+    scope = Scope.from_opts(opts)
+
+    failures =
+      opts
+      |> effective_config()
+      |> replayable_stores()
+      |> Enum.filter(&(&1.adapter == StoreFile))
+      |> Enum.flat_map(fn store ->
+        store_opts = Keyword.merge(store.opts, Keyword.take(opts, [:data_root]))
+
+        case StoreFile.verify_erased(store_opts, namespace, scope, targets) do
+          :ok -> []
+          {:error, reason} -> [%{store: store.id, reason: reason}]
+        end
+      end)
+
+    reply = if failures == [], do: :ok, else: {:error, {:erasure_verification_failed, failures}}
     {:reply, reply, state}
   end
 
@@ -769,12 +834,20 @@ defmodule SpectreMnemonic.Persistence.Manager do
     Keyword.get(opts, :mode) || Keyword.get(cfg, :compact_mode, :physical)
   end
 
-  @spec physical_compact(config()) :: [{term(), {:ok, Path.t()} | {:error, term()}}]
-  defp physical_compact(cfg) do
+  @spec physical_compact(config(), keyword()) :: [{term(), {:ok, Path.t()} | {:error, term()}}]
+  defp physical_compact(cfg, opts) do
     cfg
     |> replayable_stores()
     |> Enum.filter(&(&1.adapter == StoreFile))
-    |> Enum.map(fn store -> {store.id, StoreFile.compact(store.opts)} end)
+    |> Enum.map(fn store ->
+      compact_opts =
+        Keyword.merge(
+          store.opts,
+          Keyword.take(opts, [:retain_compacted_segments, :erase?])
+        )
+
+      {store.id, StoreFile.compact(compact_opts)}
+    end)
   end
 
   @spec semantic_compact(config(), keyword()) :: map()
@@ -1291,6 +1364,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     |> Enum.reduce(replay_state(), &replay_store_into/2)
     |> replay_state_records()
     |> apply_tombstones()
+    |> apply_erasure_markers()
   end
 
   @spec replay_records_checked([store()]) :: {:ok, [Record.t()]} | {:error, [map()]}
@@ -1304,12 +1378,31 @@ defmodule SpectreMnemonic.Persistence.Manager do
     end)
     |> case do
       {:ok, state} ->
-        records = state |> replay_state_records() |> apply_tombstones()
+        records = state |> replay_state_records() |> apply_tombstones() |> apply_erasure_markers()
         {:ok, records}
 
       {:error, failures} ->
         {:error, failures}
     end
+  end
+
+  @spec fold_visible_records(
+          [Record.t()],
+          keyword(),
+          acc,
+          (Record.t(), acc -> {:cont, acc} | {:halt, acc})
+        ) :: {:ok, acc}
+        when acc: term()
+  defp fold_visible_records(records, opts, acc, fun) do
+    records
+    |> Enum.filter(&Scope.match?(&1, opts))
+    |> Enum.reduce_while(acc, fn record, acc ->
+      case fun.(record, acc) do
+        {:cont, acc} -> {:cont, acc}
+        {:halt, acc} -> {:halt, acc}
+      end
+    end)
+    |> then(&{:ok, &1})
   end
 
   @spec replay_store_into_checked(store(), replay_state()) ::
@@ -1525,6 +1618,45 @@ defmodule SpectreMnemonic.Persistence.Manager do
       MapSet.member?(forgotten, {record.namespace, record.scope, record.family, payload_id})
     end)
   end
+
+  @spec apply_erasure_markers([Record.t()]) :: [Record.t()]
+  defp apply_erasure_markers(records) do
+    markers =
+      records
+      |> Enum.filter(&(&1.family == :erasure_markers))
+      |> Enum.reduce(%{}, &put_latest_erasure_marker/2)
+
+    Enum.reject(records, &erased_record?(&1, markers))
+  end
+
+  @spec put_latest_erasure_marker(Record.t(), map()) :: map()
+  defp put_latest_erasure_marker(marker, markers) do
+    key = {marker.namespace, marker.scope}
+
+    case Map.fetch(markers, key) do
+      :error -> Map.put(markers, key, marker)
+      {:ok, current} -> Map.put(markers, key, latest_record(marker, current))
+    end
+  end
+
+  @spec latest_record(Record.t(), Record.t()) :: Record.t()
+  defp latest_record(candidate, current) do
+    if record_time(candidate) >= record_time(current), do: candidate, else: current
+  end
+
+  @spec erased_record?(Record.t(), map()) :: boolean()
+  defp erased_record?(record, markers) do
+    marker = Map.get(markers, {record.namespace, record.scope})
+
+    not is_nil(marker) and record.family != :erasure_markers and
+      record_time(record) <= record_time(marker)
+  end
+
+  @spec record_time(Record.t()) :: integer()
+  defp record_time(%Record{inserted_at: %DateTime{} = inserted_at}),
+    do: DateTime.to_unix(inserted_at, :microsecond)
+
+  defp record_time(_record), do: 0
 
   @spec safe_capabilities(store()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
   defp safe_capabilities(store) do

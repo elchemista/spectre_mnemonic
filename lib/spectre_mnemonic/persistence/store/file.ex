@@ -64,12 +64,13 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   def compact(opts, supplied_records) do
     root = data_root(opts)
     retain = Keyword.get(opts, :retain_compacted_segments, 1)
+    erase? = Keyword.get(opts, :erase?, false)
 
     with :ok <- validate_retention(retain),
          :ok <- ensure_root(root) do
       root
       |> active_path()
-      |> with_path_lock(fn -> compact_locked(root, supplied_records, retain) end)
+      |> with_path_lock(fn -> compact_locked(root, supplied_records, retain, erase?) end)
     end
   end
 
@@ -78,6 +79,49 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   def data_root(opts \\ []) do
     Keyword.get(opts, :data_root) ||
       Application.get_env(:spectre_mnemonic, :data_root, "mnemonic_data")
+  end
+
+  @doc false
+  @spec verify_erased(keyword(), binary(), term(), MapSet.t({atom(), binary()})) ::
+          :ok | {:error, term()}
+  def verify_erased(opts, namespace, scope, targets) do
+    root = data_root(opts)
+
+    collector = fn frame, acc ->
+      collect_erased_survivor(frame, acc, namespace, scope, targets)
+    end
+
+    case replay_fold(opts, [], collector) do
+      {:ok, survivors} -> verify_erasure_results(survivors, root)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec collect_erased_survivor(
+          term(),
+          [Record.t()],
+          binary(),
+          term(),
+          MapSet.t({atom(), binary()})
+        ) :: {:cont, [Record.t()]}
+  defp collect_erased_survivor(frame, acc, namespace, scope, targets) do
+    case raw_record(frame) do
+      %Record{} = record ->
+        if erased_survivor?(record, namespace, scope, targets),
+          do: {:cont, [record | acc]},
+          else: {:cont, acc}
+
+      _other ->
+        {:cont, acc}
+    end
+  end
+
+  @spec verify_erasure_results([Record.t()], Path.t()) :: :ok | {:error, term()}
+  defp verify_erasure_results(survivors, root) do
+    case verify_no_survivors(survivors) do
+      :ok -> verify_erase_retention(root)
+      {:error, _reason} = error -> error
+    end
   end
 
   @spec ensure_root(Path.t()) :: :ok | {:error, term()}
@@ -100,9 +144,9 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     end
   end
 
-  @spec compact_locked(Path.t(), [Record.t()] | nil, non_neg_integer()) ::
+  @spec compact_locked(Path.t(), [Record.t()] | nil, non_neg_integer(), boolean()) ::
           {:ok, Path.t()} | {:error, term()}
-  defp compact_locked(root, supplied_records, retain) do
+  defp compact_locked(root, supplied_records, retain, erase?) do
     records = supplied_records || compactable_records(root)
     snapshot = snapshot_path(root)
     temporary = snapshot <> ".tmp"
@@ -116,7 +160,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     with :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
          :ok <- install_snapshot(snapshot, temporary),
          :ok <- rotate_active_segment(root),
-         :ok <- prune_rotated_segments(root, retain) do
+         :ok <- prune_rotated_segments(root, retain),
+         :ok <- remove_previous_if_erasing(root, erase?) do
       {:ok, snapshot}
     else
       {:error, reason} ->
@@ -124,6 +169,10 @@ defmodule SpectreMnemonic.Persistence.Store.File do
         {:error, reason}
     end
   end
+
+  @spec remove_previous_if_erasing(Path.t(), boolean()) :: :ok | {:error, term()}
+  defp remove_previous_if_erasing(root, true), do: remove_if_present(previous_snapshot_path(root))
+  defp remove_previous_if_erasing(_root, false), do: :ok
 
   @spec active_path(Path.t()) :: Path.t()
   defp active_path(root), do: Path.join([root, "segments", "active.smem"])
@@ -314,7 +363,40 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     |> Enum.reduce(%{}, fn record, acc -> Map.put(acc, record.dedupe_key, record) end)
     |> Map.values()
     |> apply_tombstones()
+    |> apply_erasure_markers()
     |> Enum.sort_by(&record_timestamp/1)
+  end
+
+  @spec raw_record(term()) :: Record.t() | nil
+  defp raw_record({_sequence, _timestamp, %Record{} = record}), do: record
+  defp raw_record(%Record{} = record), do: record
+  defp raw_record(_frame), do: nil
+
+  @spec erased_survivor?(Record.t(), binary(), term(), MapSet.t({atom(), binary()})) :: boolean()
+  defp erased_survivor?(record, namespace, scope, targets) do
+    same_partition = record.namespace == namespace and record.scope == scope
+    target = {record.family, payload_id(record.payload)}
+
+    same_partition and
+      (record.family != :erasure_markers or MapSet.member?(targets, target))
+  end
+
+  @spec verify_no_survivors([Record.t()]) :: :ok | {:error, term()}
+  defp verify_no_survivors([]), do: :ok
+
+  defp verify_no_survivors(records) do
+    surviving = Enum.map(records, &{&1.family, payload_id(&1.payload), &1.id})
+    {:error, {:erasure_bytes_survived, surviving}}
+  end
+
+  @spec verify_erase_retention(Path.t()) :: :ok | {:error, term()}
+  defp verify_erase_retention(root) do
+    previous = previous_snapshot_path(root)
+    rotated = rotated_paths(root)
+
+    if not File.exists?(previous) and rotated == [],
+      do: :ok,
+      else: {:error, {:erasure_retention_survived, previous, rotated}}
   end
 
   @spec recovery_records(Path.t()) :: [Record.t()]
@@ -373,6 +455,39 @@ defmodule SpectreMnemonic.Persistence.Store.File do
           {record.namespace, record.scope, record.family, payload_id(record.payload)}
         )
     end)
+  end
+
+  @spec apply_erasure_markers([Record.t()]) :: [Record.t()]
+  defp apply_erasure_markers(records) do
+    markers =
+      records
+      |> Enum.filter(&(&1.family == :erasure_markers))
+      |> Enum.reduce(%{}, &put_latest_erasure_marker/2)
+
+    Enum.reject(records, &erased_record?(&1, markers))
+  end
+
+  @spec put_latest_erasure_marker(Record.t(), map()) :: map()
+  defp put_latest_erasure_marker(record, markers) do
+    key = {record.namespace, record.scope}
+
+    case Map.fetch(markers, key) do
+      :error -> Map.put(markers, key, record)
+      {:ok, current} -> Map.put(markers, key, latest_record(record, current))
+    end
+  end
+
+  @spec latest_record(Record.t(), Record.t()) :: Record.t()
+  defp latest_record(candidate, current) do
+    if record_timestamp(candidate) >= record_timestamp(current), do: candidate, else: current
+  end
+
+  @spec erased_record?(Record.t(), map()) :: boolean()
+  defp erased_record?(record, markers) do
+    marker = Map.get(markers, {record.namespace, record.scope})
+
+    not is_nil(marker) and record.family != :erasure_markers and
+      record_timestamp(record) <= record_timestamp(marker)
   end
 
   @spec payload_id(term()) :: term()

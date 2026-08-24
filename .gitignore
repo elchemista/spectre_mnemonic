@@ -21,6 +21,9 @@
 /example/mnemonic_data/
 /example/models/
 
+# Models downloaded only by opt-in local embedding system tests.
+/.fastembed_cache/
+
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
 

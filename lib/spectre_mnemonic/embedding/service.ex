@@ -15,16 +15,16 @@ defmodule SpectreMnemonic.Embedding.Service do
         error: term() | nil
       }
 
-  Providers may return a raw list vector or a map with vector metadata. This
-  module converts vectors to normalized `:f32` binaries and builds a compact
-  binary signature for hamming-based recall.
+  Callers and providers may supply a raw list vector or a map with vector
+  metadata. This module converts vectors to normalized `:f32` binaries and
+  builds a compact binary signature for hamming-based recall.
   """
 
   alias SpectreMnemonic.Embedding.BinaryQuantizer
   alias SpectreMnemonic.Embedding.Vector
 
   @doc """
-  Embeds input when an adapter is configured, otherwise returns an empty embedding.
+  Normalizes a caller embedding or embeds input through a configured provider.
 
   `embed/2` never raises provider errors to callers. A failed or unavailable
   provider returns an embedding map with `vector: nil` and an `:error` value so
@@ -32,9 +32,10 @@ defmodule SpectreMnemonic.Embedding.Service do
 
   Resolution order:
 
-    1. `:embedding_adapter` application config.
-    2. Fast local provider config under `:embedding`.
-    3. Empty embedding fallback.
+    1. Per-call `:embedding` or `:vector`.
+    2. `:embedding_adapter` application config.
+    3. Fast local provider config under `:embedding`.
+    4. Empty embedding fallback.
 
   ## Examples
 
@@ -57,17 +58,54 @@ defmodule SpectreMnemonic.Embedding.Service do
   defp do_embed(input, opts) do
     # Embeddings improve recall, but ingestion must not depend on them. Models,
     # files, and NIFs fail in creative ways. Text still gets remembered.
+    case direct_embedding(opts) do
+      {:ok, embedding} ->
+        normalize_direct_result(embedding, opts)
+
+      {:error, reason} ->
+        failed(reason)
+
+      :missing ->
+        embed_with_configured_provider(input, opts)
+    end
+  end
+
+  @spec direct_embedding(keyword()) :: {:ok, term()} | {:error, term()} | :missing
+  defp direct_embedding(opts) do
+    cond do
+      Keyword.has_key?(opts, :embedding) -> normalize_direct_embedding(opts[:embedding])
+      Keyword.has_key?(opts, :vector) -> normalize_direct_embedding(%{vector: opts[:vector]})
+      true -> :missing
+    end
+  end
+
+  @spec normalize_direct_embedding(term()) :: {:ok, term()} | {:error, :invalid_embedding}
+  defp normalize_direct_embedding(vector) when is_list(vector) or is_binary(vector),
+    do: {:ok, %{vector: vector, metadata: %{provider: :caller}}}
+
+  defp normalize_direct_embedding(%{} = embedding), do: {:ok, embedding}
+  defp normalize_direct_embedding(_embedding), do: {:error, :invalid_embedding}
+
+  @spec normalize_direct_result(term(), keyword()) :: map()
+  defp normalize_direct_result(embedding, opts) do
+    case normalize_result(embedding, opts) do
+      %{vector: vector, metadata: metadata} = normalized
+      when is_binary(vector) and byte_size(vector) > 0 ->
+        %{normalized | metadata: Map.put_new(metadata, :provider, :caller)}
+
+      _invalid ->
+        failed(:invalid_embedding)
+    end
+  end
+
+  @spec embed_with_configured_provider(term(), keyword()) :: map()
+  defp embed_with_configured_provider(input, opts) do
     adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
 
     cond do
-      not is_nil(adapter) ->
-        embed_with_adapter(adapter, input, opts)
-
-      fast_enabled?() ->
-        embed_with_fast_provider(input, opts)
-
-      true ->
-        empty()
+      not is_nil(adapter) -> embed_with_adapter(adapter, input, opts)
+      fast_enabled?() -> embed_with_fast_provider(input, opts)
+      true -> empty()
     end
   end
 

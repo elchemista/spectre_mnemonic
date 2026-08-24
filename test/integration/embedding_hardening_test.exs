@@ -90,6 +90,7 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
     assert Vector.normalize_to_f32_binary(nil) == nil
     assert Vector.normalize_to_f32_binary([]) == nil
     assert Vector.normalize_to_f32_binary(<<>>) == nil
+    assert Vector.to_f32_binary(<<>>) == nil
     assert Vector.normalize_to_f32_binary(<<1, 2, 3>>) == nil
     assert Vector.normalize_to_f32_binary(:invalid) == nil
     assert Vector.normalize_to_f32_binary([:invalid]) == nil
@@ -115,6 +116,33 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
     assert Vector.popcount(0) == 0
     assert Vector.popcount(255) == 8
     assert Vector.cosine(<<1>>, <<1>>) == 0.0
+    assert Vector.normalize_tensor(:invalid) == {:error, :invalid_vector}
+
+    infinity = <<0, 0, 128, 127>>
+    nan = <<0, 0, 192, 127>>
+    negative_infinity = <<0, 0, 128, 255>>
+
+    for non_finite <- [infinity, nan, negative_infinity] do
+      assert Vector.to_f32_binary(non_finite) == nil
+      assert Vector.to_list(non_finite) == []
+      assert Vector.dimensions(non_finite) == 0
+      assert Vector.normalize_to_f32_binary(non_finite) == nil
+      assert Vector.cosine(non_finite, non_finite) == 0.0
+    end
+
+    non_finite_tensor = Nx.from_binary(nan, :f32)
+    assert Vector.to_f32_binary(non_finite_tensor) == nil
+    assert Vector.to_list(non_finite_tensor) == []
+    assert Vector.to_tensor(non_finite_tensor) == {:error, :invalid_vector}
+    assert Vector.dimensions(non_finite_tensor) == 0
+    assert Vector.normalize_tensor(non_finite_tensor) == {:error, :invalid_vector}
+
+    huge = Integer.pow(10, 100)
+    assert Vector.to_f32_binary([huge]) == nil
+    assert Vector.normalize_to_f32_binary([huge]) == nil
+
+    assert %{vector: nil, binary_signature: nil, error: :invalid_embedding} =
+             Service.embed("invalid non-finite vector", embedding: nan)
   end
 
   test "deep embedding placeholder stays explicitly disabled" do

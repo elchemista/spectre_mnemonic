@@ -1390,7 +1390,7 @@ defmodule SpectreMnemonic.IntegrationTest do
            )
   end
 
-  test "same entity edges connect repeated entity observations across memories" do
+  test "entity resolution reuses one canonical node across memories" do
     assert {:ok, first_packet} =
              SpectreMnemonic.remember("Bob called Alice on 2026-05-10",
                include_knowledge: false
@@ -1415,12 +1415,10 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert first_bob
     assert second_bob
+    assert second_bob.id == first_bob.id
 
-    assert Enum.any?(second_packet.associations, fn association ->
-             association.relation == :same_entity and
-               ((association.source_id == second_bob.id and association.target_id == first_bob.id) or
-                  (association.source_id == first_bob.id and
-                     association.target_id == second_bob.id))
+    refute Enum.any?(second_packet.associations, fn association ->
+             association.relation == :same_entity
            end)
 
     assert {:ok, packet} =

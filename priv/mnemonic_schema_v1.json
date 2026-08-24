@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hex.pm/packages/spectre_mnemonic/mnemonic-schema-v1.json",
+  "title": "Spectre Mnemonic SMNE v1 frame",
+  "oneOf": [
+    {"$ref": "#/$defs/manifestFrame"},
+    {"$ref": "#/$defs/nodesFrame"},
+    {"$ref": "#/$defs/edgesFrame"},
+    {"$ref": "#/$defs/clustersFrame"},
+    {"$ref": "#/$defs/modelsFrame"},
+    {"$ref": "#/$defs/knowledgeFrame"},
+    {"$ref": "#/$defs/governanceFrame"},
+    {"$ref": "#/$defs/trailerFrame"}
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "clusters", "models", "knowledge", "governance"],
+      "properties": {
+        "nodes": {"type": "integer", "minimum": 0},
+        "edges": {"type": "integer", "minimum": 0},
+        "clusters": {"type": "integer", "minimum": 0},
+        "models": {"type": "integer", "minimum": 0},
+        "knowledge": {"type": "integer", "minimum": 0},
+        "governance": {"type": "integer", "minimum": 0}
+      }
+    },
+    "recordEnvelope": {
+      "type": "object",
+      "required": ["family", "id", "namespace", "scope_digest", "inserted_at"],
+      "properties": {
+        "family": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "minLength": 1},
+        "namespace": {"type": "string", "minLength": 1},
+        "scope_digest": {"$ref": "#/$defs/digest"},
+        "inserted_at": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "edgeRecord": {
+      "allOf": [
+        {"$ref": "#/$defs/recordEnvelope"},
+        {
+          "type": "object",
+          "required": ["source_id", "target_id", "relation", "weight"],
+          "properties": {
+            "source_id": {"type": "string"},
+            "target_id": {"type": "string"},
+            "relation": {"type": "string"},
+            "weight": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        }
+      ]
+    },
+    "clusterRecord": {
+      "allOf": [
+        {"$ref": "#/$defs/recordEnvelope"},
+        {
+          "type": "object",
+          "required": ["title", "moment_ids"],
+          "properties": {
+            "title": {"type": "string"},
+            "moment_ids": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      ]
+    },
+    "manifestFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "data"],
+      "properties": {
+        "section": {"const": "manifest"},
+        "data": {
+          "type": "object",
+          "required": ["format", "format_version", "library_version", "namespace", "scope", "scope_digest", "privacy_mode", "created_at", "counts", "content_digest"],
+          "properties": {
+            "format": {"const": "spectre-mnemonic"},
+            "format_version": {"const": 1},
+            "library_version": {"type": "string"},
+            "namespace": {"type": "string"},
+            "scope": {"type": "string"},
+            "scope_digest": {"$ref": "#/$defs/digest"},
+            "privacy_mode": {"enum": ["structure", "full", "redacted"]},
+            "created_at": {"type": "string", "format": "date-time"},
+            "counts": {"$ref": "#/$defs/counts"},
+            "content_digest": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    },
+    "nodesFrame": {
+      "allOf": [
+        {"$ref": "#/$defs/genericContentFrame"},
+        {"properties": {"section": {"const": "nodes"}}}
+      ]
+    },
+    "modelsFrame": {
+      "allOf": [
+        {"$ref": "#/$defs/genericContentFrame"},
+        {"properties": {"section": {"const": "models"}}}
+      ]
+    },
+    "knowledgeFrame": {
+      "allOf": [
+        {"$ref": "#/$defs/genericContentFrame"},
+        {"properties": {"section": {"const": "knowledge"}}}
+      ]
+    },
+    "governanceFrame": {
+      "allOf": [
+        {"$ref": "#/$defs/genericContentFrame"},
+        {"properties": {"section": {"const": "governance"}}}
+      ]
+    },
+    "genericContentFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "data"],
+      "properties": {
+        "section": {"type": "string"},
+        "data": {"type": "array", "items": {"$ref": "#/$defs/recordEnvelope"}}
+      }
+    },
+    "edgesFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "data"],
+      "properties": {
+        "section": {"const": "edges"},
+        "data": {"type": "array", "items": {"$ref": "#/$defs/edgeRecord"}}
+      }
+    },
+    "clustersFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "data"],
+      "properties": {
+        "section": {"const": "clusters"},
+        "data": {"type": "array", "items": {"$ref": "#/$defs/clusterRecord"}}
+      }
+    },
+    "trailerFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "data"],
+      "properties": {
+        "section": {"const": "trailer"},
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["counts", "content_digest"],
+          "properties": {
+            "counts": {"$ref": "#/$defs/counts"},
+            "content_digest": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    }
+  }
+}
