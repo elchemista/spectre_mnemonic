@@ -130,12 +130,8 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
       assert Vector.cosine(non_finite, non_finite) == 0.0
     end
 
-    non_finite_tensor = Nx.from_binary(nan, :f32)
-    assert Vector.to_f32_binary(non_finite_tensor) == nil
-    assert Vector.to_list(non_finite_tensor) == []
-    assert Vector.to_tensor(non_finite_tensor) == {:error, :invalid_vector}
-    assert Vector.dimensions(non_finite_tensor) == 0
-    assert Vector.normalize_tensor(non_finite_tensor) == {:error, :invalid_vector}
+    assert Vector.to_tensor([1.0]) == {:error, :nx_not_available}
+    assert Vector.normalize_tensor([1.0]) == {:error, :nx_not_available}
 
     huge = Integer.pow(10, 100)
     assert Vector.to_f32_binary([huge]) == nil

@@ -183,8 +183,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
 - Rich intake for text, maps, lists, documents, chats, tasks, and tool events.
 - Partition-local entity resolution, typed graph links, reversible merges,
   Episodes, and deterministic Atlas projections.
-- Optional caller-provided or adapter-generated embeddings indexed through
-  Vettore.
+- Optional caller-provided or adapter-generated embeddings normalized, pooled,
+  and indexed through Vettore without requiring Nx.
 - BM25-style durable search with text, entity, vector, binary-signature, and
   lifecycle signals.
 - Evidence-grounded observations, curated mental models, and structured

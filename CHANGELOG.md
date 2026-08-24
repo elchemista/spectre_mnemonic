@@ -21,6 +21,12 @@ release declarations.
 
 ### Changed
 
+- Replaced the direct Nx dependency with Vettore-backed dense conversion,
+  normalization, cosine/dot scoring, and Model2Vec f32-matrix mean pooling.
+  The existing tensor helper functions remain available when Nx is supplied by
+  the host application, and the persisted embedding format is unchanged.
+- Preserved repeated Model2Vec token ids during pooling instead of silently
+  deduplicating token occurrences.
 - Reorganized the README as a concise entry point and added task-oriented
   guides covering every facade call, intake, retrieval, knowledge, persistence,
   export, erasure, and Spectre integration workflow with runnable examples.

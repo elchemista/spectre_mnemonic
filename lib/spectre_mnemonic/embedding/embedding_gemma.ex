@@ -4,7 +4,7 @@ defmodule SpectreMnemonic.Embedding.EmbeddingGemma do
 
   The v1 live recall path uses `SpectreMnemonic.Embedding.Model2VecStatic`.
   This module reserves the configured deep consolidation provider name until
-  Bumblebee/Nx support is wired in.
+  a future deep-model adapter is wired in.
   """
 
   @doc "Returns an explicit disabled-provider error for v1."

@@ -1830,11 +1830,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec emit_write_event(store(), Record.t(), term(), integer()) :: :ok | term()
   defp emit_write_event(store, record, result, duration) do
     if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
-      :telemetry.execute(
+      # Telemetry remains optional after removing its former transitive source.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(:telemetry, :execute, [
         [:spectre_mnemonic, :persistent_memory, :write],
         %{duration: duration},
         %{store: store.id, family: record.family, result: result}
-      )
+      ])
     end
   end
 

@@ -3,14 +3,16 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   Minimal local Model2Vec static embedder.
 
   It reads `tokenizer.json` and `model.safetensors` from a configured model
-  directory, tokenizes text, mean-pools token vectors with Nx when available,
-  normalizes the result, and returns the standard Spectre Mnemonic embedding
-  shape.
+  directory, tokenizes text, mean-pools its little-endian f32 table through
+  Vettore, normalizes the result, and returns the standard Spectre Mnemonic
+  embedding shape.
   """
 
   alias SpectreMnemonic.Embedding.BinaryQuantizer
   alias SpectreMnemonic.Embedding.ModelDownloader
   alias SpectreMnemonic.Embedding.Vector
+
+  @vettore_vector Module.concat(["Vettore", "Vector"])
 
   @doc "Embeds input using local Model2Vec artifacts."
   @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -82,8 +84,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
          name: tensor_name,
          rows: rows,
          dimensions: dimensions,
-         data: tensor_bytes,
-         tensor: matrix_tensor(tensor_bytes, rows, dimensions)
+         data: tensor_bytes
        }}
     else
       {:error, reason} -> {:error, reason}
@@ -147,7 +148,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
 
     case hf_token_ids(text, tokenizer_path) do
       {:ok, ids} when ids != [] ->
-        Enum.uniq(ids)
+        ids
 
       _fallback ->
         fallback_token_ids(text, tokenizer)
@@ -177,7 +178,6 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     |> String.downcase()
     |> String.split(~r/[^[:alnum:]_]+/u, trim: true)
     |> Enum.flat_map(&token_ids(&1, tokenizer))
-    |> Enum.uniq()
   end
 
   @spec token_ids(binary(), map()) :: [integer()]
@@ -200,54 +200,58 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
         _missing -> []
       end
     end)
+    |> Enum.uniq()
   end
 
-  @spec matrix_tensor(binary(), pos_integer(), pos_integer()) :: term() | nil
-  defp matrix_tensor(tensor_bytes, rows, dimensions) do
-    if Code.ensure_loaded?(Nx) and function_exported?(Nx, :from_binary, 2) do
-      tensor_bytes
-      |> Nx.from_binary(:f32)
-      |> Nx.reshape({rows, dimensions})
-    end
-  end
-
-  @spec mean_pool(map(), [integer()]) :: {:ok, term()} | {:error, :tokens_out_of_vocab}
-  defp mean_pool(%{rows: rows, tensor: tensor}, token_ids) when not is_nil(tensor) do
+  @spec mean_pool(map(), [integer()]) :: {:ok, term()} | {:error, term()}
+  defp mean_pool(%{rows: rows, dimensions: dimensions, data: data}, token_ids) do
     token_ids = Enum.filter(token_ids, &(&1 >= 0 and &1 < rows))
 
     if token_ids == [] do
       {:error, :tokens_out_of_vocab}
     else
-      mean =
-        tensor
-        |> Nx.take(Nx.tensor(token_ids, type: :s64))
-        |> Nx.mean(axes: [0])
-
-      {:ok, mean}
+      mean_pool_with_vettore(data, dimensions, token_ids)
     end
   end
 
-  defp mean_pool(%{rows: rows, dimensions: dimensions, data: data}, token_ids) do
+  @spec mean_pool_with_vettore(binary(), pos_integer(), [non_neg_integer()]) ::
+          {:ok, [float()]} | {:error, term()}
+  defp mean_pool_with_vettore(data, dimensions, token_ids) do
+    if Code.ensure_loaded?(@vettore_vector) and
+         function_exported?(@vettore_vector, :mean_pool_f32, 4) do
+      # Dynamic dispatch lets the current Hex release use the compatibility
+      # fallback until the representation API is available in a release.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(@vettore_vector, :mean_pool_f32, [data, dimensions, token_ids, [as: :list]])
+    else
+      mean_pool_compat(data, dimensions, token_ids)
+    end
+  rescue
+    _exception -> {:error, :invalid_model_artifacts}
+  catch
+    _kind, _reason -> {:error, :invalid_model_artifacts}
+  end
+
+  # Remove this fallback after the minimum Vettore release includes
+  # `Vettore.Vector.mean_pool_f32/4`.
+  @spec mean_pool_compat(binary(), pos_integer(), [non_neg_integer()]) ::
+          {:ok, [float()]} | {:error, :tokens_out_of_vocab}
+  defp mean_pool_compat(data, dimensions, token_ids) do
     vectors =
       token_ids
-      |> Enum.filter(&(&1 >= 0 and &1 < rows))
       |> Enum.map(&read_row(data, &1, dimensions))
 
-    if vectors == [] do
-      {:error, :tokens_out_of_vocab}
-    else
-      mean =
-        vectors
-        |> Enum.zip()
-        |> Enum.map(fn tuple ->
-          tuple
-          |> Tuple.to_list()
-          |> Enum.sum()
-          |> Kernel./(length(vectors))
-        end)
+    mean =
+      vectors
+      |> Enum.zip()
+      |> Enum.map(fn tuple ->
+        tuple
+        |> Tuple.to_list()
+        |> Enum.sum()
+        |> Kernel./(length(vectors))
+      end)
 
-      {:ok, mean}
-    end
+    {:ok, mean}
   end
 
   @spec read_row(binary(), non_neg_integer(), pos_integer()) :: [float()]

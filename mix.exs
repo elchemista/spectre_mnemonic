@@ -62,13 +62,11 @@ defmodule SpectreMnemonic.MixProject do
     "SpectreMnemonic: active and durable memory for Elixir applications"
   end
 
-  # Nx powers local vector math and Model2Vec pooling. Axon/Bumblebee belong in
-  # higher-level embedding adapters that run neural model forward passes.
   @spec deps :: [{atom(), binary()} | {atom(), binary(), keyword()}]
   defp deps do
     [
       spectre_dep(),
-      {:vettore, "~> 0.3.4"},
+      vettore_dep(),
       {:ex_fastembed,
        github: "elchemista/ex_fastembed",
        ref: "dddbf068d0202ba6d0a3788cc03992dc95203eaf",
@@ -76,11 +74,20 @@ defmodule SpectreMnemonic.MixProject do
        runtime: false},
       {:jason, "~> 1.4"},
       {:tokenizers, "~> 0.5"},
-      {:nx, "~> 0.11"},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
+  end
+
+  defp vettore_dep do
+    case System.get_env("VETTORE_PATH") do
+      path when is_binary(path) and path != "" ->
+        {:vettore, path: Path.expand(path, __DIR__), override: true}
+
+      _unset ->
+        {:vettore, "~> 0.3.4"}
+    end
   end
 
   defp spectre_dep do

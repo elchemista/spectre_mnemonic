@@ -1,293 +1,146 @@
 defmodule SpectreMnemonic.Embedding.Vector do
   @moduledoc """
-  Nx-backed vector and binary-distance helpers used by embedding and recall.
+  Vettore-backed dense-vector and packed-signature compatibility helpers.
 
   Dense vectors are normalized into little-endian f32 binaries for storage.
-  Packed signatures are bitstrings stored as binaries and compared with Hamming
-  distance. Public helpers accept lists, stored f32 binaries, or Nx tensors.
+  Packed signatures are bitstrings stored as binaries and compared with
+  Hamming distance.
+
+  Lists and f32 binaries require only Vettore. The historical tensor helpers
+  remain available when the host application independently installs Nx, but
+  SpectreMnemonic itself does not depend on Nx.
   """
 
-  @type vector_input :: binary() | [number()] | Nx.Tensor.t()
+  @type vector_input :: binary() | [number()] | term()
+
+  @vettore_vector Module.concat(["Vettore", "Vector"])
+  @vettore_nx Module.concat(["Vettore", "Interop", "Nx"])
+  @nx Module.concat(["Nx"])
+  @nx_tensor Module.concat(["Nx", "Tensor"])
   @f32_max 3.402_823_466_385_288_6e38
 
-  @doc "Converts a list or f32 binary into a little-endian f32 binary."
+  @doc "Converts a list, f32 binary, or host-provided tensor to little-endian f32."
   @spec to_f32_binary(vector_input() | term()) :: binary() | nil
-  def to_f32_binary(vector) when is_binary(vector) do
-    if valid_f32_binary?(vector), do: vector
-  end
-
   def to_f32_binary(vector) do
-    if valid_tensor?(vector) do
-      vector
-      |> Nx.as_type(:f32)
-      |> Nx.to_binary()
+    with {:ok, values} <- validated_list(vector),
+         true <- values != [] do
+      case vettore_call(:to_f32_binary, [vector]) do
+        {:ok, binary} when is_binary(binary) -> binary
+        :unavailable -> encode_f32(values)
+        _error -> nil
+      end
     else
-      to_f32_binary_without_nx(vector)
+      _error -> nil
     end
   end
 
-  @spec to_f32_binary_without_nx(term()) :: binary() | nil
-  defp to_f32_binary_without_nx(vector) when is_list(vector) do
-    if numeric_list?(vector) do
-      for value <- vector, into: <<>>, do: <<value * 1.0::little-float-32>>
-    end
-  end
-
-  defp to_f32_binary_without_nx(_vector), do: nil
-
-  @doc "Converts a little-endian f32 binary or list into a float list."
+  @doc "Converts a little-endian f32 binary, list, or host tensor to a float list."
   @spec to_list(vector_input() | nil | term()) :: [float()]
   def to_list(vector) do
-    if valid_tensor?(vector) do
-      Nx.to_flat_list(vector)
-    else
-      to_list_without_nx(vector)
+    case validated_list(vector) do
+      {:ok, values} when values != [] -> values
+      _error -> []
     end
   end
 
-  @spec to_list_without_nx(term()) :: [float()]
-  defp to_list_without_nx(vector) when is_list(vector) do
-    if numeric_list?(vector), do: Enum.map(vector, &(&1 * 1.0)), else: []
-  end
+  @doc """
+  Converts a vector into an Nx tensor when Nx is installed by the host.
 
-  defp to_list_without_nx(nil), do: []
-  defp to_list_without_nx(<<>>), do: []
-
-  defp to_list_without_nx(binary) when is_binary(binary) do
-    if valid_f32_binary?(binary) do
-      for <<value::little-float-32 <- binary>>, do: value
-    else
-      []
-    end
-  end
-
-  defp to_list_without_nx(_vector), do: []
-
-  @doc "Converts a little-endian f32 binary, list, or tensor into an Nx tensor."
+  This compatibility function returns `{:error, :nx_not_available}` when the
+  host does not provide Nx.
+  """
   @spec to_tensor(vector_input() | term()) ::
           term() | {:error, :nx_not_available | :invalid_vector}
   def to_tensor(vector) do
-    if nx_available?() do
-      cond do
-        valid_tensor?(vector) -> Nx.as_type(vector, :f32)
-        valid_f32_binary?(vector) -> Nx.from_binary(vector, :f32)
-        numeric_list?(vector) -> Nx.tensor(vector, type: :f32)
-        true -> {:error, :invalid_vector}
+    with {:ok, values} <- validated_list(vector),
+         true <- values != [] do
+      case vettore_call(:to_nx, [vector]) do
+        {:ok, tensor} -> tensor
+        {:error, :nx_not_available} -> {:error, :nx_not_available}
+        :unavailable -> nx_from_list(values)
+        _error -> {:error, :invalid_vector}
       end
     else
-      {:error, :nx_not_available}
+      _error -> {:error, :invalid_vector}
     end
   end
 
-  @doc "Returns vector dimensions."
+  @doc "Returns the flattened vector dimension count."
   @spec dimensions(vector_input() | term()) :: non_neg_integer()
   def dimensions(vector) do
-    cond do
-      tensor?(vector) ->
-        if valid_tensor?(vector), do: vector |> Nx.shape() |> Tuple.product(), else: 0
-
-      numeric_list?(vector) ->
-        length(vector)
-
-      valid_f32_binary?(vector) ->
-        div(byte_size(vector), 4)
-
-      true ->
-        0
+    case validated_list(vector) do
+      {:ok, values} -> length(values)
+      _error -> 0
     end
   end
 
-  @doc "Normalizes a vector to unit length, preserving list representation."
-  @spec normalize([number()] | term()) :: [float()]
+  @doc "Normalizes a vector to unit length and returns a list."
+  @spec normalize(vector_input() | term()) :: [float()]
   def normalize(vector) do
-    if valid_dense_vector?(vector) do
-      if nx_available?() do
-        vector
-        |> normalize_tensor()
-        |> Nx.to_flat_list()
-      else
-        normalize_without_nx(vector)
-      end
+    with {:ok, values} <- validated_list(vector),
+         true <- values != [] do
+      normalize_as_list(vector, values)
     else
-      []
+      _error -> []
     end
   end
 
-  @doc "Normalizes a vector to unit length and returns an Nx tensor."
-  @spec normalize_tensor(vector_input() | term()) :: term()
+  @doc """
+  Normalizes a vector and returns an Nx tensor when the host provides Nx.
+
+  Kept temporarily for source compatibility; new internal code uses f32
+  binaries through Vettore instead.
+  """
+  @spec normalize_tensor(vector_input() | term()) ::
+          term() | {:error, :nx_not_available | :invalid_vector}
   def normalize_tensor(vector) do
-    case to_tensor(vector) do
-      {:error, _reason} = error ->
-        error
-
-      tensor ->
-        norm = Nx.LinAlg.norm(tensor)
-
-        if Nx.to_number(norm) == 0.0 do
-          Nx.as_type(tensor, :f32)
-        else
-          Nx.divide(tensor, norm)
-        end
-    end
-  end
-
-  @spec normalize_without_nx(term()) :: [float()]
-  defp normalize_without_nx(vector) when is_list(vector) do
-    norm = norm(vector)
-
-    if norm == 0.0 do
-      Enum.map(vector, &(&1 * 1.0))
-    else
-      Enum.map(vector, &(&1 / norm))
-    end
-  end
-
-  defp normalize_without_nx(vector), do: vector |> to_list_without_nx() |> normalize_without_nx()
-
-  @doc "Normalizes a vector and returns a f32 binary."
-  @spec normalize_to_f32_binary(vector_input() | term()) :: binary() | nil
-  def normalize_to_f32_binary(nil), do: nil
-  def normalize_to_f32_binary([]), do: nil
-  def normalize_to_f32_binary(<<>>), do: nil
-
-  def normalize_to_f32_binary(vector) when is_binary(vector) and rem(byte_size(vector), 4) != 0,
-    do: nil
-
-  def normalize_to_f32_binary(%Nx.Tensor{} = vector), do: do_normalize_to_f32_binary(vector)
-
-  def normalize_to_f32_binary(vector) when is_binary(vector) or is_list(vector),
-    do: do_normalize_to_f32_binary(vector)
-
-  def normalize_to_f32_binary(_vector), do: nil
-
-  @spec do_normalize_to_f32_binary(vector_input()) :: binary() | nil
-  defp do_normalize_to_f32_binary(vector) do
-    # Stored vectors use one boring binary format. Lists, tensors, adapters,
-    # drama: all of it gets squeezed through here before persistence sees it.
-    if valid_dense_vector?(vector) do
-      if nx_available?() do
-        vector
-        |> normalize_tensor()
-        |> to_f32_binary()
-      else
-        vector
-        |> to_list_without_nx()
-        |> normalize_without_nx()
-        |> to_f32_binary_without_nx()
+    with {:ok, values} <- validated_list(vector),
+         true <- values != [] do
+      case vettore_call(:normalize, [vector, :l2, [as: :nx]]) do
+        {:ok, tensor} -> tensor
+        {:error, :nx_not_available} -> {:error, :nx_not_available}
+        :unavailable -> values |> normalize_with_distance() |> nx_from_list()
+        _error -> {:error, :invalid_vector}
       end
     else
-      nil
+      _error -> {:error, :invalid_vector}
     end
   end
 
-  @doc "Computes dot product for equally sized vectors."
+  @doc "Normalizes a vector and returns its persisted little-endian f32 form."
+  @spec normalize_to_f32_binary(vector_input() | term()) :: binary() | nil
+  def normalize_to_f32_binary(vector) do
+    with {:ok, values} <- validated_list(vector),
+         true <- values != [] do
+      case vettore_call(:normalize, [vector, :l2, [as: :f32_binary]]) do
+        {:ok, binary} when is_binary(binary) -> binary
+        :unavailable -> values |> normalize_with_distance() |> encode_f32()
+        _error -> nil
+      end
+    else
+      _error -> nil
+    end
+  end
+
+  @doc "Computes a dot product for equally sized vectors."
   @spec dot(vector_input(), vector_input()) :: float()
   def dot(left, right) do
-    if valid_dense_vector?(left) and valid_dense_vector?(right) do
-      if nx_available?(), do: dot_with_nx(left, right), else: dot_without_nx(left, right)
-    else
-      0.0
+    case vettore_call(:dot_product, [left, right]) do
+      {:ok, value} when is_number(value) -> value * 1.0
+      :unavailable -> distance_metric(:inner_product, left, right)
+      _error -> 0.0
     end
   end
 
   @doc "Computes cosine similarity for equally sized vectors."
   @spec cosine(vector_input(), vector_input()) :: float()
-  def cosine(left, right) when is_binary(left) and is_binary(right) do
-    if valid_f32_binary?(left) and valid_f32_binary?(right),
-      do: cosine_f32_binary(left, right),
-      else: 0.0
-  end
-
   def cosine(left, right) do
-    if valid_dense_vector?(left) and valid_dense_vector?(right) do
-      if nx_available?(), do: cosine_with_nx(left, right), else: cosine_without_nx(left, right)
-    else
-      0.0
+    case vettore_call(:cosine, [left, right]) do
+      {:ok, value} when is_number(value) -> value * 1.0
+      :unavailable -> distance_metric(:cosine, left, right)
+      _error -> 0.0
     end
   end
-
-  @spec dot_with_nx(vector_input(), vector_input()) :: float()
-  defp dot_with_nx(left, right) do
-    left_tensor = to_tensor(left)
-    right_tensor = to_tensor(right)
-
-    if same_shape?(left_tensor, right_tensor) and dimensions(left_tensor) > 0 do
-      left_tensor
-      |> Nx.multiply(right_tensor)
-      |> Nx.sum()
-      |> Nx.to_number()
-    else
-      0.0
-    end
-  end
-
-  @spec cosine_with_nx(vector_input(), vector_input()) :: float()
-  defp cosine_with_nx(left, right) do
-    left_tensor = to_tensor(left)
-    right_tensor = to_tensor(right)
-
-    if same_shape?(left_tensor, right_tensor) and dimensions(left_tensor) > 0 do
-      left_norm = Nx.LinAlg.norm(left_tensor)
-      right_norm = Nx.LinAlg.norm(right_tensor)
-
-      if Nx.to_number(left_norm) == 0.0 or Nx.to_number(right_norm) == 0.0 do
-        0.0
-      else
-        Nx.multiply(left_tensor, right_tensor)
-        |> Nx.sum()
-        |> Nx.divide(Nx.multiply(left_norm, right_norm))
-        |> Nx.to_number()
-      end
-    else
-      0.0
-    end
-  end
-
-  @spec dot_without_nx(vector_input(), vector_input()) :: float()
-  defp dot_without_nx(left, right) do
-    left = to_list_without_nx(left)
-    right = to_list_without_nx(right)
-
-    if length(left) == length(right) and left != [] do
-      Enum.zip(left, right)
-      |> Enum.reduce(0.0, fn {a, b}, acc -> acc + a * b end)
-    else
-      0.0
-    end
-  end
-
-  @spec cosine_without_nx(vector_input(), vector_input()) :: float()
-  defp cosine_without_nx(left, right) do
-    left = to_list_without_nx(left)
-    right = to_list_without_nx(right)
-
-    if length(left) == length(right) and left != [] do
-      left_norm = norm(left)
-      right_norm = norm(right)
-
-      if left_norm == 0.0 or right_norm == 0.0 do
-        0.0
-      else
-        dot_without_nx(left, right) / (left_norm * right_norm)
-      end
-    else
-      0.0
-    end
-  end
-
-  @spec same_shape?(term(), term()) :: boolean()
-  defp same_shape?({:error, :nx_not_available}, _right), do: false
-  defp same_shape?(_left, {:error, :nx_not_available}), do: false
-  defp same_shape?(left, right), do: Nx.shape(left) == Nx.shape(right)
-
-  @spec nx_available? :: boolean()
-  defp nx_available? do
-    Code.ensure_loaded?(Nx) and function_exported?(Nx, :tensor, 2)
-  end
-
-  @spec tensor?(term()) :: boolean()
-  defp tensor?(%Nx.Tensor{}), do: nx_available?()
-  defp tensor?(_vector), do: false
 
   @doc "Counts set bits in a byte."
   @spec popcount(0..255) :: non_neg_integer()
@@ -300,8 +153,6 @@ defmodule SpectreMnemonic.Embedding.Vector do
   @doc "Computes Hamming distance between two equally sized packed binaries."
   @spec hamming_distance(term(), term()) :: non_neg_integer() | :infinity
   def hamming_distance(left, right) when is_binary(left) and is_binary(right) do
-    # Different signature sizes are not "close enough". Return infinity and let
-    # ranking move on with its life.
     if byte_size(left) == byte_size(right) do
       hamming_distance_bytes(left, right, 0)
     else
@@ -310,48 +161,6 @@ defmodule SpectreMnemonic.Embedding.Vector do
   end
 
   def hamming_distance(_left, _right), do: :infinity
-
-  @spec cosine_f32_binary(binary(), binary()) :: float()
-  defp cosine_f32_binary(left, right)
-       when byte_size(left) == byte_size(right) and rem(byte_size(left), 4) == 0 do
-    {dot, left_norm, right_norm} = cosine_f32_binary(left, right, 0.0, 0.0, 0.0)
-
-    if left_norm == 0.0 or right_norm == 0.0 do
-      0.0
-    else
-      dot / :math.sqrt(left_norm * right_norm)
-    end
-  end
-
-  defp cosine_f32_binary(_left, _right), do: 0.0
-
-  @spec cosine_f32_binary(binary(), binary(), float(), float(), float()) ::
-          {float(), float(), float()}
-  defp cosine_f32_binary(<<>>, <<>>, dot, left_norm, right_norm),
-    do: {dot, left_norm, right_norm}
-
-  defp cosine_f32_binary(
-         <<left::little-float-32, left_rest::binary>>,
-         <<right::little-float-32, right_rest::binary>>,
-         dot,
-         left_norm,
-         right_norm
-       ) do
-    cosine_f32_binary(
-      left_rest,
-      right_rest,
-      dot + left * right,
-      left_norm + left * left,
-      right_norm + right * right
-    )
-  end
-
-  @spec hamming_distance_bytes(binary(), binary(), non_neg_integer()) :: non_neg_integer()
-  defp hamming_distance_bytes(<<>>, <<>>, acc), do: acc
-
-  defp hamming_distance_bytes(<<left, left_rest::binary>>, <<right, right_rest::binary>>, acc) do
-    hamming_distance_bytes(left_rest, right_rest, acc + popcount(Bitwise.bxor(left, right)))
-  end
 
   @doc "Returns Hamming similarity in the 0.0..1.0 range."
   @spec hamming_similarity(term(), term(), non_neg_integer() | nil) :: float()
@@ -366,67 +175,145 @@ defmodule SpectreMnemonic.Embedding.Vector do
     end
   end
 
-  @spec comparable_bits(term(), term()) :: non_neg_integer()
-  defp comparable_bits(left, right) when is_binary(left) and is_binary(right),
-    do: min(byte_size(left) * 8, byte_size(right) * 8)
-
-  defp comparable_bits(_left, _right), do: 0
-
-  @spec comparable_bit_count(term(), term(), term()) :: non_neg_integer()
-  defp comparable_bit_count(nil, left, right), do: comparable_bits(left, right)
-  defp comparable_bit_count(bits, _left, _right) when is_integer(bits) and bits >= 0, do: bits
-  defp comparable_bit_count(_bits, _left, _right), do: 0
-
-  @spec valid_dense_vector?(term()) :: boolean()
-  defp valid_dense_vector?(vector) when is_list(vector), do: numeric_list?(vector)
-  defp valid_dense_vector?(vector) when is_binary(vector), do: valid_f32_binary?(vector)
-  defp valid_dense_vector?(%Nx.Tensor{} = vector), do: valid_tensor?(vector)
-  defp valid_dense_vector?(_vector), do: false
-
-  @spec valid_f32_binary?(term()) :: boolean()
-  defp valid_f32_binary?(binary) when is_binary(binary) do
-    byte_size(binary) > 0 and rem(byte_size(binary), 4) == 0 and finite_f32_binary?(binary)
+  defp validated_list(vector) do
+    case vettore_call(:to_list, [vector]) do
+      {:ok, values} when is_list(values) -> validate_fallback_list(values)
+      :unavailable -> fallback_to_list(vector)
+      _error -> {:error, :invalid_vector}
+    end
   end
 
-  defp valid_f32_binary?(_binary), do: false
+  defp fallback_to_list(vector) when is_list(vector), do: validate_fallback_list(vector)
 
-  @spec finite_f32_binary?(binary()) :: boolean()
+  defp fallback_to_list(vector) when is_binary(vector) do
+    if byte_size(vector) > 0 and rem(byte_size(vector), 4) == 0 and finite_f32_binary?(vector) do
+      {:ok, for(<<value::little-float-32 <- vector>>, do: value)}
+    else
+      {:error, :invalid_vector}
+    end
+  end
+
+  defp fallback_to_list(vector) do
+    if tensor?(vector) and nx_available?() do
+      vector
+      |> apply_nx(:to_flat_list, [])
+      |> validate_fallback_list()
+    else
+      {:error, :invalid_vector}
+    end
+  rescue
+    _exception -> {:error, :invalid_vector}
+  end
+
+  defp validate_fallback_list(values) when is_list(values) do
+    if Enum.all?(values, &finite_f32?/1) do
+      {:ok, Enum.map(values, &(&1 / 1))}
+    else
+      {:error, :invalid_vector}
+    end
+  end
+
+  defp validate_fallback_list(_values), do: {:error, :invalid_vector}
+
+  defp finite_f32?(value) when is_integer(value), do: abs(value) <= @f32_max
+
+  defp finite_f32?(value) when is_float(value) do
+    value >= -@f32_max and value <= @f32_max
+  end
+
+  defp finite_f32?(_value), do: false
+
   defp finite_f32_binary?(<<>>), do: true
 
   defp finite_f32_binary?(<<bits::little-unsigned-32, rest::binary>>) do
     Bitwise.band(bits, 0x7F800000) != 0x7F800000 and finite_f32_binary?(rest)
   end
 
-  @spec valid_tensor?(term()) :: boolean()
-  defp valid_tensor?(%Nx.Tensor{} = vector) do
-    tensor?(vector) and
-      vector
-      |> Nx.as_type(:f32)
-      |> Nx.to_binary()
-      |> valid_f32_binary?()
+  defp normalize_as_list(vector, values) do
+    case vettore_call(:normalize, [vector, :l2, [as: :list]]) do
+      {:ok, normalized} -> normalized
+      _error -> normalize_with_distance(values)
+    end
+  end
+
+  defp normalize_with_distance(values) do
+    case Vettore.Distance.normalize(values, :l2) do
+      {:ok, normalized} -> normalized
+      {:error, _reason} -> []
+    end
+  end
+
+  defp distance_metric(metric, left, right) do
+    with {:ok, left} <- validated_list(left),
+         {:ok, right} <- validated_list(right),
+         true <- left != [] and length(left) == length(right),
+         {:ok, value} <- apply(Vettore.Distance, metric, [left, right]) do
+      value * 1.0
+    else
+      _error -> 0.0
+    end
+  end
+
+  defp encode_f32(values) do
+    for value <- values, into: <<>>, do: <<value::float-little-32>>
+  end
+
+  defp nx_from_list(values) do
+    if nx_available?() do
+      # Dynamic dispatch preserves tensor compatibility without an Nx dependency.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(@nx, :tensor, [values, [type: :f32]])
+    else
+      {:error, :nx_not_available}
+    end
   rescue
-    _exception -> false
+    _exception -> {:error, :invalid_vector}
   end
 
-  defp valid_tensor?(_vector), do: false
+  defp apply_nx(tensor, function, args), do: apply(@nx, function, [tensor | args])
 
-  @spec numeric_list?(term()) :: boolean()
-  defp numeric_list?(list) when is_list(list),
-    do: list != [] and Enum.all?(list, &finite_number?/1)
-
-  defp numeric_list?(_list), do: false
-
-  @spec finite_number?(term()) :: boolean()
-  defp finite_number?(value) when is_integer(value), do: abs(value) <= @f32_max
-
-  defp finite_number?(value) when is_float(value), do: abs(value) <= @f32_max
-
-  defp finite_number?(_value), do: false
-
-  @spec norm([number()]) :: float()
-  defp norm(vector) do
-    vector
-    |> Enum.reduce(0.0, fn value, acc -> acc + value * value end)
-    |> :math.sqrt()
+  defp nx_available? do
+    case optional_call(@vettore_nx, :available?, []) do
+      true -> true
+      _other -> Code.ensure_loaded?(@nx) and function_exported?(@nx, :tensor, 2)
+    end
   end
+
+  defp tensor?(%{__struct__: struct} = vector) do
+    case optional_call(@vettore_nx, :tensor?, [vector]) do
+      true -> true
+      _other -> struct == @nx_tensor
+    end
+  end
+
+  defp tensor?(_vector), do: false
+
+  defp vettore_call(function, args), do: optional_call(@vettore_vector, function, args)
+
+  defp optional_call(module, function, args) do
+    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
+      apply(module, function, args)
+    else
+      :unavailable
+    end
+  rescue
+    _exception -> {:error, :invalid_vector}
+  catch
+    _kind, _reason -> {:error, :invalid_vector}
+  end
+
+  defp hamming_distance_bytes(<<>>, <<>>, acc), do: acc
+
+  defp hamming_distance_bytes(<<left, left_rest::binary>>, <<right, right_rest::binary>>, acc) do
+    hamming_distance_bytes(left_rest, right_rest, acc + popcount(Bitwise.bxor(left, right)))
+  end
+
+  defp comparable_bits(left, right) when is_binary(left) and is_binary(right),
+    do: min(byte_size(left) * 8, byte_size(right) * 8)
+
+  defp comparable_bits(_left, _right), do: 0
+
+  defp comparable_bit_count(nil, left, right), do: comparable_bits(left, right)
+  defp comparable_bit_count(bits, _left, _right) when is_integer(bits) and bits >= 0, do: bits
+  defp comparable_bit_count(_bits, _left, _right), do: 0
 end

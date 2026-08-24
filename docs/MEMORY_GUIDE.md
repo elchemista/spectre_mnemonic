@@ -342,6 +342,28 @@ config :spectre_mnemonic,
 Downloads are opt-in. Production deployments can pre-populate the cache or set
 `:model_dir`. Optional SHA-256 checksums are verified before installation.
 
+Model2Vec matrices remain row-major little-endian f32 binaries and are pooled
+through Vettore. Dense conversion, normalization, cosine scoring, and pooling
+do not require Nx. The persisted embedding format is unchanged.
+
+The public `SpectreMnemonic.Embedding.Vector.to_tensor/1` and
+`normalize_tensor/1` functions remain as a temporary compatibility surface. If
+an application still passes Nx tensors, that application can install Nx
+itself:
+
+```elixir
+def deps do
+  [
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"},
+    {:nx, "~> 0.11"}
+  ]
+end
+```
+
+Without a host-provided Nx module those two conversion calls return
+`{:error, :nx_not_available}`; all ordinary memory and embedding paths continue
+to use Vettore lists and f32 binaries.
+
 Active vectors are indexed through one Vettore collection per
 `{namespace, scope}`:
 

@@ -658,16 +658,9 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert_in_delta Vector.hamming_similarity(left, right, 4), 0.75, 0.0001
   end
 
-  test "vector helpers accept Nx tensors" do
-    tensor = Nx.tensor([3.0, 4.0], type: :f32)
-
-    vector = Vector.normalize_to_f32_binary(tensor)
-
-    assert is_binary(vector)
-    assert Vector.dimensions(tensor) == 2
-    assert Vector.to_list(tensor) == [3.0, 4.0]
-    assert_in_delta Vector.dot(tensor, [0.6, 0.8]), 5.0, 0.0001
-    assert_in_delta Vector.cosine(vector, tensor), 1.0, 0.0001
+  test "vector tensor compatibility stays optional" do
+    assert Vector.to_tensor([3.0, 4.0]) == {:error, :nx_not_available}
+    assert Vector.normalize_tensor([3.0, 4.0]) == {:error, :nx_not_available}
   end
 
   test "recall index brute-force fallback ranks indexed embeddings" do
@@ -705,6 +698,18 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert Vector.dimensions(embedding.vector) == 2
     assert is_binary(embedding.binary_signature)
     assert embedding.metadata.model == "fixture/model"
+
+    assert {:ok, repeated} =
+             Model2VecStatic.embed("apple apple orange",
+               model_dir: model_dir,
+               model_id: "fixture/model",
+               dimensions: 2,
+               signature_bits: 8
+             )
+
+    [x, y] = Vector.to_list(repeated.vector)
+    assert_in_delta x, 0.894_427, 1.0e-5
+    assert_in_delta y, 0.447_214, 1.0e-5
   after
     if model_dir = Process.get(:model_dir), do: File.rm_rf!(model_dir)
   end
