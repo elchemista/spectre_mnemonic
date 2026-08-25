@@ -8,12 +8,14 @@ defmodule SpectreMnemonic.Erasure do
   """
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Erasure.Report
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.SMEM
-  alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Memory.{Scope, Temporal}
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.Record
+  alias SpectreMnemonic.Recall.Index, as: RecallIndex
   alias SpectreMnemonic.Secrets
 
   @internal_families [:tombstones, :erasure_markers]
@@ -41,6 +43,9 @@ defmodule SpectreMnemonic.Erasure do
              |> Keyword.put(:erasure_targets, target_keys)
            ),
          :ok <- validate_compaction(compaction),
+         :ok <- DurableIndex.purge_legacy_snapshot(opts),
+         :ok <- DurableIndex.rebuild(opts),
+         :ok <- RecallIndex.purge_partition(opts),
          :ok <- Manager.verify_erased(target_keys, opts),
          :ok <- SMEM.verify_erased(opts),
          :ok <- Manager.evict_dedupe(opts),
@@ -160,10 +165,7 @@ defmodule SpectreMnemonic.Erasure do
   end
 
   @spec expired?(term(), DateTime.t()) :: boolean()
-  defp expired?(%{valid_until: %DateTime{} = valid_until}, now),
-    do: DateTime.compare(valid_until, now) in [:lt, :eq]
-
-  defp expired?(_moment, _now), do: false
+  defp expired?(memory, now), do: Temporal.expired?(memory, now)
 
   @doc false
   @spec ensure_durable_write(atom(), keyword()) :: :ok | {:error, :partition_erased}

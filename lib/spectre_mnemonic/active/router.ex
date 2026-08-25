@@ -1,22 +1,13 @@
 defmodule SpectreMnemonic.Active.Router do
   @moduledoc """
-  Chooses the stream for incoming signals.
+  Statelessly chooses the stream for incoming signals.
 
   Routing order follows the plan: explicit `:stream`, then task id, then
   metadata/kind inference, then `:chat`.
   """
 
-  use GenServer
-
-  alias SpectreMnemonic.Active.StreamServer
-  alias SpectreMnemonic.Active.StreamSupervisor
+  alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Identity
-
-  @doc "Starts the router process."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts) do
-    GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
-  end
 
   @doc "Routes and records a signal."
   @spec signal(input :: term(), opts :: keyword()) ::
@@ -25,23 +16,7 @@ defmodule SpectreMnemonic.Active.Router do
           | {:error, term()}
   def signal(input, opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      GenServer.call(__MODULE__, {:signal, input, opts})
-    end
-  end
-
-  @impl GenServer
-  @spec init(map()) :: {:ok, map()}
-  def init(state), do: {:ok, state}
-
-  @impl GenServer
-  @spec handle_call({:signal, term(), keyword()}, GenServer.from(), map()) ::
-          {:reply, term(), map()}
-  def handle_call({:signal, input, opts}, _from, state) do
-    stream = route(input, opts)
-
-    case StreamSupervisor.ensure_stream(stream) do
-      {:ok, _pid} -> {:reply, StreamServer.signal(stream, input, opts), state}
-      error -> {:reply, error, state}
+      Focus.record_signal(input, Keyword.put(opts, :stream, route(input, opts)))
     end
   end
 

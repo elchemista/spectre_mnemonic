@@ -180,7 +180,8 @@ defmodule SpectreMnemonic.IntegrationTest do
     json = ~s({"kind":"task","content":"this should stay text"})
     assert {:ok, json_packet} = SpectreMnemonic.remember(json)
     assert json_packet.root.kind == :text
-    assert json_packet.chunks |> hd() |> Map.fetch!(:text) == json
+    assert json_packet.root.text == json
+    assert json_packet.chunks == []
   end
 
   test "remember ignores direct secret options unless a plug routes the draft" do
@@ -192,7 +193,7 @@ defmodule SpectreMnemonic.IntegrationTest do
              )
 
     assert %Moment{} = packet.root
-    assert packet.root.text == "text: github_pat_super_secret"
+    assert packet.root.text == "github_pat_super_secret"
     refute packet.root.metadata[:secret?]
     assert packet.persistence == %{mode: :active, durable?: false}
   end
@@ -258,12 +259,11 @@ defmodule SpectreMnemonic.IntegrationTest do
              )
 
     assert packet.root.kind == :task
-    assert packet.root.text == "task: Ship the plug-generated task"
+    assert packet.root.text == "TODO implement the plug-generated task"
+    assert packet.root.metadata.title == "Ship the plug-generated task"
     assert packet.root.metadata.intent == :implementation
     assert packet.root.metadata.tags == [:plugged, :task]
-    assert [chunk] = packet.chunks
-    assert chunk.text == "TODO implement the plug-generated task"
-    assert chunk.metadata.intent == :implementation
+    assert packet.chunks == []
   end
 
   test "remember plug halt with memory stops later plugs and dispatches the draft" do
@@ -275,7 +275,8 @@ defmodule SpectreMnemonic.IntegrationTest do
 
     assert packet.root.metadata.halted_by_plug? == true
     assert packet.warnings == [:halted_by_memory_plug]
-    assert packet.root.text == "text: Halted by memory plug"
+    assert packet.root.text == "halt this draft"
+    assert packet.root.metadata.title == "Halted by memory plug"
     refute_received {:should_not_run_plug, _text}
   end
 
@@ -672,9 +673,13 @@ defmodule SpectreMnemonic.IntegrationTest do
     embedding = Service.embed("apple query", [])
     cue = %{vector: embedding.vector, binary_signature: embedding.binary_signature}
 
-    assert {:ok, [first | rest]} = Index.query(cue, overfetch: 2)
+    assert {:ok, [first]} = Index.query(cue, overfetch: 2)
     assert first.id == match.id
-    assert Enum.any?(rest, &(&1.id == miss.id))
+
+    assert {:ok, [_first, second]} =
+             Index.query(cue, overfetch: 2, min_vector_similarity: 0.0)
+
+    assert second.id == miss.id
   after
     Application.delete_env(:spectre_mnemonic, :embedding_adapter)
   end
@@ -710,6 +715,10 @@ defmodule SpectreMnemonic.IntegrationTest do
     [x, y] = Vector.to_list(repeated.vector)
     assert_in_delta x, 0.894_427, 1.0e-5
     assert_in_delta y, 0.447_214, 1.0e-5
+
+    cache_key = {:artifacts, Path.expand(model_dir)}
+    assert [{^cache_key, %{model: %{data: data}}}] = :ets.lookup(:mnemonic_model_cache, cache_key)
+    assert is_binary(data)
   after
     if model_dir = Process.get(:model_dir), do: File.rm_rf!(model_dir)
   end

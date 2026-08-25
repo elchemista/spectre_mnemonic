@@ -10,9 +10,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @email_regex ~r/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu
   @iso_date_regex ~r/\b\d{4}-\d{2}-\d{2}\b/u
-  @phone_regex ~r/(?<![\w@])(?:\+\d{1,3}[\s.-]?)?(?:\d[\s.-]?){6,}\d(?![\w@])/u
   @number_regex ~r/(?<![\w@])\d+(?:[.,]\d+)?(?![\w@])/u
-  @name_regex ~r/\b\p{Lu}[\p{L}\p{N}_'-]*\b/u
   @month_date_regex ~r/\b(\d{1,2})\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s+(\d{4})\b/iu
 
   @month_numbers %{
@@ -57,6 +55,9 @@ defmodule SpectreMnemonic.Intake.Extraction do
   ))
 
   @graph_sections ~w(entities events times values relations)a
+
+  alias SpectreMnemonic.Recall.Lexical
+  alias SpectreMnemonic.Redaction
 
   @doc "Extracts and normalizes a graph fragment from text."
   @spec extract(binary(), keyword()) :: {:ok, map()}
@@ -140,9 +141,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec text_entities(binary()) :: [map()]
   defp text_entities(text) do
-    @name_regex
-    |> Regex.scan(text)
-    |> Enum.concat()
+    text
+    |> Lexical.entities()
     |> Enum.reject(&MapSet.member?(@stop_entities, &1))
     |> Enum.map(&entity/1)
   end
@@ -225,9 +225,8 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec phone_exclusion_values(binary()) :: [map()]
   defp phone_exclusion_values(text) do
-    @phone_regex
-    |> Regex.scan(text)
-    |> Enum.concat()
+    text
+    |> Redaction.phone_values()
     |> Enum.flat_map(fn raw ->
       [%{value: raw} | Enum.map(phone_number_fragments(raw), &%{value: &1})]
     end)
@@ -246,11 +245,10 @@ defmodule SpectreMnemonic.Intake.Extraction do
   defp phone_values(text, entities, sensitive_numbers) do
     entity_ref = single_entity_ref(entities)
 
-    @phone_regex
-    |> Regex.scan(text)
-    |> Enum.concat()
+    text
+    |> Redaction.phone_values()
     |> Enum.map(fn raw ->
-      display = if sensitive_numbers == :raw, do: raw, else: "[redacted phone]"
+      display = if sensitive_numbers == :raw, do: raw, else: Redaction.placeholder()
 
       value(:phone, raw, display,
         sensitive?: true,
@@ -272,14 +270,24 @@ defmodule SpectreMnemonic.Intake.Extraction do
 
   @spec age_values(binary()) :: [map()]
   defp age_values(text) do
-    Regex.scan(
-      ~r/\b(\p{Lu}[\p{L}\p{N}_'-]*)\b.{0,24}\b(?:is|age|aged|ha|tiene|età|eta|edad|âge|age)\s+(?:is\s+)?(\d{1,3})\b/iu,
-      text,
-      capture: :all_but_first
-    )
+    [
+      ~r/\b(\p{Lu}[\p{L}\p{N}_'-]*)\s+(?:is|aged|ha|tiene|a)\s+(\d{1,3})(?:\s+(?:years?\s+old|anni|años?|ans?))?\b/u,
+      ~r/\b(\p{Lu}[\p{L}\p{N}_'-]*)(?:'s|\s+)(?:age|età|eta|edad|âge)\s*(?:is|:|=)?\s*(\d{1,3})\b/iu
+    ]
+    |> Enum.flat_map(&Regex.scan(&1, text, capture: :all_but_first))
+    |> Enum.filter(fn [_name, age] -> plausible_age?(age) end)
+    |> Enum.uniq()
     |> Enum.map(fn [name, age] ->
       value(:age, age, age, entity: entity_id(name), sensitive?: false)
     end)
+  end
+
+  @spec plausible_age?(binary()) :: boolean()
+  defp plausible_age?(age) do
+    case Integer.parse(age) do
+      {value, ""} -> value in 0..130
+      _invalid -> false
+    end
   end
 
   @spec number_values(binary(), [map()], [map()]) :: [map()]
@@ -331,7 +339,7 @@ defmodule SpectreMnemonic.Intake.Extraction do
   @spec structured_phone_value(term(), binary() | nil, atom()) :: map()
   defp structured_phone_value(value, entity_ref, sensitive_numbers) do
     raw = to_string(value)
-    display = if sensitive_numbers == :raw, do: raw, else: "[redacted phone]"
+    display = if sensitive_numbers == :raw, do: raw, else: Redaction.placeholder()
 
     value(:phone, raw, display,
       sensitive?: true,

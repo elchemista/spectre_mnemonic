@@ -53,8 +53,28 @@ config :spectre_mnemonic,
   max_frame_bytes: 16 * 1024 * 1024
 ~~~
 
-The same bound protects active.smem and knowledge.smem. Replay stops safely at
-incomplete or corrupt trailing frames.
+The same bound protects `active.smem` and `knowledge.smem`. On the next append,
+the writer scans framing and CRC, truncates an incomplete crash tail to the last
+valid byte, and then resumes the sequence. A complete frame with a bad CRC is
+reported as corruption and is never silently truncated. Replay still stops
+safely when it encounters invalid input.
+
+Durability defaults to `:always`: appends, temporary snapshots, renames, and
+directory metadata are synced before success is returned or recovery copies
+are removed. The host can choose a different, explicit trade-off:
+
+~~~elixir
+config :spectre_mnemonic, persistence_sync: :always
+
+# Or per built-in file store:
+opts: [data_root: "mnemonic_data", sync: :data]
+~~~
+
+Supported values are `:always`, `:data`, and `:none`. `:none` only provides the
+filesystem/page-cache guarantee and must not be described operationally as
+power-loss durability. Concurrent direct calls to the file adapter are ordered
+by a node-local, owner-monitored path lock; no distributed `:global` lock is
+used.
 
 Inspect replayed live records:
 
@@ -96,6 +116,13 @@ SpectreMnemonic.Durable.Index.rebuild()
 
 Rebuild is normally automatic during startup and configured maintenance.
 
+Durable replay is cached as an ETS projection and invalidated on writes and
+compaction; recall, entity resolution, forget planning, and Atlas do not rescan
+the append-only file on every hot-path call. Active Vettore collection handles
+are also published through ETS. Query embedding, Vettore search, BM25 scoring,
+and final ranking run in the requesting process, while the index GenServers
+coordinate only mutations and rebuild snapshots.
+
 ## Consolidation
 
 consolidate/1 promotes eligible active moments into durable knowledge, expands
@@ -108,8 +135,7 @@ and optionally materializes Atlas Episodes.
     scope: {:project, "checkout"},
     min_attention: 1.0,
     graph_depth: 1,
-    cluster?: true,
-    timeout: 30_000
+    cluster?: true
   )
 ~~~
 
@@ -121,7 +147,6 @@ and optionally materializes Atlas Episodes.
 | compact? | run configured persistence compaction afterward |
 | consolidate_with | one- or two-arity per-call customization |
 | consolidation_adapter | application adapter module |
-| timeout | positive milliseconds or :infinity |
 
 Configure a reusable adapter:
 
@@ -136,8 +161,8 @@ and default durable outputs.
 
 ## Physical and semantic compaction
 
-Physical compaction writes an atomic live-record snapshot, applies tombstones,
-rotates the active segment, and verifies replay:
+Physical compaction writes and syncs an atomic live-record snapshot, applies and
+then removes tombstone events, and rotates the active segment:
 
 ~~~elixir
 SpectreMnemonic.Persistence.Manager.compact(mode: :physical)
@@ -194,6 +219,11 @@ Depending on its mode, each tick can:
 - mark old unverified facts stale;
 - compact durable storage;
 - rebuild the derived durable index.
+
+Maintenance enumerates every known `{namespace, scope}` partition instead of
+running only against the unscoped partition. Semantic compaction is a no-op
+when no semantic adapter is configured, so an `:all` tick does not create an
+unbounded stream of empty semantic job records.
 
 Inspect status:
 
@@ -292,6 +322,12 @@ erase mode it removes retained previous snapshots and rotated segments for the
 whole store so erased bytes cannot survive in crash-recovery copies. Neighbor
 partitions remain in the current compacted snapshot but temporarily lose that
 redundant history.
+
+Here “physical” means verified absence from files reachable through the
+configured adapter after rewrite and unlink. `File.rm/1` is not a promise of
+forensic media sanitization on SSDs, copy-on-write filesystems, snapshots, or
+backups. Encryption-at-rest, key destruction, storage-provider deletion, and
+media disposal remain deployment responsibilities.
 
 Deployments requiring different redundancy semantics should provide a
 partition-native adapter.
@@ -442,7 +478,11 @@ Run the deterministic evaluation harness:
 SpectreMnemonic.Evaluation.run(size: 100)
 ~~~
 
-It reports recall accuracy, exact-fact recall, and latency.
+It reports recall accuracy, exact-fact recall, and latency. By default the
+harness creates a unique `{:evaluation, id}` scope, uses `persist?: false`, and
+removes the hot records it created in an `after` block. Pass `scope:` or
+`persist?: true` only when an intentionally retained evaluation corpus is
+required; durable cleanup then uses normal logical forgetting.
 
 Run the local demonstration:
 

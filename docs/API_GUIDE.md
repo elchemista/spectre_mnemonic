@@ -361,7 +361,9 @@ Requests authorization and decrypts one locked secret.
 ~~~
 
 Recall may return locked placeholders, but plaintext is available only after the
-configured authorization adapter grants the explicit request.
+configured authorization adapter grants the explicit request. The secret's
+stored namespace and scope are reused automatically; explicitly supplied values
+must match them.
 
 Lower-level secret operations are available through SpectreMnemonic.Secrets:
 

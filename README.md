@@ -75,8 +75,10 @@ memory engine starts and runs without a JSON package. To use Jason instead, add
 `{:jason, "~> 1.4"}` to the host application's dependencies and configure
 `json_library: Jason`. Do not rely on a transitive JSON dependency.
 
-The OTP application starts the ETS owner, active focus, persistence manager,
-durable index, recall engine, and progressive-knowledge writer.
+The OTP application starts only state owners and coordinators: ETS, local path
+locks, durable writers and indexes, governance, and scheduled maintenance.
+Routing, focus mutation, recall scoring, and consolidation execute in the
+caller; there is no per-stream process and no VM-wide recall GenServer.
 
 See [Getting started](docs/GETTING_STARTED.md) for supervision, scopes,
 configuration, and a complete first workflow.

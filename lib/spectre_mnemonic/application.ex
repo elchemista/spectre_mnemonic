@@ -3,8 +3,9 @@ defmodule SpectreMnemonic.Application do
   OTP application supervisor for Spectre Mnemonic.
 
   The tree is intentionally flat in V1 so it is easy to see what process owns
-  each concern: ETS tables, persistent memory, streams, focus, recall, and
-  consolidation.
+  each stateful concern: ETS tables, persistence, indexes, governance, and
+  scheduled maintenance. Focus, recall, routing, and consolidation execute in
+  their callers and therefore need no coordinator process.
   """
 
   use Application
@@ -24,17 +25,12 @@ defmodule SpectreMnemonic.Application do
     # cosplay as infrastructure.
     children = [
       SpectreMnemonic.Active.ETSOwner,
+      SpectreMnemonic.Persistence.PathLock,
       SpectreMnemonic.Persistence.Manager,
       SpectreMnemonic.Knowledge.SMEM,
       SpectreMnemonic.Governance,
       SpectreMnemonic.Durable.Index,
-      {Registry, keys: :unique, name: SpectreMnemonic.Active.StreamRegistry},
-      SpectreMnemonic.Active.StreamSupervisor,
-      SpectreMnemonic.Active.Router,
       SpectreMnemonic.Recall.Index,
-      SpectreMnemonic.Active.Focus,
-      SpectreMnemonic.Recall.Engine,
-      SpectreMnemonic.Knowledge.Consolidator,
       SpectreMnemonic.ConsolidationScheduler
     ]
 

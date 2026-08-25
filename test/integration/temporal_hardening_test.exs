@@ -32,6 +32,19 @@ defmodule SpectreMnemonic.Integration.TemporalHardeningTest do
     refute Map.has_key?(metadata, :valid_from)
   end
 
+  test "a Date valid_until covers the whole date and expiration is half-open" do
+    temporal = Temporal.from_opts([valid_until: ~D[2026-08-25]], @now)
+
+    assert temporal.valid_until == ~U[2026-08-26 00:00:00Z]
+
+    memory = %{valid_until: temporal.valid_until}
+    assert Temporal.match?(memory, valid_at: ~U[2026-08-25 23:59:59.999999Z])
+    refute Temporal.expired?(memory, ~U[2026-08-25 23:59:59.999999Z])
+
+    refute Temporal.match?(memory, valid_at: ~U[2026-08-26 00:00:00Z])
+    assert Temporal.expired?(memory, ~U[2026-08-26 00:00:00Z])
+  end
+
   test "string-keyed metadata and provenance remain temporally isolated" do
     memory = %{
       "metadata" => %{

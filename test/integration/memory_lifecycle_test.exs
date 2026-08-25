@@ -94,7 +94,13 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
 
     cue = Service.embed("unused", embedding: [1.0, 0.0, 0.0])
 
-    assert {:ok, [first | rest]} = RecallIndex.query(cue, scope: scope, overfetch: 2)
+    assert {:ok, [first | rest]} =
+             RecallIndex.query(cue,
+               scope: scope,
+               overfetch: 2,
+               min_vector_similarity: 0.0
+             )
+
     assert first.id == match.id
     assert Enum.any?(rest, &(&1.id == miss.id))
     refute Enum.any?([first | rest], &(&1.id == outside.id))
@@ -102,6 +108,27 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     state = :sys.get_state(RecallIndex)
     assert Map.has_key?(state.vettore, {@namespace, scope})
     assert Map.has_key?(state.vettore, {@namespace, neighbor})
+  end
+
+  test "active ANN is rebuilt from ETS after the index process restarts" do
+    scope = {:subject, "vettore-restart"}
+
+    assert {:ok, %{moment: moment}} =
+             SpectreMnemonic.signal("restart-safe vector",
+               scope: scope,
+               embedding: [1.0, 0.0, 0.0]
+             )
+
+    cue = Service.embed("unused", embedding: [1.0, 0.0, 0.0])
+    assert {:ok, [%{id: id} | _]} = RecallIndex.query(cue, scope: scope)
+    assert id == moment.id
+
+    assert :ok = Supervisor.terminate_child(SpectreMnemonic.Supervisor, RecallIndex)
+    assert {:ok, _pid} = Supervisor.restart_child(SpectreMnemonic.Supervisor, RecallIndex)
+
+    assert {:ok, [%{id: rebuilt_id} | _]} = RecallIndex.query(cue, scope: scope)
+    assert rebuilt_id == moment.id
+    assert :ets.member(:mnemonic_embedding_index, moment.id)
   end
 
   test "semantic similarity creates a useful cross-memory graph edge" do
@@ -305,6 +332,15 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
 
     assert {:ok, same_as} = SpectreMnemonic.merge_entities(alice.id, bob.id, scope: scope)
     assert same_as.relation == :same_as
+
+    assert {:ok, repeated_merge} =
+             SpectreMnemonic.merge_entities(alice.id, bob.id, scope: scope)
+
+    assert repeated_merge.id == same_as.id
+
+    assert {:error, :entity_merge_cycle} =
+             SpectreMnemonic.merge_entities(bob.id, alice.id, scope: scope)
+
     :ets.delete_all_objects(:mnemonic_entity_registry)
     assert {:ok, redirected} = Resolver.resolve("bob", [], scope: scope)
     assert redirected.id == alice.id
@@ -345,11 +381,19 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
              Plasticity.decay(
                scope: first_scope,
                decay_factor: 0.5,
-               weight_floor: 0.1
+               weight_floor: 0.1,
+               stale_after_ms: 0
              )
 
     assert_in_delta association(first_edge.id).weight, 0.45, 1.0e-12
-    assert {:ok, count} = Plasticity.decay_all(decay_factor: 0.5, weight_floor: 0.1)
+
+    assert {:ok, count} =
+             Plasticity.decay_all(
+               decay_factor: 0.5,
+               weight_floor: 0.1,
+               stale_after_ms: 0
+             )
+
     assert count == 2
     assert association(first_edge.id).weight < 0.45
     assert association(second_edge.id).weight < 0.6
@@ -715,8 +759,12 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     assert {:ok, _sequence} = SMEM.append(%{type: :fact, text: "durable old knowledge"}, opts)
     old_knowledge = File.read!(knowledge_path)
     old_store = File.read!(active_path)
+    legacy_index = Path.expand("mnemonic_data/index/durable.term")
+    File.mkdir_p!(Path.dirname(legacy_index))
+    File.write!(legacy_index, "durable old memory")
 
     assert {:ok, _report} = SpectreMnemonic.erase_partition(opts)
+    refute File.exists?(legacy_index)
     assert {:ok, []} = SMEM.replay(opts)
     assert :ok = SMEM.verify_erased(opts)
     assert :ok = FileStore.verify_erased([], @namespace, scope, MapSet.new())

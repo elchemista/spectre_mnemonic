@@ -154,6 +154,9 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert {:error, {:throw, :plug_threw}} =
              PlugPipeline.run(memory, plugs: [__MODULE__.ThrowingPlug])
 
+    assert {:error, :plug_rejected} =
+             PlugPipeline.run(memory, plugs: [__MODULE__.ErrorPlug])
+
     assert {:halt, %Memory{halted?: true, result: :finished}} =
              PlugPipeline.run(memory, plugs: [__MODULE__.ResultPlug])
   end
@@ -208,9 +211,9 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert Focus.moments_by_ids([first.id]) == []
   end
 
-  test "focus rejects malformed mutation options without losing its processes" do
-    focus = Process.whereis(Focus)
-    router = Process.whereis(SpectreMnemonic.Active.Router)
+  test "focus rejects malformed mutation options without coordinator processes" do
+    refute Process.whereis(Focus)
+    refute Process.whereis(SpectreMnemonic.Active.Router)
 
     assert {:error, {:invalid_focus_option, :metadata, :invalid}} =
              SpectreMnemonic.signal("invalid metadata", metadata: :invalid)
@@ -230,14 +233,12 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
              Focus.forget(fn _moment -> raise "predicate must not run in Focus" end)
 
     assert Focus.moments_by_ids([moment.id]) == [moment]
-    assert Process.whereis(Focus) == focus
-    assert Process.alive?(focus)
-    assert Process.whereis(SpectreMnemonic.Active.Router) == router
-    assert Process.alive?(router)
+    refute Process.whereis(Focus)
+    refute Process.whereis(SpectreMnemonic.Active.Router)
   end
 
-  test "recall rejects dangerous option shapes without crashing its engine" do
-    engine = Process.whereis(Engine)
+  test "recall rejects dangerous option shapes without an engine coordinator" do
+    refute Process.whereis(Engine)
 
     assert {:error, {:invalid_recall_options, :invalid}} = Engine.recall("cue", :invalid)
 
@@ -256,8 +257,7 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     end
 
     assert {:ok, _packet} = Engine.recall("still healthy", limit: 1)
-    assert Process.whereis(Engine) == engine
-    assert Process.alive?(engine)
+    refute Process.whereis(Engine)
   end
 
   test "search limits cannot crash durable or derived search paths" do
@@ -474,6 +474,10 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
 
   defmodule ResultPlug do
     def call(_memory, _opts), do: {:ok, :finished}
+  end
+
+  defmodule ErrorPlug do
+    def call(_memory, _opts), do: {:error, :plug_rejected}
   end
 
   defmodule RaisingPlug do

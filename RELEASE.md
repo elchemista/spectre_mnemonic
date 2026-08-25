@@ -86,6 +86,9 @@ Review failures rather than weakening a strict gate for the release.
 
 - Re-run malformed frame, export schema, privacy-mode, secret, retention,
   erasure, stale-restore, and partition-isolation tests.
+- Re-run torn-tail recovery for both logs, CRC-corruption refusal, concurrent
+  append ordering, and `:always` sync/rename/unlink failure injection. Do not
+  market `sync: :none` as power-loss durable.
 - Verify `full`, `structure`, and a deterministic redactor against realistic
   records.
 - Confirm exports are handled as unencrypted personal-data artifacts and that
@@ -93,6 +96,9 @@ Review failures rather than weakening a strict gate for the release.
 - Confirm `valid_until` sweeps are scheduled by the host.
 - Test whole-partition erasure, post-erasure verification, sealing, compaction,
   backup handling, provider deletion, and resurrection prevention.
+- Verify forgotten PII is absent from lifecycle metadata, knowledge search,
+  durable indexes, exports, and Vettore collections; document that unlink is
+  not forensic media sanitization.
 - Review the responsibility boundary and data-subject request runbook in
   [Privacy, data protection, and GDPR operations](docs/PRIVACY_AND_GDPR.md).
 - Reassess the DPIA and processor inventory when models, purposes, data

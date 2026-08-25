@@ -17,8 +17,6 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   durable outputs.
   """
 
-  use GenServer
-
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Governance
@@ -32,12 +30,6 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   @tombstone_keys ~w(family id forgotten_at reason)a
   @tombstone_key_by_string Map.new(@tombstone_keys, &{Atom.to_string(&1), &1})
-
-  @doc "Starts the consolidator process."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(_opts) do
-    GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
-  end
 
   @doc """
   Consolidates active memory into persistent records.
@@ -53,7 +45,6 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
     * `:graph_depth` - include associations around selected moments.
     * `:consolidate_with` - one- or two-arity function for custom promotion.
     * `:consolidation_adapter` - module implementing the adapter behaviour.
-    * `:timeout` - GenServer call timeout in milliseconds.
 
   ## Examples
 
@@ -70,19 +61,12 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   def consolidate(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- validate_options(opts) do
-      timeout = Keyword.get(opts, :timeout, 30_000)
-      GenServer.call(__MODULE__, {:consolidate, opts}, timeout)
+      safe_consolidation(fn -> consolidate_checked(opts) end)
     end
   end
 
-  @impl GenServer
-  @spec init(map()) :: {:ok, map()}
-  def init(state), do: {:ok, state}
-
-  @impl GenServer
-  @spec handle_call({:consolidate, keyword()}, GenServer.from(), map()) ::
-          {:reply, {:ok, [Record.t()]} | {:error, term()}, map()}
-  def handle_call({:consolidate, opts}, _from, state) do
+  @spec consolidate_checked(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
+  defp consolidate_checked(opts) do
     min_attention = Keyword.get(opts, :min_attention, 1.0)
     now = DateTime.utc_now()
     active_moments = Focus.moments(opts)
@@ -103,17 +87,20 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
          :ok <- persist_consolidation(consolidation),
          {:ok, _clusters} <- maybe_materialize_atlas(consolidation),
          :ok <- maybe_compact(consolidation.opts) do
-      {:reply, {:ok, consolidation.knowledge}, state}
+      {:ok, consolidation.knowledge}
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  @spec safe_consolidation((-> result)) :: result | {:error, term()} when result: term()
+  defp safe_consolidation(fun) do
+    fun.()
   rescue
     exception ->
-      {:reply,
-       {:error, {:consolidation_failed, exception.__struct__, Exception.message(exception)}},
-       state}
+      {:error, {:consolidation_failed, exception.__struct__, Exception.message(exception)}}
   catch
-    kind, reason -> {:reply, {:error, {:consolidation_failed, kind, reason}}, state}
+    kind, reason -> {:error, {:consolidation_failed, kind, reason}}
   end
 
   @spec maybe_materialize_atlas(Consolidation.t()) :: {:ok, [term()]}
@@ -128,7 +115,6 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   @spec validate_options(keyword()) :: :ok | {:error, term()}
   defp validate_options(opts) do
     validators = [
-      {:timeout, &valid_timeout?/1},
       {:min_attention, &is_number/1},
       {:graph_depth, &non_negative_integer?/1},
       {:consolidation_graph_depth, &non_negative_integer?/1},
@@ -154,10 +140,6 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
       do: {:cont, :ok},
       else: {:halt, {:error, {:invalid_consolidation_option, key, value}}}
   end
-
-  @spec valid_timeout?(term()) :: boolean()
-  defp valid_timeout?(:infinity), do: true
-  defp valid_timeout?(timeout), do: is_integer(timeout) and timeout > 0
 
   @spec non_negative_integer?(term()) :: boolean()
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0

@@ -17,6 +17,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Store.FileFrame
   alias SpectreMnemonic.Result
 
@@ -203,8 +204,8 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     path = active_path(root)
 
     with :ok <- ensure_root(root),
-         {:ok, seq} <- next_seq(path) do
-      write_event(path, event, seq, opts)
+         {:ok, seq, counter} <- next_seq(path, opts) do
+      write_event(path, event, seq, counter, opts)
     end
   end
 
@@ -217,16 +218,17 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     tmp_path = path <> ".tmp"
 
     with :ok <- ensure_root(root),
+         {:ok, _scan} <- FramedLog.recover_tail(path, Keyword.put(opts, :magic, @magic)),
          {:ok, existing} <- replay_path(path),
          replacement <- replacement_events(existing, events, opts),
-         :ok <- File.write(tmp_path, "", [:binary]),
-         {:ok, _seqs} <- append_many_to_path(tmp_path, replacement),
-         :ok <- File.rename(tmp_path, path) do
+         {:ok, frames} <- encode_events(replacement),
+         :ok <- FramedLog.write_file(tmp_path, frames, opts),
+         :ok <- FramedLog.rename(tmp_path, path, opts) do
       reset_seq(path)
       {:ok, length(events)}
     else
       {:error, reason} ->
-        File.rm(tmp_path)
+        FramedLog.remove(tmp_path, opts)
         {:error, reason}
     end
   end
@@ -297,28 +299,26 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     }
   end
 
-  @spec append_many_to_path(Path.t(), [event()]) ::
-          {:ok, [pos_integer()]} | {:error, term()}
-  defp append_many_to_path(path, events) do
+  @spec encode_events([event()]) :: {:ok, [binary()]} | {:error, term()}
+  defp encode_events(events) do
     events
     |> Enum.with_index(1)
-    |> Result.collect_ok(fn {event, seq} -> write_normalized_event(path, event, seq) end)
+    |> Result.collect_ok(fn {event, seq} -> frame(seq, event) end)
   end
 
-  @spec write_event(Path.t(), event(), pos_integer(), keyword()) ::
+  @spec write_event(Path.t(), event(), pos_integer(), :atomics.atomics_ref(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
-  defp write_event(path, event, seq, opts) do
+  defp write_event(path, event, seq, counter, opts) do
     event = normalize_event(event, opts)
-    write_normalized_event(path, event, seq)
-  end
 
-  @spec write_normalized_event(Path.t(), event(), pos_integer()) ::
-          {:ok, pos_integer()} | {:error, term()}
-  defp write_normalized_event(path, event, seq) do
     with {:ok, frame} <- frame(seq, event) do
-      case File.write(path, frame, [:append, :binary]) do
-        :ok -> {:ok, seq}
-        {:error, reason} -> {:error, reason}
+      case FramedLog.append(path, frame, opts) do
+        :ok ->
+          :ok = FramedLog.advance_offset(counter, byte_size(frame))
+          {:ok, seq}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -347,52 +347,20 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec active_path(Path.t()) :: Path.t()
   defp active_path(root), do: Path.join(root, "knowledge.smem")
 
-  @spec next_seq(Path.t()) :: {:ok, pos_integer()} | {:error, term()}
-  defp next_seq(path) do
+  @spec next_seq(Path.t(), keyword()) ::
+          {:ok, pos_integer(), :atomics.atomics_ref()} | {:error, term()}
+  defp next_seq(path, opts) do
     key = {__MODULE__, :seq, path}
+    recovery_opts = Keyword.put(opts, :magic, @magic)
 
-    with {:ok, counter} <- sequence_counter(key, path) do
-      {:ok, :atomics.add_get(counter, 1, 1)}
+    with {:ok, counter} <- FramedLog.sequence_counter(key, path, recovery_opts) do
+      {:ok, :atomics.add_get(counter, 1, 1), counter}
     end
-  end
-
-  @spec sequence_counter(term(), Path.t()) ::
-          {:ok, :atomics.atomics_ref()} | {:error, term()}
-  defp sequence_counter(key, path) do
-    case :persistent_term.get(key, :missing) do
-      {:atomics, counter} -> {:ok, counter}
-      seq when is_integer(seq) and seq >= 0 -> {:ok, install_sequence_counter(key, seq)}
-      :missing -> install_initial_sequence_counter(key, path)
-    end
-  end
-
-  @spec install_initial_sequence_counter(term(), Path.t()) ::
-          {:ok, :atomics.atomics_ref()} | {:error, term()}
-  defp install_initial_sequence_counter(key, path) do
-    with {:ok, seq} <- initial_seq(path) do
-      {:ok, install_sequence_counter(key, seq)}
-    end
-  end
-
-  @spec install_sequence_counter(term(), non_neg_integer()) :: :atomics.atomics_ref()
-  defp install_sequence_counter(key, seq) do
-    counter = :atomics.new(1, signed: false)
-    :ok = :atomics.put(counter, 1, seq)
-    :persistent_term.put(key, {:atomics, counter})
-    counter
   end
 
   @spec reset_seq(Path.t()) :: :ok
   defp reset_seq(path) do
-    :persistent_term.erase({__MODULE__, :seq, path})
-    :ok
-  end
-
-  @spec initial_seq(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  defp initial_seq(path) do
-    reduce_path(path, 0, fn {seq, _timestamp, _event}, current ->
-      {:cont, max(seq, current)}
-    end)
+    FramedLog.reset_sequence_counter({__MODULE__, :seq, path})
   end
 
   @spec replay_path(Path.t()) :: {:ok, [event()]} | {:error, term()}
@@ -407,7 +375,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
           {:ok, acc} | {:error, term()}
         when acc: term()
   defp reduce_path(path, acc, fun) do
-    case File.open(path, [:read, :binary]) do
+    case File.open(path, [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
           {:ok, read_frames(io, acc, fun)}

@@ -92,6 +92,11 @@ lists may provide fields such as `:text`, `:title`, `:kind`, `:task_id`,
 `:tags`, and `:metadata`. Other Erlang terms receive a deterministic text
 projection.
 
+When `:text` is present, the root keeps that binary verbatim after the selected
+redaction policy. Long-input chunks are byte ranges of the same source text, so
+punctuation, newlines, symbols, and code syntax are not reconstructed or lost.
+The packet exposes `source_start_byte` and `source_end_byte` for each chunk.
+
 ```elixir
 SpectreMnemonic.remember("plain text")
 
@@ -128,8 +133,8 @@ Empty text returns `{:error, :empty_memory}`.
 | `:persist?` | immediate durability; default `false` for rich intake |
 | `:root_attention` | root attention; default 2.0 |
 | `:chunk_attention` | chunk attention; default 1.0 |
-| `:summary_attention` | summary attention; default 1.5 |
-| `:category_attention` | category attention; default 1.1 |
+| `:summary_attention` | summary attention; default 0.75 |
+| `:category_attention` | category attention; default 0.5 |
 | `:extraction_attention` | overrides attention on extracted nodes |
 
 Disable selected work when the caller only needs a lightweight root:
@@ -174,6 +179,33 @@ The timestamps have separate meanings:
 - `:valid_from`, `:valid_until` — the fact or model's truth window.
 
 `sweep_expired/1` logically forgets moments whose `valid_until` has passed.
+Validity is half-open: `valid_from <= at < valid_until`. A `%Date{}` supplied as
+`valid_until` means the end of that calendar day in UTC (midnight at the start
+of the following day), so it does not expire at the start of the named date.
+
+## Attention and hot-memory bounds
+
+Attention is runtime state rather than write-only metadata. Successful recall
+reinforces returned moments, scheduled maintenance can decay stale unused
+moments, and the eviction index orders non-pinned candidates by attention and
+age. A `:pinned` lifecycle state is not evicted by ordinary hot bounds.
+
+Configure bounds and reinforcement centrally:
+
+```elixir
+config :spectre_mnemonic,
+  hot_memory: [
+    max_moments_per_scope: 1_000,
+    max_moments_per_namespace: 10_000,
+    recall_reinforcement: 0.25,
+    attention_decay_factor: 0.95,
+    attention_floor: 0.1
+  ]
+```
+
+Per-call `max_moments_per_*` values are ignored; an untrusted caller cannot
+empty a partition by changing quota options. Mission-policy priority, when that
+opt-in plug is used, multiplies the initial attention of its intake products.
 
 ## Mission policies
 
@@ -254,6 +286,11 @@ Phone-like values are classified/redacted by default:
 SpectreMnemonic.remember(text, sensitive_numbers: :raw)
 SpectreMnemonic.remember(text, sensitive_numbers: :skip)
 ```
+
+The default redaction runs before chunking, summarization, keywords,
+fingerprints, embeddings, indexing, and persistence. It is therefore a storage
+control, not only a cosmetic label on the extracted value node. `:raw` is an
+explicit opt-in to retaining the original number.
 
 Configure richer extraction:
 
@@ -586,9 +623,10 @@ Reveal is always explicit:
 ```
 
 If authorization is missing or denied, recall still succeeds and returns a
-locked placeholder. Custom crypto adapters can delegate encryption to a KMS,
-Vault, keychain, or hardware-backed boundary and may optionally implement
-partition key shredding.
+locked placeholder. Reveal automatically reuses the namespace and scope stored
+in the secret; explicitly supplied values must match. Custom crypto adapters can
+delegate encryption to a KMS, Vault, keychain, or hardware-backed boundary and
+may optionally implement partition key shredding.
 
 ## Related guides
 

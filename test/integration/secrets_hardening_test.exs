@@ -25,6 +25,67 @@ defmodule SpectreMnemonic.Integration.SecretsHardeningTest do
              )
   end
 
+  test "secret AAD is versioned and deterministic instead of depending on Inspect" do
+    context = %{
+      namespace: "spectre_mnemonic_test",
+      scope: %{tenant: "alpha", subject: 42},
+      secret_id: "sec-stable",
+      memory_id: "mom-stable",
+      label: "stable token"
+    }
+
+    assert {:ok, first} = AESGCM.encrypt("secret", context, secret_key: secret_key())
+    assert {:ok, second} = AESGCM.encrypt("secret", context, secret_key: secret_key())
+
+    assert first.aad == second.aad
+    assert String.starts_with?(first.aad, "spectre-mnemonic-secret:v2:")
+    refute String.contains?(first.aad, "stable token")
+    refute String.contains?(first.aad, "alpha")
+  end
+
+  test "reveal derives the stored scope and configured security cannot be overridden per call" do
+    Application.put_env(:spectre_mnemonic, :secret_key, secret_key())
+
+    Application.put_env(
+      :spectre_mnemonic,
+      :secret_authorization_adapter,
+      __MODULE__.AllowAuthorization
+    )
+
+    Application.put_env(
+      :spectre_mnemonic,
+      :secret_crypto_adapter,
+      AESGCM
+    )
+
+    scope = {:tenant, "scoped-secret"}
+
+    assert {:ok, %{moment: secret}} =
+             SpectreMnemonic.signal("scoped plaintext",
+               scope: scope,
+               secret?: true,
+               label: "scoped token",
+               secret_key: <<0::256>>,
+               crypto_adapter: "not-a-module"
+             )
+
+    rendered = inspect(secret)
+    refute rendered =~ "ciphertext:"
+    refute rendered =~ "iv:"
+    refute rendered =~ "tag:"
+    refute rendered =~ "aad:"
+
+    assert {:ok, revealed} =
+             SpectreMnemonic.reveal(secret,
+               secret_key: <<0::256>>,
+               authorization_adapter: __MODULE__.DenyAuthorization,
+               crypto_adapter: __MODULE__.MalformedCrypto
+             )
+
+    assert revealed.scope == scope
+    assert revealed.text == "scoped plaintext"
+  end
+
   test "key provider failures are returned instead of escaping" do
     context = %{secret_id: "sec-key", memory_id: "mom-key", label: "key"}
 
@@ -68,7 +129,7 @@ defmodule SpectreMnemonic.Integration.SecretsHardeningTest do
                crypto_adapter: __MODULE__.ThrowingCrypto
              )
 
-    assert Process.alive?(Process.whereis(Focus))
+    refute Process.whereis(Focus)
     assert {:ok, %{moment: _moment}} = SpectreMnemonic.signal("ordinary memory")
   end
 
@@ -157,6 +218,13 @@ defmodule SpectreMnemonic.Integration.SecretsHardeningTest do
 
     @impl SpectreMnemonic.Secrets.Authorization.Adapter
     def authorize(_request, _opts), do: {:ok, :yes}
+  end
+
+  defmodule DenyAuthorization do
+    @behaviour SpectreMnemonic.Secrets.Authorization.Adapter
+
+    @impl SpectreMnemonic.Secrets.Authorization.Adapter
+    def authorize(_request, _opts), do: {:error, :denied}
   end
 
   defmodule AllowAuthorization do

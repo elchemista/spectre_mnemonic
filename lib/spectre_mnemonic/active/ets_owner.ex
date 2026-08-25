@@ -10,14 +10,14 @@ defmodule SpectreMnemonic.Active.ETSOwner do
 
   @tables [
     {:mnemonic_signals, :set},
-    {:mnemonic_streams, :set},
     {:mnemonic_moments, :set},
     {:mnemonic_moments_by_stream, :bag},
     {:mnemonic_moments_by_task, :bag},
     {:mnemonic_moments_by_scope, :bag},
-    {:mnemonic_moments_by_namespace, :bag},
     {:mnemonic_moments_by_signal, :set},
     {:mnemonic_moment_counts, :set},
+    {:mnemonic_moment_eviction, :ordered_set},
+    {:mnemonic_moment_eviction_keys, :set},
     {:mnemonic_status, :set},
     {:mnemonic_associations, :set},
     {:mnemonic_associations_by_scope, :bag},
@@ -36,7 +36,12 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:mnemonic_mental_models_by_scope, :bag},
     {:mnemonic_governance_states, :set},
     {:mnemonic_governance_states_by_scope, :bag},
-    {:mnemonic_governance_facts, :set}
+    {:mnemonic_governance_facts, :set},
+    {:mnemonic_embedding_index, :set},
+    {:mnemonic_vettore_collections, :set},
+    {:mnemonic_durable_records, :set},
+    {:mnemonic_model_cache, :set},
+    {:mnemonic_framed_log_counters, :set}
   ]
 
   @doc "Starts the ETS owner process."
@@ -62,7 +67,7 @@ defmodule SpectreMnemonic.Active.ETSOwner do
     {:ok, state}
   end
 
-  @spec create_table({atom(), :set | :bag}) :: :ok | :ets.tid()
+  @spec create_table({atom(), :set | :bag | :ordered_set}) :: :ok | :ets.tid()
   defp create_table({table, type}) do
     if :ets.whereis(table) == :undefined do
       :ets.new(table, [:named_table, :public, type, :compressed, read_concurrency: true])

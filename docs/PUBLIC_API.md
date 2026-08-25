@@ -48,14 +48,9 @@ host dependencies.
 - `SpectreMnemonic.Active.ETSOwner`
   - functions: `child_spec/1`, `member?/2`, `start_link/1`
 - `SpectreMnemonic.Active.Focus`
-  - functions: `action_recipes/1`, `action_recipes/2`, `artifact/1`, `artifact/2`, `artifacts/1`, `artifacts/2`, `associations/0`, `associations/1`, `child_spec/1`, `forget/1`, `forget/2`, `link/3`, `link/4`, `moments/0`, `moments/1`, `record_signal/2`, `start_link/1`, `status/1`, `status/2`
+  - functions: `action_recipes/1`, `action_recipes/2`, `artifact/1`, `artifact/2`, `artifacts/1`, `artifacts/2`, `associations/0`, `associations/1`, `forget/1`, `forget/2`, `link/3`, `link/4`, `moments/0`, `moments/1`, `record_signal/2`, `status/1`, `status/2`
 - `SpectreMnemonic.Active.Router`
-  - functions: `child_spec/1`, `signal/2`, `start_link/1`
-- `SpectreMnemonic.Active.Stream`
-- `SpectreMnemonic.Active.StreamServer`
-  - functions: `child_spec/1`, `signal/3`, `start_link/1`
-- `SpectreMnemonic.Active.StreamSupervisor`
-  - functions: `child_spec/1`, `ensure_stream/1`, `start_link/1`
+  - functions: `signal/2`
 - `SpectreMnemonic.Application`
 - `SpectreMnemonic.ConsolidationScheduler`
   - functions: `child_spec/1`, `start_link/0`, `start_link/1`, `status/0`
@@ -101,7 +96,7 @@ host dependencies.
   - callbacks: `compact/2`
 - `SpectreMnemonic.Knowledge.Consolidation`
 - `SpectreMnemonic.Knowledge.Consolidator`
-  - functions: `child_spec/1`, `consolidate/0`, `consolidate/1`, `start_link/1`
+  - functions: `consolidate/0`, `consolidate/1`
 - `SpectreMnemonic.Knowledge.Consolidator.Adapter`
   - callbacks: `consolidate/2`
 - `SpectreMnemonic.Knowledge.Learning`
@@ -145,7 +140,7 @@ host dependencies.
   - functions: `ensure/2`, `new/1`, `new/2`, `text/1`
 - `SpectreMnemonic.Recall.Cue`
 - `SpectreMnemonic.Recall.Engine`
-  - functions: `child_spec/1`, `recall/1`, `recall/2`, `start_link/1`
+  - functions: `recall/1`, `recall/2`
 - `SpectreMnemonic.Recall.Fingerprint`
   - functions: `build/1`, `hamming_distance/2`, `hamming_similarity/2`
 - `SpectreMnemonic.Recall.Index`

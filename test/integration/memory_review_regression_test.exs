@@ -264,7 +264,18 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
     assert {:ok, learned} = Resolver.resolve("Alice", ["Ally"], scope: scope)
     assert learned.id == alice.id
 
+    before_hot_only_alias = raw_family_count(:moments)
+
     clear_hot_graph()
+
+    assert {:ok, hot_only_alias} =
+             Resolver.resolve("Alice", ["Lissy"], scope: scope, persist?: false)
+
+    assert "lissy" in hot_only_alias.metadata.aliases
+    assert raw_family_count(:moments) == before_hot_only_alias
+
+    clear_hot_graph()
+    assert :miss = Resolver.resolve("Lissy", [], scope: scope, persist?: false)
 
     assert {:ok, restored} = Resolver.resolve("Ally", [], scope: scope)
     assert restored.id == alice.id
@@ -541,7 +552,6 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
         :mnemonic_moments_by_stream,
         :mnemonic_moments_by_task,
         :mnemonic_moments_by_scope,
-        :mnemonic_moments_by_namespace,
         :mnemonic_moments_by_signal,
         :mnemonic_moment_counts,
         :mnemonic_associations,

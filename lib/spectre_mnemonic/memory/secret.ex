@@ -45,6 +45,7 @@ defmodule SpectreMnemonic.Memory.Secret do
           metadata: map()
         }
 
+  @derive {Inspect, except: [:ciphertext, :iv, :tag, :aad]}
   # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :id,

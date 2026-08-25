@@ -3,10 +3,12 @@ defmodule SpectreMnemonic.Knowledge.Base do
   Budgeted progressive knowledge loader backed by `knowledge.smem`.
   """
 
+  alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Record
   alias SpectreMnemonic.Knowledge.SMEM
   alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.Recall.Lexical
   alias SpectreMnemonic.SearchResult
 
   @default_config [
@@ -89,7 +91,13 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
   @doc "Replays compact knowledge events."
   @spec events(keyword()) :: {:ok, [map()]} | {:error, term()}
-  def events(opts \\ []), do: SMEM.replay(opts)
+  def events(opts \\ []) do
+    with {:ok, opts} <- Identity.put_namespace(opts),
+         cfg = config(opts),
+         {:ok, events} <- SMEM.replay(cfg) do
+      {:ok, visible_events(events, cfg)}
+    end
+  end
 
   @doc "Loads a compact, budgeted knowledge packet."
   @spec load(keyword()) :: {:ok, Record.t()} | {:error, term()}
@@ -108,7 +116,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
   @spec load_enabled(keyword()) :: {:ok, Record.t()} | {:error, term()}
   defp load_enabled(cfg) do
     with {:ok, events} <- SMEM.replay(cfg) do
-      {:ok, build_packet(events, cfg)}
+      {:ok, build_packet(visible_events(events, cfg), cfg)}
     end
   end
 
@@ -131,7 +139,8 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
       results =
         events
-        |> Enum.map(&SMEM.normalize_event/1)
+        |> Enum.map(&SMEM.normalize_event(&1, cfg))
+        |> Enum.filter(&visible_event?(&1, cfg))
         |> Enum.map(&score_event(&1, query_terms, query))
         |> Enum.filter(&(&1.score > 0))
         |> Enum.sort_by(&search_sort_key/1)
@@ -160,7 +169,8 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
     events =
       events
-      |> Enum.map(&SMEM.normalize_event/1)
+      |> Enum.map(&SMEM.normalize_event(&1, cfg))
+      |> Enum.filter(&visible_event?(&1, cfg))
       |> rank_events()
 
     {summary, used_bytes} = select_summary(events, max_bytes)
@@ -190,6 +200,36 @@ defmodule SpectreMnemonic.Knowledge.Base do
       },
       inserted_at: DateTime.utc_now()
     }
+  end
+
+  @doc false
+  @spec visible_events([map()], keyword()) :: [map()]
+  def visible_events(events, opts) do
+    cfg = config(opts)
+
+    events
+    |> Enum.map(&SMEM.normalize_event(&1, cfg))
+    |> Enum.filter(&visible_event?(&1, cfg))
+  end
+
+  @spec visible_event?(map(), keyword()) :: boolean()
+  defp visible_event?(event, opts) do
+    state_opts = Keyword.put(opts, :scope, Map.get(event, :scope))
+
+    event
+    |> governed_source_ids()
+    |> Enum.all?(&Governance.search_visible?(&1, state_opts))
+  end
+
+  @spec governed_source_ids(map()) :: [binary()]
+  defp governed_source_ids(event) do
+    metadata = Map.get(event, :metadata, %{})
+    provenance = if is_map(metadata), do: Map.get(metadata, :provenance, %{}), else: %{}
+
+    ([Map.get(event, :source_id), Map.get(event, :memory_id)] ++
+       if(is_map(provenance), do: List.wrap(Map.get(provenance, :source_ids)), else: []))
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
   end
 
   @spec empty_packet(map(), keyword()) :: Record.t()
@@ -389,11 +429,5 @@ defmodule SpectreMnemonic.Knowledge.Base do
   defp cue_text(cue), do: cue |> inspect(limit: 50) |> cue_text()
 
   @spec terms(binary()) :: [binary()]
-  defp terms(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^a-z0-9_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 3))
-    |> Enum.uniq()
-  end
+  defp terms(text), do: Lexical.keywords(text, 3)
 end

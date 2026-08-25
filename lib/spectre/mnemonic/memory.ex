@@ -77,7 +77,8 @@ defmodule Spectre.Mnemonic.Memory do
         |> Keyword.merge(runtime_opts)
 
       with {:ok, options} <- normalize_agent_ref(options, agent),
-           {:ok, options} <- normalize_subject(options, dimensions) do
+           {:ok, options} <- normalize_subject(options, dimensions),
+           :ok <- validate_isolation_values(options, dimensions) do
         options =
           options
           |> normalize_namespace()
@@ -111,6 +112,25 @@ defmodule Spectre.Mnemonic.Memory do
     partition = Enum.map(dimensions, &{&1, dimension(&1, opts)})
     Keyword.put(opts, :scope, {:spectre, partition})
   end
+
+  @spec validate_isolation_values(keyword(), [atom()]) :: :ok | {:error, term()}
+  defp validate_isolation_values(opts, dimensions) do
+    Enum.reduce_while(dimensions, :ok, fn dimension_name, :ok ->
+      if valid_dimension_value?(dimension(dimension_name, opts)) do
+        {:cont, :ok}
+      else
+        {:halt, {:error, {:mnemonic_isolation_dimension_required, dimension_name}}}
+      end
+    end)
+  rescue
+    _exception -> {:error, :mnemonic_isolation_context_invalid}
+  end
+
+  @spec valid_dimension_value?(term()) :: boolean()
+  defp valid_dimension_value?(nil), do: false
+  defp valid_dimension_value?(false), do: false
+  defp valid_dimension_value?(value) when is_binary(value), do: String.trim(value) != ""
+  defp valid_dimension_value?(_value), do: true
 
   @spec durable(keyword()) :: keyword()
   defp durable(opts), do: Keyword.put(opts, :persist?, true)

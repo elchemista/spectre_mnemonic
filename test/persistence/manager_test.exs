@@ -3,6 +3,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Memory.Secret
+  alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.Codec
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
@@ -174,7 +175,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert {:ok, 2} = StoreFile.put(record(:moments, %{id: "mom_2"}), opts)
 
     path = Path.join([root, "segments", "active.smem"])
-    :persistent_term.erase({StoreFile, :seq, path})
+    FramedLog.reset_sequence_counter({StoreFile, :seq, path})
 
     assert {:ok, 3} = StoreFile.put(record(:moments, %{id: "mom_3"}), opts)
 
@@ -252,21 +253,23 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert File.exists?(explicit_snapshot)
   end
 
-  test "semantic compaction uses replay fallback and writes compact records" do
+  test "semantic compaction is a no-op without an explicit policy adapter" do
     configure_file_store()
 
     assert {:ok, _} = Manager.append(:moments, %{id: "mom_1", attention: 2.0})
     assert {:ok, _} = Manager.append(:moments, %{id: "mom_2", attention: 1.0})
 
-    assert {:ok, %{mode: :semantic, results: [{:local_file, result}], written: 1}} =
+    assert {:ok,
+            %{
+              mode: :semantic,
+              results: [{:local_file, {:skipped, :semantic_adapter_not_configured}}],
+              written: 0,
+              tombstones: 0
+            }} =
              Manager.compact(mode: :semantic)
 
-    assert result.strategy == :default
-    assert result.input == 2
-    assert result.written == 1
-
     assert {:ok, records} = Manager.replay()
-    assert Enum.any?(records, &(&1.family == :semantic_compaction_jobs))
+    refute Enum.any?(records, &(&1.family == :semantic_compaction_jobs))
   end
 
   test "semantic compaction can use custom adapter output and tombstone replacements" do
@@ -451,7 +454,8 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
              Manager.compact(mode: :all)
 
     assert semantic.mode == :semantic
-    assert semantic.written == 1
+    assert semantic.written == 0
+    assert semantic.results == [{:local_file, {:skipped, :semantic_adapter_not_configured}}]
     assert [{:local_file, {:ok, snapshot}}] = physical
     assert File.exists?(snapshot)
   end

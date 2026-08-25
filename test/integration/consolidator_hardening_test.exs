@@ -21,7 +21,7 @@ defmodule SpectreMnemonic.Integration.ConsolidatorHardeningTest do
              Consolidator.consolidate(consolidate_with: fn _context, _opts -> [] end)
   end
 
-  test "custom consolidation functions cannot crash or throw through the server" do
+  test "custom consolidation functions cannot crash or throw through the caller boundary" do
     assert {:error, {RuntimeError, "consolidation exploded"}} =
              Consolidator.consolidate(
                consolidate_with: fn _context -> raise("consolidation exploded") end
@@ -32,14 +32,13 @@ defmodule SpectreMnemonic.Integration.ConsolidatorHardeningTest do
                consolidate_with: fn _context, _opts -> throw(:consolidation_threw) end
              )
 
-    assert Process.alive?(Process.whereis(Consolidator))
+    refute Process.whereis(Consolidator)
   end
 
-  test "invalid numeric and timeout options cannot crash the consolidator" do
-    consolidator = Process.whereis(Consolidator)
+  test "invalid numeric options cannot crash the consolidator" do
+    refute Process.whereis(Consolidator)
 
     for {key, value} <- [
-          timeout: 0,
           min_attention: :invalid,
           graph_depth: :invalid,
           consolidation_graph_depth: -1,
@@ -49,9 +48,8 @@ defmodule SpectreMnemonic.Integration.ConsolidatorHardeningTest do
                Consolidator.consolidate([{key, value}])
     end
 
-    assert {:ok, []} = Consolidator.consolidate(timeout: :infinity, graph_depth: 0)
-    assert Process.whereis(Consolidator) == consolidator
-    assert Process.alive?(consolidator)
+    assert {:ok, []} = Consolidator.consolidate(graph_depth: 0)
+    refute Process.whereis(Consolidator)
   end
 
   test "configured consolidation adapters are validated and contained" do
@@ -64,7 +62,7 @@ defmodule SpectreMnemonic.Integration.ConsolidatorHardeningTest do
     assert {:error, {:exit, :adapter_exited}} =
              Consolidator.consolidate(consolidation_adapter: __MODULE__.ExitingAdapter)
 
-    assert Process.alive?(Process.whereis(Consolidator))
+    refute Process.whereis(Consolidator)
   end
 
   test "custom plans reject mixed input and output partitions" do

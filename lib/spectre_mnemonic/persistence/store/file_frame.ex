@@ -27,6 +27,20 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
 
   @type t :: {pos_integer(), integer(), term()}
   @type fold_fun(acc) :: (t(), acc -> {:cont, acc} | {:halt, acc})
+  @type scan_status ::
+          :clean
+          | {:invalid_tail,
+             :incomplete_header
+             | :unknown_header
+             | :payload_too_large
+             | :incomplete_payload
+             | :crc_mismatch}
+  @type scan_result :: %{
+          valid_bytes: non_neg_integer(),
+          file_bytes: non_neg_integer(),
+          last_sequence: non_neg_integer(),
+          status: scan_status()
+        }
 
   @doc """
   Encodes one storage payload into the append-only frame format.
@@ -78,6 +92,42 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
     case Application.get_env(:spectre_mnemonic, :max_frame_bytes, @default_max_payload_bytes) do
       maximum when is_integer(maximum) and maximum > 0 -> maximum
       _invalid -> @default_max_payload_bytes
+    end
+  end
+
+  @doc """
+  Scans a framed log and reports the last validated byte boundary.
+
+  Unlike `read_frames/3`, this function makes an invalid tail observable. A
+  writer can therefore truncate exactly the unreachable suffix before it
+  appends again. `:magic` and `:version` exist so the knowledge log can share
+  the same recovery invariant without changing its on-disk format.
+  """
+  @spec scan_path(Path.t(), keyword()) :: {:ok, scan_result()} | {:error, term()}
+  def scan_path(path, opts \\ []) do
+    magic = Keyword.get(opts, :magic, @magic)
+    version = Keyword.get(opts, :version, @version)
+
+    with true <- is_binary(magic) and byte_size(magic) == byte_size(@magic),
+         true <- is_integer(version) and version in 0..255 do
+      case File.open(path, [:read, :binary, :raw]) do
+        {:ok, io} ->
+          try do
+            with {:ok, %{size: file_bytes}} <- File.stat(path) do
+              scan_frames(io, 0, 0, file_bytes, magic, version)
+            end
+          after
+            File.close(io)
+          end
+
+        {:error, :enoent} ->
+          {:ok, %{valid_bytes: 0, file_bytes: 0, last_sequence: 0, status: :clean}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      false -> {:error, :invalid_frame_format}
     end
   end
 
@@ -189,5 +239,115 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
       {:cont, acc} -> read_frames(io, acc, fun)
       {:halt, acc} -> acc
     end
+  end
+
+  @spec scan_frames(
+          File.io_device(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          binary(),
+          non_neg_integer()
+        ) :: {:ok, scan_result()} | {:error, term()}
+  defp scan_frames(io, offset, last_sequence, file_bytes, magic, version) do
+    case :file.read(io, @header_bytes) do
+      :eof ->
+        {:ok,
+         %{
+           valid_bytes: offset,
+           file_bytes: file_bytes,
+           last_sequence: last_sequence,
+           status: :clean
+         }}
+
+      {:ok, header} when byte_size(header) < @header_bytes ->
+        invalid_scan(offset, file_bytes, last_sequence, :incomplete_header)
+
+      {:ok,
+       <<^magic::binary, ^version, seq::unsigned-64, _timestamp::signed-64, len::32, crc::32>>} ->
+        context = %{
+          offset: offset,
+          last_sequence: last_sequence,
+          file_bytes: file_bytes,
+          magic: magic,
+          version: version
+        }
+
+        scan_payload(io, context, seq, len, crc)
+
+      {:ok, _unknown_header} ->
+        invalid_scan(offset, file_bytes, last_sequence, :unknown_header)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec scan_payload(
+          File.io_device(),
+          map(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: {:ok, scan_result()} | {:error, term()}
+  defp scan_payload(io, context, seq, len, crc) do
+    if len <= max_payload_bytes() do
+      case :file.read(io, len) do
+        {:ok, payload} when byte_size(payload) == len ->
+          scan_complete_payload(io, context, seq, payload, crc)
+
+        :eof ->
+          invalid_context_scan(context, :incomplete_payload)
+
+        {:ok, _incomplete} ->
+          invalid_context_scan(context, :incomplete_payload)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      invalid_context_scan(context, :payload_too_large)
+    end
+  end
+
+  @spec scan_complete_payload(
+          File.io_device(),
+          map(),
+          non_neg_integer(),
+          binary(),
+          non_neg_integer()
+        ) :: {:ok, scan_result()} | {:error, term()}
+  defp scan_complete_payload(io, context, seq, payload, crc) do
+    if :erlang.crc32(payload) != crc do
+      invalid_context_scan(context, :crc_mismatch)
+    else
+      next_offset = context.offset + @header_bytes + byte_size(payload)
+
+      scan_frames(
+        io,
+        next_offset,
+        max(seq, context.last_sequence),
+        context.file_bytes,
+        context.magic,
+        context.version
+      )
+    end
+  end
+
+  @spec invalid_context_scan(map(), atom()) :: {:ok, scan_result()}
+  defp invalid_context_scan(context, reason) do
+    invalid_scan(context.offset, context.file_bytes, context.last_sequence, reason)
+  end
+
+  @spec invalid_scan(non_neg_integer(), non_neg_integer(), non_neg_integer(), atom()) ::
+          {:ok, scan_result()}
+  defp invalid_scan(valid_bytes, file_bytes, last_sequence, reason) do
+    {:ok,
+     %{
+       valid_bytes: valid_bytes,
+       file_bytes: file_bytes,
+       last_sequence: last_sequence,
+       status: {:invalid_tail, reason}
+     }}
   end
 end

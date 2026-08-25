@@ -32,6 +32,17 @@ defmodule SpectreMnemonic.Memory.Temporal do
 
   def normalize(_value), do: nil
 
+  @doc false
+  @spec normalize_field(atom(), term()) :: DateTime.t() | nil
+  def normalize_field(:valid_until, %Date{} = value) do
+    value
+    |> Date.add(1)
+    |> NaiveDateTime.new!(~T[00:00:00])
+    |> DateTime.from_naive!("Etc/UTC")
+  end
+
+  def normalize_field(_field, value), do: normalize(value)
+
   @doc "Returns normalized temporal fields from opts, defaulting observed_at to now."
   @spec from_opts(keyword(), DateTime.t()) :: map()
   def from_opts(opts, now) do
@@ -39,7 +50,7 @@ defmodule SpectreMnemonic.Memory.Temporal do
     |> Map.new(fn field ->
       default = if field == :observed_at, do: now, else: nil
       value = Keyword.get(opts, field)
-      {field, normalize(value || default)}
+      {field, normalize_field(field, value || default)}
     end)
   end
 
@@ -85,7 +96,7 @@ defmodule SpectreMnemonic.Memory.Temporal do
         Enum.find_value(sources, fn source ->
           source
           |> map_values(field)
-          |> Enum.find_value(&normalize/1)
+          |> Enum.find_value(&normalize_field(field, &1))
         end)
 
       {field, value}
@@ -93,6 +104,17 @@ defmodule SpectreMnemonic.Memory.Temporal do
   end
 
   def temporal_map(_memory), do: %{}
+
+  @doc "Returns true once a memory's exclusive valid-until boundary is reached."
+  @spec expired?(term(), DateTime.t()) :: boolean()
+  def expired?(memory, %DateTime{} = now) do
+    case memory |> temporal_map() |> Map.get(:valid_until) do
+      %DateTime{} = valid_until -> DateTime.compare(valid_until, now) in [:lt, :eq]
+      _missing -> false
+    end
+  end
+
+  def expired?(_memory, _now), do: false
 
   @spec map_values(map(), atom()) :: [term()]
   defp map_values(map, key) do
@@ -142,7 +164,7 @@ defmodule SpectreMnemonic.Memory.Temporal do
         valid_until = Map.get(temporal, :valid_until)
 
         (is_nil(valid_from) or DateTime.compare(valid_from, at) in [:lt, :eq]) and
-          (is_nil(valid_until) or DateTime.compare(valid_until, at) in [:gt, :eq])
+          (is_nil(valid_until) or DateTime.compare(valid_until, at) == :gt)
     end
   end
 end

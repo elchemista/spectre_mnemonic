@@ -226,8 +226,14 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   @spec unused_before?(Association.t(), DateTime.t()) :: boolean()
   defp unused_before?(association, %DateTime{} = before) do
     case Map.get(association.metadata, :last_activated_at) do
-      %DateTime{} = used -> DateTime.compare(used, before) == :lt
-      _missing -> true
+      %DateTime{} = used ->
+        DateTime.compare(used, before) == :lt
+
+      _missing ->
+        case association.inserted_at do
+          %DateTime{} = inserted_at -> DateTime.compare(inserted_at, before) == :lt
+          _missing -> false
+        end
     end
   end
 

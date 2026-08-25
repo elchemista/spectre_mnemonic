@@ -91,23 +91,8 @@ defmodule SpectreMnemonic.Graph.Resolver do
     with {:ok, opts} <- Identity.put_namespace(opts),
          partition <- {Identity.namespace!(opts), Scope.from_opts(opts)},
          {:ok, winner} <- lookup_entity(winner_id, partition),
-         {:ok, loser} <- lookup_entity(loser_id, partition),
-         loser_keys <- entity_keys(loser),
-         winner_aliases <- Map.get(winner.metadata, :aliases, []),
-         {:ok, winner} <- learn_aliases(winner, loser_keys, opts),
-         {:ok, association} <-
-           Focus.link(
-             winner_id,
-             :same_as,
-             loser_id,
-             Keyword.put(opts, :metadata, %{
-               absorbed_aliases: loser_keys,
-               winner_aliases_before: winner_aliases
-             })
-           ) do
-      redirect_registry(partition, loser_id, winner.id)
-      register(winner)
-      {:ok, association}
+         {:ok, loser} <- lookup_entity(loser_id, partition) do
+      merge_entities_checked(winner, loser, partition, opts)
     else
       :miss -> {:error, :unknown_entity}
       {:error, _reason} = error -> error
@@ -115,6 +100,39 @@ defmodule SpectreMnemonic.Graph.Resolver do
   end
 
   def merge_entities(id, id, _opts), do: {:error, :same_entity_id}
+
+  @spec merge_entities_checked(Moment.t(), Moment.t(), tuple(), keyword()) ::
+          {:ok, SpectreMnemonic.Memory.Association.t()} | {:error, term()}
+  defp merge_entities_checked(winner, loser, partition, opts) do
+    case merge_status(winner.id, loser.id, opts) do
+      {:existing, association} -> {:ok, association}
+      :merge -> create_entity_merge(winner, loser, partition, opts)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec create_entity_merge(Moment.t(), Moment.t(), tuple(), keyword()) ::
+          {:ok, SpectreMnemonic.Memory.Association.t()} | {:error, term()}
+  defp create_entity_merge(winner, loser, partition, opts) do
+    loser_keys = entity_keys(loser)
+    winner_aliases = Map.get(winner.metadata, :aliases, [])
+
+    with {:ok, winner} <- learn_aliases(winner, loser_keys, opts),
+         {:ok, association} <-
+           Focus.link(
+             winner.id,
+             :same_as,
+             loser.id,
+             Keyword.put(opts, :metadata, %{
+               absorbed_aliases: loser_keys,
+               winner_aliases_before: winner_aliases
+             })
+           ) do
+      redirect_registry(partition, loser.id, winner.id)
+      register(winner)
+      {:ok, association}
+    end
+  end
 
   @doc "Removes one active `:same_as` merge and restores the loser identity registry."
   @spec unmerge_entities(binary(), binary(), keyword()) :: :ok | {:error, term()}
@@ -160,6 +178,75 @@ defmodule SpectreMnemonic.Graph.Resolver do
       association -> {:ok, association}
     end
   end
+
+  @spec merge_status(binary(), binary(), keyword()) ::
+          :merge | {:existing, SpectreMnemonic.Memory.Association.t()} | {:error, term()}
+  defp merge_status(winner_id, loser_id, opts) do
+    case same_as_association(winner_id, loser_id, opts) do
+      {:ok, association} -> {:existing, association}
+      {:error, :merge_not_found} -> validate_new_merge(winner_id, loser_id, opts)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec validate_new_merge(binary(), binary(), keyword()) :: :merge | {:error, term()}
+  defp validate_new_merge(winner_id, loser_id, opts) do
+    redirects = all_entity_redirects(opts)
+    winner_root = follow_redirect(winner_id, redirects, %{})
+    loser_root = follow_redirect(loser_id, redirects, %{})
+
+    cond do
+      redirect_reaches?(winner_id, loser_id, redirects) ->
+        {:error, :entity_merge_cycle}
+
+      redirect_reaches?(loser_id, winner_id, redirects) or winner_root == loser_root ->
+        {:error, :entities_already_merged}
+
+      winner_root != winner_id ->
+        {:error, {:entity_redirected, winner_id, winner_root}}
+
+      loser_root != loser_id ->
+        {:error, {:entity_redirected, loser_id, loser_root}}
+
+      true ->
+        :merge
+    end
+  end
+
+  @spec all_entity_redirects(keyword()) :: map()
+  defp all_entity_redirects(opts) do
+    durable =
+      case Manager.replay(opts) do
+        {:ok, records} -> entity_redirects(records)
+        {:error, _reason} -> %{}
+      end
+
+    Map.merge(durable, hot_entity_redirects(opts))
+  end
+
+  @spec redirect_reaches?(binary(), binary(), map()) :: boolean()
+  defp redirect_reaches?(from, target, redirects) do
+    redirect_reaches?(Map.get(redirects, from), target, redirects, MapSet.new([from]))
+  end
+
+  @spec redirect_reaches?(term(), binary(), map(), MapSet.t()) :: boolean()
+  defp redirect_reaches?(target, target, _redirects, _seen), do: true
+  defp redirect_reaches?(nil, _target, _redirects, _seen), do: false
+
+  defp redirect_reaches?(current, target, redirects, seen) when is_binary(current) do
+    if MapSet.member?(seen, current) do
+      false
+    else
+      redirect_reaches?(
+        Map.get(redirects, current),
+        target,
+        redirects,
+        MapSet.put(seen, current)
+      )
+    end
+  end
+
+  defp redirect_reaches?(_current, _target, _redirects, _seen), do: false
 
   @spec durable_same_as_association(binary(), binary(), keyword()) ::
           {:ok, SpectreMnemonic.Memory.Association.t()} | {:error, :merge_not_found | term()}
@@ -364,10 +451,15 @@ defmodule SpectreMnemonic.Graph.Resolver do
     aliases = (existing ++ Enum.reject(keys, &(&1 == canonical))) |> Enum.uniq() |> Enum.sort()
     updated = %{entity | metadata: Map.put(entity.metadata, :aliases, aliases)}
 
-    with :ok <- maybe_persist_aliases(entity, updated, opts),
-         :ok <- Focus.hydrate_moment(updated, opts) do
-      register_aliases(updated.id, Scope.partition(updated), [canonical | aliases])
-      {:ok, updated}
+    if updated == entity do
+      register_aliases(entity.id, Scope.partition(entity), [canonical | aliases])
+      {:ok, entity}
+    else
+      with :ok <- maybe_persist_aliases(entity, updated, opts),
+           :ok <- Focus.hydrate_moment(updated, opts) do
+        register_aliases(updated.id, Scope.partition(updated), [canonical | aliases])
+        {:ok, updated}
+      end
     end
   end
 
@@ -375,7 +467,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
   defp maybe_persist_aliases(entity, entity, _opts), do: :ok
 
   defp maybe_persist_aliases(_entity, updated, opts) do
-    if Map.get(updated.metadata, :durable?, false) do
+    if Map.get(updated.metadata, :durable?, false) and Keyword.get(opts, :persist?, true) do
       case Manager.append(:moments, updated, opts) do
         {:ok, _result} -> :ok
         {:error, _reason} = error -> error
