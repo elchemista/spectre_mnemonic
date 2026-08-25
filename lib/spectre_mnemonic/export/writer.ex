@@ -6,7 +6,7 @@ defmodule SpectreMnemonic.Export.Writer do
   alias SpectreMnemonic.Export.CanonicalJSON
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.JSON
-  alias SpectreMnemonic.Knowledge.SMEM
+  alias SpectreMnemonic.Knowledge.Base, as: KnowledgeBase
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.FileFrame
@@ -117,7 +117,7 @@ defmodule SpectreMnemonic.Export.Writer do
            Manager.replay_fold(opts, %{}, fn %Record{} = record, grouped ->
              {:cont, Map.update(grouped, record.family, [record], &[record | &1])}
            end),
-         {:ok, knowledge_events} <- SMEM.replay(opts),
+         {:ok, knowledge_events} <- KnowledgeBase.events(opts),
          {:ok, atlas} <- Atlas.build(opts),
          active? = Keyword.get(opts, :active?, true),
          :ok <- validate_atlas_for_export(atlas, active?) do

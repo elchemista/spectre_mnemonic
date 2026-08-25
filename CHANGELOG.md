@@ -40,6 +40,25 @@ release declarations.
 
 ### Changed
 
+- Replaced Router/StreamServer/Focus/Recall/Consolidator call chains with
+  caller-owned work and partition-local locks. Removed per-stream processes and
+  their unused ETS registry; persistence remains serialized only at the writer
+  boundary.
+- Moved Vettore lookup, query embedding, BM25 scoring, recall ranking, and
+  consolidation work out of coordinator GenServers. Active collection handles
+  are read from ETS and durable search uses short immutable snapshots.
+- Made intake preserve map `:text` and long code verbatim, build chunks from
+  source byte spans, skip redundant final chunks, lower derivative attention,
+  reuse partition category nodes, and cap extracted nodes.
+- Implemented recall reinforcement, scheduled attention decay, priority/age
+  eviction, and pinned-memory protection. Hot bounds are now application config
+  only and cannot be overridden by an individual caller.
+- Unified Unicode lexical normalization, stopwords, keywords, entities, and
+  whole-word intent boosts across intake, recall, observations, knowledge, and
+  mental models. Fingerprints now use 64 bits and vector matches have a positive
+  similarity floor.
+- Made mission-policy priority affect the runtime attention of generated intake
+  records instead of remaining metadata-only.
 - Updated Vettore to `~> 0.3.5` and replaced local/dynamic vector fallbacks with
   direct `Vettore.Vector` conversion, validation, normalization, cosine/dot
   scoring, Model2Vec f32-matrix mean pooling, and runtime Nx interoperability.
@@ -71,6 +90,38 @@ release declarations.
 
 ### Fixed
 
+- Repaired torn tails in both framed logs before the next append, refused
+  complete CRC corruption, kept post-crash sequence numbers visible, and moved
+  per-path counters out of leaking `persistent_term` entries.
+- Synced append data, atomic snapshots, renames, directory metadata, and
+  recovery-copy removal by default; added explicit `:always`, `:data`, and
+  `:none` durability policies.
+- Cached durable replay projections and Model2Vec model/tokenizer artifacts,
+  removing full-log rescans and repeated model/checksum I/O from hot paths.
+- Rebuilt the active Vettore index from hot moments after restart and moved its
+  handle registry under the long-lived ETS owner so an index restart cannot
+  silently lose earlier semantic candidates.
+- Enforced `limit` with token budgets, deduplicated active/durable flat search,
+  normalized merged ranks through reciprocal-rank fusion, and stopped random
+  low-similarity vectors from becoming universal matches.
+- Applied phone redaction before every derived/storage projection, removed raw
+  forgotten fact values from lifecycle events and exports, and made
+  observations and knowledge honor governance visibility.
+- Made the scheduler enumerate all known partitions, skip semantic job writes
+  without an adapter, and purge derived index state during verified erasure.
+- Removed the unused plaintext `index/durable.term` snapshot and ensured
+  partition erasure drops active Vettore collections and all recovery copies.
+- Made rich intake roll back partial products, hot-only entity resolution stay
+  hot-only, entity merge idempotent and cycle-safe, and link metadata accept
+  only the intended option subset.
+- Made secret AAD deterministic and versioned with legacy-read compatibility,
+  inferred reveal scope from the secret, protected configured authorization and
+  crypto adapters from per-call replacement, and hid cipher fields from
+  `Inspect`.
+- Made `%Date{}` `valid_until` values cover the entire named UTC date, fixed age
+  extraction across sentence boundaries, normalized external string kinds to
+  atoms, and propagated plug `{:error, reason}` results unchanged.
+- Made the evaluation harness isolated, hot-only, and self-cleaning by default.
 - Removed persistence-manager timeouts from large replay, compaction, erasure,
   and verification operations while preserving configurable typed timeouts.
 - Made erasure verify every configured store, evict partition dedupe state,
@@ -90,6 +141,11 @@ release declarations.
 
 ### Security
 
+- Bounded gzip expansion before allocation and separated CRC/framing recovery
+  from safe term decoding, so recovery neither creates atoms nor mistakes
+  not-yet-loaded application atoms for corrupt bytes.
+- Added explicit logs for critical recovery and degraded index/rollback paths
+  while keeping raw memory and secrets out of diagnostics.
 - Reject non-finite and out-of-range float32 embeddings before indexing.
 - Validate `.mnemonic` manifest, trailer, record envelopes, section-specific
   fields, and privacy invariants before returning decoded content.

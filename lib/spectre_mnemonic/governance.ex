@@ -126,10 +126,20 @@ defmodule SpectreMnemonic.Governance do
     end
   end
 
-  @doc "Returns true unless the scoped lifecycle is contradicted or forgotten."
+  @doc "Returns true when the scoped lifecycle and current fact projection are visible."
   @spec search_visible?(binary(), keyword()) :: boolean()
-  def search_visible?(memory_id, opts \\ []),
-    do: state_for(memory_id, opts) not in @terminal_states
+  def search_visible?(memory_id, opts \\ []) do
+    case Identity.fetch_namespace(opts) do
+      {:ok, namespace} ->
+        opts = Keyword.put(opts, :namespace, namespace)
+        event = current_event(memory_id, opts)
+
+        current_state(event) not in @terminal_states and current_fact_value?(event, opts)
+
+      {:error, _reason} ->
+        false
+    end
+  end
 
   @doc "Marks old verified facts stale without mutating their payloads."
   @spec decay(keyword()) :: {:ok, %{stale: non_neg_integer()}} | {:error, term()}
@@ -268,7 +278,7 @@ defmodule SpectreMnemonic.Governance do
               target,
               reason,
               opts,
-              transition_metadata(current, metadata)
+              transition_metadata(current, metadata, target)
             )
 
           case Manager.append(
@@ -366,14 +376,45 @@ defmodule SpectreMnemonic.Governance do
 
   defp materialize_fact(_event), do: :ok
 
-  @spec transition_metadata(map() | nil, map()) :: map()
-  defp transition_metadata(nil, metadata), do: Map.new(metadata)
+  @spec transition_metadata(map() | nil, map(), state()) :: map()
+  defp transition_metadata(_current, metadata, :forgotten) do
+    # A forgotten event is a lifecycle receipt, not another copy of the fact.
+    # In particular, never inherit fact_value (or any other fact payload) from
+    # the prior state: full exports include governance records.
+    metadata
+    |> Map.new()
+    |> Map.drop([
+      :fact_key,
+      :fact_subject,
+      :fact_attribute,
+      :fact_value,
+      "fact_key",
+      "fact_subject",
+      "fact_attribute",
+      "fact_value"
+    ])
+  end
 
-  defp transition_metadata(current, metadata) do
+  defp transition_metadata(nil, metadata, _target), do: Map.new(metadata)
+
+  defp transition_metadata(current, metadata, _target) do
     current
     |> Map.get(:metadata, %{})
     |> Map.merge(Map.new(metadata))
   end
+
+  @spec current_fact_value?(map() | nil, keyword()) :: boolean()
+  defp current_fact_value?(nil, _opts), do: true
+
+  defp current_fact_value?(%{metadata: %{fact_key: fact_key}} = event, opts)
+       when is_binary(fact_key) do
+    case current_fact(fact_key, opts) do
+      nil -> true
+      current -> fact_value(current) == fact_value(event)
+    end
+  end
+
+  defp current_fact_value?(_event, _opts), do: true
 
   @spec normalize_metadata(term()) :: {:ok, map()} | {:error, term()}
   defp normalize_metadata(metadata) when is_map(metadata), do: {:ok, metadata}

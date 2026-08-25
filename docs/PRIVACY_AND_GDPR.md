@@ -77,6 +77,10 @@ guesses scopes and never treats an omitted scope as a wildcard.
 
 - Do not store complete request/response objects when a small, typed projection
   is enough.
+- Phone-like values are redacted before intake derives chunks, summaries,
+  keywords, embeddings, indexes, or durable records unless the caller
+  explicitly selects `sensitive_numbers: :raw`. This is a narrow phone control,
+  not a general PII detector; classify and redact other fields in the host.
 - Keep secrets in `Memory.Secret`; do not duplicate plaintext in ordinary
   moments, metadata, titles, summaries, or logs.
 - Leave embeddings disabled unless semantic retrieval is needed. Consider
@@ -178,6 +182,16 @@ Then independently delete or expire:
 
 `forget/2` is not physical erasure. A successful `erase_partition/1` proves the
 postcondition only for the configured adapters participating in that call.
+The forget transition also removes inherited `fact_*` values from lifecycle
+events and filters governed observations/knowledge/export projections, so the
+value is not reintroduced through the governance audit view.
+
+For the built-in file adapter, “physical” means the rewritten live files and
+reachable recovery copies have been verified and old paths unlinked.
+Filesystem unlink is not forensic media sanitization on SSDs,
+copy-on-write/snapshot storage, backups, or provider replicas. Apply
+encryption-at-rest, key destruction, provider deletion, and media-disposal
+controls where the threat model requires them.
 
 ### Restriction, objection, and automated decisions
 
@@ -201,6 +215,10 @@ describes these responsibilities.
 - Encrypt storage and transport at the infrastructure boundary; do not assume
   the `.mnemonic` container itself is encrypted.
 - Keep secret reveal adapters deny-by-default and test authorization failures.
+- Secret AAD uses a deterministic versioned digest of `{namespace, scope}`.
+  Authorization, crypto adapters, and keys configured by the application take
+  precedence over per-call options, so untrusted recall options cannot replace
+  the reveal policy. Existing legacy AAD remains readable for migration.
 - Avoid raw memory, scope values, prompts, secrets, and exports in logs or
   telemetry. Use request ids, counts, status, and opaque digests.
 - Test restore, compaction, erasure verification, stale-backup resurrection,

@@ -16,6 +16,7 @@ defmodule SpectreMnemonic.Observations do
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Recall.Lexical
 
   @observation_table :mnemonic_observations
   @observation_scope_table :mnemonic_observations_by_scope
@@ -131,9 +132,16 @@ defmodule SpectreMnemonic.Observations do
     source_id = Keyword.get(opts, :source_id)
     confidence_delta = Keyword.get(opts, :confidence_delta, 0.08)
 
-    evidence =
-      [%{source_id: source_id, relation: relation, observed_at: now}]
-      |> Enum.reject(&is_nil(&1.source_id))
+    evidence = [
+      %{
+        source_id: source_id,
+        relation: relation,
+        observed_at: now,
+        confidence_delta: confidence_delta,
+        provider: :manual_verification,
+        manual?: true
+      }
+    ]
 
     # Verification is append-like at the observation level: keep prior evidence
     # and add the new event, then derive the public counters and state from the
@@ -146,7 +154,11 @@ defmodule SpectreMnemonic.Observations do
     observation = %{
       observation
       | evidence: observation.evidence ++ evidence,
-        source_ids: Enum.uniq(observation.source_ids ++ Enum.map(evidence, & &1.source_id)),
+        source_ids:
+          Enum.uniq(
+            observation.source_ids ++
+              (evidence |> Enum.map(& &1.source_id) |> Enum.reject(&is_nil/1))
+          ),
         proof_count: proof_count,
         contradiction_count: contradiction_count,
         confidence: verified_confidence(observation.confidence, relation, confidence_delta),
@@ -351,15 +363,132 @@ defmodule SpectreMnemonic.Observations do
   defp typed_entries(_moment), do: []
 
   @spec visible?(map(), keyword()) :: boolean()
-  defp visible?(memory, opts), do: Scope.match?(memory, opts) and Temporal.match?(memory, opts)
+  defp visible?(memory, opts) do
+    state_opts = Keyword.put(opts, :scope, Scope.scope(memory))
+
+    Scope.match?(memory, opts) and Temporal.match?(memory, opts) and
+      case Map.get(memory, :id) do
+        id when is_binary(id) -> Governance.search_visible?(id, state_opts)
+        _missing -> true
+      end
+  end
 
   @spec build_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
   defp build_observations(entries, now, opts) do
     {facts, typed} = Enum.split_with(entries, &(&1.type == :fact))
 
-    build_fact_observations(facts, now, opts) ++
-      build_typed_observations(typed, now, opts)
+    (build_fact_observations(facts, now, opts) ++
+       build_typed_observations(typed, now, opts))
+    |> Enum.map(&merge_manual_verification(&1, opts))
   end
+
+  @spec merge_manual_verification(Observation.t(), keyword()) :: Observation.t()
+  defp merge_manual_verification(%Observation{} = fresh, opts) do
+    with [{_id, %Observation{} = existing}] <- :ets.lookup(@observation_table, fresh.id),
+         true <- Scope.match?(existing, Keyword.put(opts, :scope, fresh.scope)),
+         [_ | _] = manual <- Enum.filter(existing.evidence, &manual_verification?/1) do
+      apply_manual_verification(fresh, manual)
+    else
+      _missing_or_unscoped -> fresh
+    end
+  rescue
+    ArgumentError -> fresh
+  end
+
+  @spec manual_verification?(term()) :: boolean()
+  defp manual_verification?(evidence) when is_map(evidence) do
+    Map.get(evidence, :manual?) == true or
+      Map.get(evidence, "manual?") == true or
+      Map.get(evidence, :provider) == :manual_verification or
+      Map.get(evidence, "provider") in [:manual_verification, "manual_verification"]
+  end
+
+  defp manual_verification?(_evidence), do: false
+
+  @spec apply_manual_verification(Observation.t(), [map()]) :: Observation.t()
+  defp apply_manual_verification(fresh, manual) do
+    manual = Enum.uniq_by(manual, &verification_identity/1)
+
+    merged =
+      Enum.reduce(manual, fresh, fn event, observation ->
+        relation = map_value(event, :relation, :supports)
+        delta = map_value(event, :confidence_delta, 0.08)
+        source_id = map_value(event, :source_id, nil)
+
+        proof_count = observation.proof_count + if(relation == :supports, do: 1, else: 0)
+
+        contradiction_count =
+          observation.contradiction_count +
+            if(relation in [:weakens, :contradicts], do: 1, else: 0)
+
+        %{
+          observation
+          | proof_count: proof_count,
+            contradiction_count: contradiction_count,
+            confidence: verified_confidence(observation.confidence, relation, delta),
+            source_ids:
+              if(is_binary(source_id),
+                do: Enum.uniq(observation.source_ids ++ [source_id]),
+                else: observation.source_ids
+              ),
+            last_verified_at:
+              latest_datetime(
+                observation.last_verified_at,
+                map_value(event, :observed_at, nil)
+              ),
+            trend: verified_trend(relation),
+            state: state(proof_count, contradiction_count)
+        }
+      end)
+
+    evidence =
+      Enum.uniq_by(fresh.evidence ++ manual, fn event ->
+        if manual_verification?(event),
+          do: {:manual, verification_identity(event)},
+          else: {:derived, verification_identity(event)}
+      end)
+
+    metadata =
+      update_in(merged.metadata, [:provenance], fn
+        provenance when is_map(provenance) ->
+          provenance
+          |> Map.put(:source_ids, merged.source_ids)
+          |> Map.put(:confidence, merged.confidence)
+          |> Map.put(:last_verified_at, merged.last_verified_at)
+
+        _missing ->
+          %{
+            source_ids: merged.source_ids,
+            confidence: merged.confidence,
+            last_verified_at: merged.last_verified_at
+          }
+      end)
+
+    %{merged | evidence: evidence, metadata: metadata}
+  end
+
+  @spec verification_identity(map()) :: tuple()
+  defp verification_identity(event) do
+    {
+      map_value(event, :source_id, nil),
+      map_value(event, :relation, nil),
+      map_value(event, :observed_at, nil),
+      map_value(event, :confidence_delta, nil)
+    }
+  end
+
+  @spec map_value(map(), atom(), term()) :: term()
+  defp map_value(map, key, default) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  @spec latest_datetime(term(), term()) :: DateTime.t() | nil
+  defp latest_datetime(%DateTime{} = left, %DateTime{} = right),
+    do: if(DateTime.compare(left, right) == :lt, do: right, else: left)
+
+  defp latest_datetime(%DateTime{} = value, _other), do: value
+  defp latest_datetime(_other, %DateTime{} = value), do: value
+  defp latest_datetime(_left, _right), do: nil
 
   @spec build_fact_observations([map()], DateTime.t(), keyword()) :: [Observation.t()]
   defp build_fact_observations(entries, now, opts) do
@@ -744,20 +873,10 @@ defmodule SpectreMnemonic.Observations do
   end
 
   @spec keywords(binary()) :: [binary()]
-  defp keywords(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 2))
-    |> Enum.uniq()
-  end
+  defp keywords(text), do: Lexical.keywords(text, 2)
 
   @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
-    |> List.flatten()
-    |> Enum.uniq()
-  end
+  defp entities(text), do: Lexical.entities(text)
 
   @spec normalized_set([term()]) :: MapSet.t(binary())
   defp normalized_set(values) do

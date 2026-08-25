@@ -37,7 +37,7 @@ defmodule SpectreMnemonic.Knowledge.Compact do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       cfg = Base.config(opts)
 
-      with {:ok, existing_events} <- SMEM.replay(cfg),
+      with {:ok, existing_events} <- Base.events(cfg),
            input <- build_input(existing_events, cfg, opts),
            {:ok, compacted} <- run_adapter(input, opts),
            {:ok, events} <- normalize_output(compacted, cfg),

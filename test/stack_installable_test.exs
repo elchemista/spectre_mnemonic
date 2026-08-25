@@ -124,6 +124,16 @@ defmodule SpectreMnemonic.StackInstallableTest do
              )
   end
 
+  test "every configured isolation dimension must resolve to a concrete value" do
+    assert {:error, {:mnemonic_isolation_dimension_required, :flow}} =
+             Memory.options(Agent,
+               agent: Agent,
+               subject: Subject.new("account-42"),
+               conversation: "conversation-42",
+               task: "task-42"
+             )
+  end
+
   test "linked channels share only the explicitly supplied canonical Subject scope" do
     subject = Subject.new("account-42")
 
@@ -145,7 +155,9 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "conversation"},
                agent: Agent,
                subject: subject,
-               conversation: "linked-logical-thread"
+               conversation: "linked-logical-thread",
+               flow: :linked,
+               task: "linked-task"
              )
 
     assert {:ok, whatsapp_opts} =
@@ -154,7 +166,9 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "conversation"},
                agent: Agent,
                subject: subject,
-               conversation: "linked-logical-thread"
+               conversation: "linked-logical-thread",
+               flow: :linked,
+               task: "linked-task"
              )
 
     assert telegram_opts[:subject] == subject
@@ -167,7 +181,9 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "conversation"},
                agent: Agent,
                subject: Subject.new("account-99"),
-               conversation: "linked-logical-thread"
+               conversation: "linked-logical-thread",
+               flow: :linked,
+               task: "linked-task"
              )
 
     refute other_subject_opts[:scope] == telegram_opts[:scope]
@@ -196,6 +212,8 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "stale-instance-base"},
                agent: Agent,
                subject: subject,
+               flow: :agent_ref,
+               task: "agent-ref-task",
                run_metadata: %{agent_ref: first_ref}
              )
 
@@ -205,6 +223,8 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "stale-instance-base"},
                agent: Agent,
                subject: subject,
+               flow: :agent_ref,
+               task: "agent-ref-task",
                run_metadata: %{agent_ref: first_ref}
              )
 
@@ -214,6 +234,8 @@ defmodule SpectreMnemonic.StackInstallableTest do
                state: %State{conversation_id: "stale-instance-base"},
                agent: Agent,
                subject: subject,
+               flow: :agent_ref,
+               task: "agent-ref-task",
                run_metadata: %{agent_ref: second_ref}
              )
 

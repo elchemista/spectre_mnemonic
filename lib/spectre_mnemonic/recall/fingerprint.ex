@@ -2,24 +2,26 @@ defmodule SpectreMnemonic.Recall.Fingerprint do
   @moduledoc """
   Builds compact fingerprints for adapter-free recall.
 
-  This is a simple SimHash-style fingerprint: each token votes across 32 bits,
+  This is a simple SimHash-style fingerprint: each token votes across 64 bits,
   then hamming distance between fingerprints gives a rough similarity signal.
   It is deliberately small and local so recall keeps working without embeddings.
   """
 
   import Bitwise
 
-  @bits 32
-  @range 4_294_967_296
+  alias SpectreMnemonic.Recall.Lexical
 
-  @doc "Returns a 32-bit fingerprint for text or any inspectable term."
+  @bits 64
+
+  @doc "Returns a stable 64-bit fingerprint for text or any inspectable term."
   @spec build(term()) :: non_neg_integer()
   def build(input) do
     input
     |> to_text()
-    |> tokens()
+    |> Lexical.tokens()
+    |> Enum.reject(&(String.length(&1) < 3))
     |> case do
-      [] -> [:erlang.phash2(to_text(input), @range)]
+      [] -> [to_text(input)]
       tokens -> tokens
     end
     |> Enum.reduce(List.duplicate(0, @bits), &vote_token/2)
@@ -45,7 +47,7 @@ defmodule SpectreMnemonic.Recall.Fingerprint do
 
   @spec vote_token(term(), [integer()]) :: [integer()]
   defp vote_token(token, votes) do
-    hash = :erlang.phash2(token, @range)
+    hash = stable_hash(token)
 
     Enum.with_index(votes)
     |> Enum.map(fn {score, bit} ->
@@ -62,12 +64,10 @@ defmodule SpectreMnemonic.Recall.Fingerprint do
     end)
   end
 
-  @spec tokens(binary()) :: [binary()]
-  defp tokens(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^a-z0-9_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 3))
+  @spec stable_hash(term()) :: non_neg_integer()
+  defp stable_hash(token) do
+    <<hash::unsigned-64, _rest::binary>> = :crypto.hash(:sha256, to_string(token))
+    hash
   end
 
   @spec to_text(term()) :: binary()

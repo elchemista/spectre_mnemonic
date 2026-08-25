@@ -97,11 +97,6 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     assert_receive {:blocking_search_entered, ^ref}
 
     rebuild_task = Task.async(fn -> DurableIndex.rebuild() end)
-
-    assert eventually(fn -> manager_has_queued_replay?() end)
-    send(Manager, {:release_search, ref})
-
-    assert {:ok, []} = Task.await(search_task, 1_000)
     assert_receive {:blocking_replay_entered, ^ref}
 
     concurrent = durable_record("concurrent-upsert", "concurrent rebuild sentinel", scope)
@@ -110,8 +105,43 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     send(Manager, {:release_replay, ref})
     assert :ok = Task.await(rebuild_task, 1_000)
 
+    send(search_task.pid, {:release_search, ref})
+    assert {:ok, _results} = Task.await(search_task, 1_000)
+
     assert {:ok, results} = DurableIndex.search("concurrent rebuild sentinel", scope: scope)
     assert Enum.any?(results, &(&1.id == "concurrent-upsert"))
+  end
+
+  test "durable scoring runs in the caller while the index accepts writes" do
+    scope = {:tenant, "caller-scoring"}
+    ref = make_ref()
+
+    assert :ok =
+             DurableIndex.upsert(
+               durable_record("first-caller-doc", "caller scoring sentinel", scope)
+             )
+
+    Application.put_env(:spectre_mnemonic, :embedding_adapter, __MODULE__.BlockingEmbedding)
+    test_pid = self()
+
+    search_task =
+      Task.async(fn ->
+        DurableIndex.search("caller scoring sentinel",
+          scope: scope,
+          test_pid: test_pid,
+          ref: ref
+        )
+      end)
+
+    assert_receive {:blocking_embedding_entered, ^ref, search_pid}
+
+    assert :ok =
+             DurableIndex.upsert(
+               durable_record("second-caller-doc", "write while scoring", scope)
+             )
+
+    send(search_pid, {:release_embedding, ref})
+    assert {:ok, [_result | _rest]} = Task.await(search_task, 1_000)
   end
 
   test "durable index keeps serving its last valid state when replay fails" do
@@ -231,36 +261,6 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     )
   end
 
-  defp manager_has_queued_replay? do
-    Manager
-    |> Process.whereis()
-    |> Process.info(:messages)
-    |> case do
-      {:messages, messages} ->
-        Enum.any?(messages, fn
-          {:"$gen_call", _from, {:replay_all, _opts}} -> true
-          _other -> false
-        end)
-
-      _missing ->
-        false
-    end
-  end
-
-  defp eventually(fun, attempts \\ 200)
-  defp eventually(_fun, 0), do: false
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      receive do
-      after
-        5 -> eventually(fun, attempts - 1)
-      end
-    end
-  end
-
   defmodule BlockingAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
@@ -306,5 +306,21 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
 
     @impl SpectreMnemonic.Persistence.Store.Adapter
     def replay(_opts), do: {:error, :unavailable}
+  end
+
+  defmodule BlockingEmbedding do
+    @behaviour SpectreMnemonic.Embedding.Adapter
+
+    @impl SpectreMnemonic.Embedding.Adapter
+    def embed(_input, opts) do
+      ref = Keyword.fetch!(opts, :ref)
+      send(Keyword.fetch!(opts, :test_pid), {:blocking_embedding_entered, ref, self()})
+
+      receive do
+        {:release_embedding, ^ref} -> {:ok, [1.0, 0.0]}
+      after
+        2_000 -> {:error, :embedding_release_timeout}
+      end
+    end
   end
 end

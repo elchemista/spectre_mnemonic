@@ -234,7 +234,7 @@ defmodule SpectreMnemonic.Export.Reader do
           {:ok, acc} | {:error, term()}
         when acc: term()
   defp fold_frames(path, acc, fun) do
-    case File.open(path, [:read, :binary]) do
+    case File.open(path, [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
           read_frames(io, 1, acc, fun)
@@ -351,14 +351,60 @@ defmodule SpectreMnemonic.Export.Reader do
   end
 
   @spec gunzip(binary(), pos_integer(), pos_integer()) :: {:ok, binary()} | {:error, term()}
-  defp gunzip(payload, sequence, maximum) do
-    decoded = :zlib.gunzip(payload)
+  defp gunzip(<<0x1F, 0x8B, _rest::binary>> = payload, sequence, maximum) do
+    zstream = :zlib.open()
 
-    if byte_size(decoded) <= maximum,
-      do: {:ok, decoded},
-      else: {:error, {:mnemonic_expanded_frame_too_large, sequence}}
+    try do
+      :ok = :zlib.inflateInit(zstream, 31)
+      bounded_inflate(zstream, payload, sequence, maximum, 0, [])
+    after
+      safe_inflate_end(zstream)
+      :zlib.close(zstream)
+    end
   rescue
     _exception -> {:error, {:invalid_mnemonic_compression, sequence}}
+  catch
+    _kind, _reason -> {:error, {:invalid_mnemonic_compression, sequence}}
+  end
+
+  defp gunzip(_payload, sequence, _maximum),
+    do: {:error, {:invalid_mnemonic_compression, sequence}}
+
+  @spec bounded_inflate(
+          :zlib.zstream(),
+          iodata(),
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          [iodata()]
+        ) :: {:ok, binary()} | {:error, term()}
+  defp bounded_inflate(zstream, input, sequence, maximum, expanded, chunks) do
+    case :zlib.safeInflate(zstream, input) do
+      {status, output} when status in [:continue, :finished] ->
+        output_size = IO.iodata_length(output)
+        next_size = expanded + output_size
+
+        cond do
+          next_size > maximum ->
+            {:error, {:mnemonic_expanded_frame_too_large, sequence}}
+
+          status == :finished ->
+            {:ok, chunks |> Enum.reverse([output]) |> IO.iodata_to_binary()}
+
+          true ->
+            bounded_inflate(zstream, [], sequence, maximum, next_size, [output | chunks])
+        end
+
+      {:need_dictionary, _adler, _output} ->
+        {:error, {:invalid_mnemonic_compression, sequence}}
+    end
+  end
+
+  @spec safe_inflate_end(:zlib.zstream()) :: :ok
+  defp safe_inflate_end(zstream) do
+    :zlib.inflateEnd(zstream)
+  rescue
+    _exception -> :ok
   end
 
   @spec validate_frame(term(), pos_integer()) :: :ok | {:error, term()}

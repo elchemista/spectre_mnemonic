@@ -16,6 +16,7 @@ defmodule SpectreMnemonic.Intake.Memory do
   """
   @type t :: %__MODULE__{
           input: term(),
+          source_text: binary(),
           namespace: binary(),
           text: binary(),
           kind: atom(),
@@ -42,8 +43,10 @@ defmodule SpectreMnemonic.Intake.Memory do
           halted?: boolean()
         }
 
+  @derive {Inspect, except: [:input, :source_text]}
   defstruct [
     :input,
+    :source_text,
     :namespace,
     :text,
     :kind,

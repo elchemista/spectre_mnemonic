@@ -50,6 +50,8 @@ defmodule SpectreMnemonic.Secrets do
   """
   @spec reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
   def reveal(%Secret{} = secret, opts) do
+    opts = secret_context_opts(secret, opts)
+
     with {:ok, opts} <- Identity.put_namespace(opts),
          true <- Scope.match?(secret, opts) do
       do_reveal(secret, opts)
@@ -125,8 +127,7 @@ defmodule SpectreMnemonic.Secrets do
   def shred(scope, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(Keyword.put(opts, :scope, scope)) do
       adapter =
-        Keyword.get(opts, :crypto_adapter) ||
-          Application.get_env(:spectre_mnemonic, :secret_crypto_adapter) || AESGCM
+        configured_adapter(:secret_crypto_adapter, opts, :crypto_adapter, AESGCM)
 
       context = %{
         namespace: Identity.namespace!(opts),
@@ -159,10 +160,7 @@ defmodule SpectreMnemonic.Secrets do
 
   @spec crypto_adapter(keyword(), :encrypt | :decrypt) :: {:ok, module()} | {:error, term()}
   defp crypto_adapter(opts, operation) do
-    adapter =
-      Keyword.get(opts, :crypto_adapter) ||
-        Application.get_env(:spectre_mnemonic, :secret_crypto_adapter) ||
-        AESGCM
+    adapter = configured_adapter(:secret_crypto_adapter, opts, :crypto_adapter, AESGCM)
 
     if is_atom(adapter) and Code.ensure_loaded?(adapter) and
          function_exported?(adapter, operation, 3) do
@@ -176,8 +174,12 @@ defmodule SpectreMnemonic.Secrets do
           {:ok, module()} | {:error, :authorization_not_configured}
   defp authorization_adapter(opts) do
     adapter =
-      Keyword.get(opts, :authorization_adapter) ||
-        Application.get_env(:spectre_mnemonic, :secret_authorization_adapter)
+      configured_adapter(
+        :secret_authorization_adapter,
+        opts,
+        :authorization_adapter,
+        nil
+      )
 
     cond do
       is_nil(adapter) ->
@@ -205,6 +207,27 @@ defmodule SpectreMnemonic.Secrets do
       metadata: secret.metadata,
       authorization_context: Keyword.get(opts, :authorization_context)
     }
+  end
+
+  @spec secret_context_opts(Secret.t(), keyword()) :: keyword()
+  defp secret_context_opts(secret, opts) do
+    opts
+    |> Keyword.put_new(:scope, secret.scope)
+    |> maybe_put_secret_namespace(secret.namespace)
+  end
+
+  @spec maybe_put_secret_namespace(keyword(), term()) :: keyword()
+  defp maybe_put_secret_namespace(opts, namespace) when is_binary(namespace),
+    do: Keyword.put_new(opts, :namespace, namespace)
+
+  defp maybe_put_secret_namespace(opts, _namespace), do: opts
+
+  @spec configured_adapter(atom(), keyword(), atom(), term()) :: term()
+  defp configured_adapter(config_key, opts, option_key, default) do
+    case Application.get_env(:spectre_mnemonic, config_key) do
+      nil -> Keyword.get(opts, option_key, default)
+      configured -> configured
+    end
   end
 
   @spec lock_with_authorization(Secret.t(), term(), keyword()) :: Secret.t()

@@ -190,21 +190,90 @@ defmodule SpectreMnemonic do
         end)
         |> Enum.with_index()
         |> Enum.map(fn {moment, index} ->
+          rank = index + 1
+
           %SearchResult{
             source: :active,
             namespace: moment.namespace,
             scope: moment.scope,
             family: :moments,
             id: moment.id,
-            rank: index + 1,
+            rank: rank,
+            score: reciprocal_rank_score(rank),
+            scores: %{active_rank: rank},
             record: moment,
             inserted_at: moment.inserted_at
           }
         end)
 
-      {:ok, active_results ++ packet.search_results}
+      durable_results =
+        packet.search_results
+        |> Enum.with_index(1)
+        |> Enum.map(fn {result, fallback_rank} ->
+          normalize_search_rank(result, fallback_rank)
+        end)
+
+      results =
+        (active_results ++ durable_results)
+        |> Enum.reduce(%{}, &merge_search_result/2)
+        |> Map.values()
+        |> Enum.sort_by(&{-&1.score, search_source_priority(&1.source), search_recency(&1)})
+        |> Enum.take(Keyword.get(opts, :limit, 10))
+        |> Enum.with_index(1)
+        |> Enum.map(fn {result, index} -> %{result | rank: index} end)
+
+      {:ok, results}
     end
   end
+
+  @spec normalize_search_rank(SearchResult.t(), pos_integer()) :: SearchResult.t()
+  defp normalize_search_rank(%SearchResult{} = result, fallback_rank) do
+    rank = if is_integer(result.rank) and result.rank > 0, do: result.rank, else: fallback_rank
+    raw_score = result.score
+
+    %{
+      result
+      | rank: rank,
+        score: reciprocal_rank_score(rank),
+        scores: Map.put(result.scores, :persistent_raw, raw_score)
+    }
+  end
+
+  @spec merge_search_result(SearchResult.t(), map()) :: map()
+  defp merge_search_result(result, acc) do
+    key = search_identity(result)
+
+    Map.update(acc, key, result, fn existing ->
+      preferred = if existing.source == :active, do: existing, else: result
+      sources = Enum.uniq([existing.source, result.source])
+
+      %{
+        preferred
+        | score: max(existing.score, result.score),
+          rank: min(existing.rank || 1, result.rank || 1),
+          scores: Map.merge(existing.scores, result.scores),
+          metadata: Map.put(Map.merge(existing.metadata, result.metadata), :sources, sources)
+      }
+    end)
+  end
+
+  @spec search_identity(SearchResult.t()) :: term()
+  defp search_identity(result) do
+    {result.namespace, result.scope, result.family, result.id || result.record_id}
+  end
+
+  @spec reciprocal_rank_score(pos_integer()) :: float()
+  defp reciprocal_rank_score(rank), do: 1.0 / (60 + rank)
+
+  @spec search_source_priority(atom() | nil) :: non_neg_integer()
+  defp search_source_priority(:active), do: 0
+  defp search_source_priority(_source), do: 1
+
+  @spec search_recency(SearchResult.t()) :: integer()
+  defp search_recency(%SearchResult{inserted_at: %DateTime{} = inserted_at}),
+    do: -DateTime.to_unix(inserted_at, :microsecond)
+
+  defp search_recency(_result), do: 0
 
   @doc """
   Consolidates evidence-grounded observations from existing memory.

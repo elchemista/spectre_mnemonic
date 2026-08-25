@@ -15,6 +15,7 @@ defmodule SpectreMnemonic.Durable.Index do
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Family
+  alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Record
@@ -50,7 +51,36 @@ defmodule SpectreMnemonic.Durable.Index do
 
   @doc "Searches durable memory with local hybrid scoring."
   @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]}
-  def search(cue, opts \\ []), do: call_if_running({:search, cue, opts}, {:ok, []})
+  def search(cue, opts \\ []) do
+    case call_if_running(:search_snapshot, :missing) do
+      state when is_map(state) ->
+        prepared = ensure_stats(state)
+
+        if prepared.dirty? != state.dirty? do
+          _result = call_if_running({:cache_stats, state.revision, prepared})
+        end
+
+        {:ok, search_state(prepared, cue, opts)}
+
+      _missing ->
+        {:ok, []}
+    end
+  rescue
+    exception ->
+      Logger.warning(
+        "durable index search failed exception=#{inspect(exception.__struct__)} " <>
+          "reason=#{Exception.message(exception)}"
+      )
+
+      {:ok, []}
+  catch
+    kind, reason ->
+      Logger.warning(
+        "durable index search failed kind=#{inspect(kind)} reason=#{inspect(reason)}"
+      )
+
+      {:ok, []}
+  end
 
   @doc "Rebuilds the index from persistent replay."
   @spec rebuild(keyword()) :: :ok | {:error, term()}
@@ -77,9 +107,16 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec reset :: :ok
   def reset, do: call_if_running(:reset)
 
+  @doc false
+  @spec purge_legacy_snapshot(keyword()) :: :ok | {:error, term()}
+  def purge_legacy_snapshot(opts \\ []) do
+    FramedLog.remove(snapshot_path(opts), Keyword.put_new(opts, :sync, :always))
+  end
+
   @impl GenServer
   @spec init(keyword()) :: {:ok, map()}
-  def init(_opts) do
+  def init(opts) do
+    _result = purge_legacy_snapshot(opts)
     send(self(), :rebuild)
     {:ok, empty_state()}
   end
@@ -96,10 +133,20 @@ defmodule SpectreMnemonic.Durable.Index do
     {:noreply, state}
   end
 
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, _reason},
+        %{rebuild: %{monitor: monitor}} = state
+      ) do
+    {:noreply, %{state | rebuild: nil}}
+  end
+
+  def handle_info({:DOWN, _monitor, :process, _pid, _reason}, state), do: {:noreply, state}
+
   @impl GenServer
-  def handle_call(:begin_rebuild, _from, %{rebuild: nil} = state) do
+  def handle_call(:begin_rebuild, {caller, _tag}, %{rebuild: nil} = state) do
     ref = make_ref()
-    {:reply, {:ok, ref}, %{state | rebuild: %{ref: ref, pending: []}}}
+    monitor = Process.monitor(caller)
+    {:reply, {:ok, ref}, %{state | rebuild: %{ref: ref, pending: [], monitor: monitor}}}
   end
 
   def handle_call(:begin_rebuild, _from, state) do
@@ -108,14 +155,16 @@ defmodule SpectreMnemonic.Durable.Index do
 
   def handle_call({:finish_rebuild, ref, {:ok, records}}, _from, state) do
     case state.rebuild do
-      %{ref: ^ref, pending: pending} ->
-        state =
+      %{ref: ^ref, pending: pending, monitor: monitor} ->
+        Process.demonitor(monitor, [:flush])
+
+        rebuilt =
           records
           |> merge_rebuild_records(Enum.reverse(pending))
           |> index_records()
-          |> persist_snapshot()
 
-        {:reply, :ok, state}
+        rebuilt = %{rebuilt | revision: state.revision + 1}
+        {:reply, :ok, rebuilt}
 
       _stale ->
         {:reply, {:error, :stale_rebuild}, state}
@@ -124,8 +173,12 @@ defmodule SpectreMnemonic.Durable.Index do
 
   def handle_call({:finish_rebuild, ref, {:error, reason}}, _from, state) do
     case state.rebuild do
-      %{ref: ^ref} -> {:reply, {:error, reason}, %{state | rebuild: nil}}
-      _stale -> {:reply, {:error, :stale_rebuild}, state}
+      %{ref: ^ref, monitor: monitor} ->
+        Process.demonitor(monitor, [:flush])
+        {:reply, {:error, reason}, %{state | rebuild: nil}}
+
+      _stale ->
+        {:reply, {:error, :stale_rebuild}, state}
     end
   end
 
@@ -139,9 +192,27 @@ defmodule SpectreMnemonic.Durable.Index do
     {:reply, {:ok, search_state(state, cue, opts)}, state}
   end
 
+  def handle_call(:search_snapshot, _from, state), do: {:reply, state, state}
+
+  def handle_call({:cache_stats, revision, prepared}, _from, %{revision: revision} = state) do
+    state = %{
+      state
+      | docs: prepared.docs,
+        doc_freq: prepared.doc_freq,
+        avg_len: prepared.avg_len,
+        total_docs: prepared.total_docs,
+        dirty?: false
+    }
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:cache_stats, _revision, _prepared}, _from, state),
+    do: {:reply, :stale, state}
+
   def handle_call(:reset, _from, _state) do
     state = empty_state()
-    File.rm(snapshot_path([]))
+    _result = purge_legacy_snapshot([])
     {:reply, :ok, state}
   end
 
@@ -161,6 +232,7 @@ defmodule SpectreMnemonic.Durable.Index do
       avg_len: 0.0,
       total_docs: 0,
       dirty?: false,
+      revision: 0,
       rebuild: nil
     }
   end
@@ -182,7 +254,10 @@ defmodule SpectreMnemonic.Durable.Index do
   @spec upsert_record(map(), Record.t()) :: map()
   defp upsert_record(state, record) do
     updated = absorb_record(record, state)
-    if updated == state, do: state, else: %{updated | dirty?: true}
+
+    if updated == state,
+      do: state,
+      else: %{updated | dirty?: true, revision: state.revision + 1}
   end
 
   @spec track_rebuild_record(map(), Record.t()) :: map()
@@ -477,7 +552,7 @@ defmodule SpectreMnemonic.Durable.Index do
       is_binary(statement) -> statement
       is_binary(query) and is_binary(answer) -> query <> "\n" <> answer
       is_binary(name) -> name
-      true -> payload |> inspect(limit: 20) |> to_string()
+      true -> ""
     end
   end
 
@@ -575,16 +650,6 @@ defmodule SpectreMnemonic.Durable.Index do
   defp cue_text(%QueryContext{text: text}), do: String.downcase(text)
   defp cue_text(cue) when is_binary(cue), do: String.downcase(cue)
   defp cue_text(cue), do: cue |> inspect() |> String.downcase()
-
-  @spec persist_snapshot(map()) :: map()
-  defp persist_snapshot(state) do
-    path = snapshot_path([])
-    File.mkdir_p!(Path.dirname(path))
-    File.write(path, :erlang.term_to_binary(state, [:compressed]), [:binary])
-    state
-  rescue
-    _exception -> state
-  end
 
   @spec snapshot_path(keyword()) :: Path.t()
   defp snapshot_path(opts) do

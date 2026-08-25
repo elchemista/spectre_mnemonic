@@ -5,7 +5,13 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
   alias SpectreMnemonic.Memory.Observation
   alias SpectreMnemonic.Reflection.Packet
 
-  test "observation consolidation tracks supporting and weakening evidence by scope" do
+  test "observation consolidation keeps support for only the current governed fact" do
+    {:ok, %{moment: conflict}} =
+      SpectreMnemonic.signal("Alice email is old@example.com",
+        persist?: true,
+        scope: {:user, "alice"}
+      )
+
     {:ok, %{moment: first}} =
       SpectreMnemonic.signal("Alice email is alice@example.com",
         persist?: true,
@@ -18,12 +24,6 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
         scope: {:user, "alice"}
       )
 
-    {:ok, %{moment: conflict}} =
-      SpectreMnemonic.signal("Alice email is old@example.com",
-        persist?: true,
-        scope: {:user, "alice"}
-      )
-
     assert {:ok, observations} = SpectreMnemonic.consolidate_observations(scope: {:user, "alice"})
 
     assert %Observation{} =
@@ -32,12 +32,13 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
 
     assert current.scope == {:user, "alice"}
     assert current.proof_count == 2
-    assert current.contradiction_count == 1
+    assert current.contradiction_count == 0
     assert current.state == :promoted
-    assert current.trend == :weakening
+    assert current.trend == :strengthening
     assert current.metadata.observation_type == :fact
     assert Enum.sort(current.source_ids) == Enum.sort([first.id, second.id])
-    assert Enum.any?(current.evidence, &(&1.source_id == conflict.id and &1.relation == :weakens))
+    refute Enum.any?(current.evidence, &(&1.source_id == conflict.id))
+    refute Enum.any?(observations, &(&1.statement == "alice email is old@example.com"))
 
     assert {:ok, [found | _]} =
              SpectreMnemonic.search_observations("Alice email", scope: {:user, "alice"})
@@ -220,6 +221,17 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert verified.proof_count == observation.proof_count + 1
     assert verified.confidence > observation.confidence
     assert verified.last_verified_at
+
+    assert {:ok, [reconsolidated]} = SpectreMnemonic.consolidate_observations()
+    assert reconsolidated.proof_count == verified.proof_count
+    assert reconsolidated.confidence >= verified.confidence
+    assert reconsolidated.last_verified_at == verified.last_verified_at
+
+    assert Enum.any?(reconsolidated.evidence, fn evidence ->
+             evidence.source_id == moment.id and evidence.relation == :supports and
+               Map.get(evidence, :provider) == :manual_verification and
+               Map.get(evidence, :confidence_delta) == 0.02
+           end)
   end
 
   test "verify_observation lowers confidence for weakening and contradictory evidence" do
@@ -779,6 +791,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert packet.root.metadata.mission == :code_agent
     assert packet.root.metadata.mission_policy == SpectreMnemonic.Intake.MissionPolicy
     assert packet.root.metadata.mission_priority > 1.0
+    assert_in_delta packet.root.attention, 2.0 * packet.root.metadata.mission_priority, 1.0e-9
     assert packet.root.metadata.extraction_mode == :technical
     assert :todo in packet.root.metadata.tags
     assert :api_contract in packet.root.metadata.mission_categories
@@ -814,6 +827,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
     assert packet.root.metadata.mission_priority == 2.5
     assert packet.root.metadata.extraction_mode == :custom
     assert packet.root.metadata.extraction_profile[:remember] == [:custom_learning]
+    assert_in_delta packet.root.attention, 5.0, 1.0e-9
   end
 
   defmodule FailingReadStore do

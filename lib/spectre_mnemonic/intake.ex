@@ -19,6 +19,8 @@ defmodule SpectreMnemonic.Intake do
   payload shapes.
   """
 
+  require Logger
+
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Graph.Resolver
@@ -33,6 +35,8 @@ defmodule SpectreMnemonic.Intake do
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Memory.Signal
   alias SpectreMnemonic.Memory.Temporal
+  alias SpectreMnemonic.Recall.Lexical
+  alias SpectreMnemonic.Redaction
   alias SpectreMnemonic.Result
 
   @default_chunk_words 180
@@ -42,6 +46,18 @@ defmodule SpectreMnemonic.Intake do
   @default_cross_memory_similarity_threshold 0.24
   @default_max_related_edges 40
   @default_max_cross_memory_edges 20
+  @default_max_extracted_nodes 64
+
+  @input_kind_by_string %{
+    "chat" => :chat,
+    "code" => :code,
+    "event" => :event,
+    "note" => :note,
+    "prompt" => :prompt,
+    "structured_event" => :structured_event,
+    "task" => :task,
+    "text" => :text
+  }
 
   @type envelope :: Memory.t()
 
@@ -146,6 +162,10 @@ defmodule SpectreMnemonic.Intake do
          errors: memory.errors,
          persistence: persistence_status(opts)
        }}
+    else
+      {:error, reason} ->
+        rollback_intake(memory, opts)
+        {:error, reason}
     end
   end
 
@@ -189,12 +209,17 @@ defmodule SpectreMnemonic.Intake do
   defp normalize(input, opts) do
     # Keep JSON-looking strings as text and normalize at the edge. I do not want
     # random webhook shapes leaking into the rest of the system wearing a badge.
-    text = text_projection(input)
+    source_text = text_projection(input)
+    text = Redaction.apply(source_text, opts)
 
-    if String.trim(text) == "" do
+    if String.trim(source_text) == "" do
       {:error, :empty_memory}
     else
-      kind = Keyword.get(opts, :kind) || input_kind(input) || infer_kind(input, text)
+      kind =
+        opts
+        |> Keyword.get(:kind, input_kind(input) || infer_kind(input, text))
+        |> normalize_kind(input, text)
+
       now = DateTime.utc_now()
       temporal = Temporal.from_opts(opts, now)
       mission = Keyword.get(opts, :mission)
@@ -203,7 +228,9 @@ defmodule SpectreMnemonic.Intake do
       metadata =
         input_metadata(input)
         |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
+        |> Redaction.apply_term(opts)
         |> Identity.put_context(opts)
+        |> Map.put(:intake_run_id, Identity.generate("intake", opts))
         |> maybe_put(:mission, mission)
         |> maybe_put(:extraction_mode, extraction_mode)
         |> Temporal.put_metadata(temporal)
@@ -211,6 +238,7 @@ defmodule SpectreMnemonic.Intake do
       {:ok,
        %Memory{
          input: input,
+         source_text: source_text,
          namespace: Identity.namespace!(opts),
          text: text,
          kind: kind,
@@ -225,8 +253,15 @@ defmodule SpectreMnemonic.Intake do
          valid_from: temporal.valid_from,
          valid_until: temporal.valid_until,
          metadata: metadata,
-         tags: List.wrap(Keyword.get(opts, :tags) || metadata_value(input, :tags) || []),
-         title: Keyword.get(opts, :title) || title_for(input, text, kind),
+         tags:
+           opts
+           |> Keyword.get(:tags, metadata_value(input, :tags) || [])
+           |> List.wrap()
+           |> Redaction.apply_term(opts),
+         title:
+           (Keyword.get(opts, :title) || title_for(input, text, kind))
+           |> to_string()
+           |> Redaction.apply(opts),
          secret?: false,
          label: nil
        }}
@@ -292,7 +327,7 @@ defmodule SpectreMnemonic.Intake do
         stream: envelope.stream,
         kind: envelope.kind,
         task_id: envelope.task_id,
-        attention: Keyword.get(opts, :root_attention, 2.0),
+        attention: mission_attention(envelope, Keyword.get(opts, :root_attention, 2.0)),
         persist?: Keyword.get(opts, :persist?, false),
         metadata:
           envelope.metadata
@@ -300,7 +335,11 @@ defmodule SpectreMnemonic.Intake do
             intake_role: :root,
             title: envelope.title,
             original_kind: envelope.kind,
-            source: Keyword.get(opts, :source) || Map.get(envelope.metadata, :source),
+            source:
+              Redaction.apply_term(
+                Keyword.get(opts, :source) || Map.get(envelope.metadata, :source),
+                opts
+              ),
             tags: envelope.tags,
             text_bytes: byte_size(envelope.text)
           })
@@ -312,17 +351,18 @@ defmodule SpectreMnemonic.Intake do
   defp record_chunks(envelope, root, opts) do
     envelope.text
     |> chunk_text(chunk_words(opts), overlap_words(opts))
-    |> Enum.with_index(1)
-    |> Result.collect_ok(fn {chunk, index} ->
+    |> Result.collect_ok(fn chunk ->
       metadata =
         envelope.metadata
         |> Map.merge(%{
           intake_role: :chunk,
           root_memory_id: root.id,
           source_task_id: envelope.task_id,
-          chunk_index: index,
-          word_count: length(words(chunk)),
-          categories: categories_for(chunk)
+          chunk_index: chunk.index,
+          word_count: chunk.token_count,
+          source_start_byte: chunk.start_byte,
+          source_end_byte: chunk.end_byte,
+          categories: categories_for(chunk.text)
         })
 
       signal_opts =
@@ -331,26 +371,41 @@ defmodule SpectreMnemonic.Intake do
           stream: envelope.stream,
           kind: :memory_chunk,
           task_id: nil,
-          attention: Keyword.get(opts, :chunk_attention, 1.0),
+          attention: mission_attention(envelope, Keyword.get(opts, :chunk_attention, 1.0)),
           persist?: Keyword.get(opts, :persist?, false),
           metadata: metadata
         )
 
-      signal_memory(chunk, signal_opts)
+      signal_memory(chunk.text, signal_opts)
     end)
   end
 
   @spec record_summaries(envelope(), Moment.t(), [map()], keyword()) ::
           {:ok, [map()]} | {:error, term()}
   defp record_summaries(envelope, root, chunk_results, opts) do
-    with {:ok, summaries} <-
-           Result.collect_ok(chunk_results, fn %{moment: chunk} ->
-             record_chunk_summary(chunk, root, envelope, opts)
-           end),
+    if Keyword.get(opts, :summaries?, true) and chunk_results != [] do
+      do_record_summaries(envelope, root, chunk_results, opts)
+    else
+      {:ok, []}
+    end
+  end
+
+  @spec do_record_summaries(envelope(), Moment.t(), [map()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  defp do_record_summaries(envelope, root, chunk_results, opts) do
+    with {:ok, summaries} <- record_chunk_summaries(chunk_results, root, envelope, opts),
          combined <- Enum.map_join(summaries, "\n", & &1.moment.text),
          {:ok, root_summary} <- record_summary(:root, combined, root, envelope, opts) do
       {:ok, List.flatten([summaries, [root_summary]])}
     end
+  end
+
+  @spec record_chunk_summaries([map()], Moment.t(), envelope(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  defp record_chunk_summaries(chunk_results, root, envelope, opts) do
+    Result.collect_ok(chunk_results, fn %{moment: chunk} ->
+      record_chunk_summary(chunk, root, envelope, opts)
+    end)
   end
 
   @spec signal_memory(binary(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -385,7 +440,7 @@ defmodule SpectreMnemonic.Intake do
         stream: envelope.stream,
         kind: :memory_summary,
         task_id: nil,
-        attention: Keyword.get(opts, :summary_attention, 1.5),
+        attention: mission_attention(envelope, Keyword.get(opts, :summary_attention, 0.75)),
         persist?: Keyword.get(opts, :persist?, false),
         metadata:
           envelope.metadata
@@ -406,34 +461,67 @@ defmodule SpectreMnemonic.Intake do
   @spec record_categories(envelope(), Moment.t(), [map()], [map()], keyword()) ::
           {:ok, [map()]} | {:error, term()}
   defp record_categories(envelope, root, chunk_results, summary_results, opts) do
+    if Keyword.get(opts, :categories?, true) do
+      do_record_categories(envelope, root, chunk_results, summary_results, opts)
+    else
+      {:ok, []}
+    end
+  end
+
+  @spec do_record_categories(envelope(), Moment.t(), [map()], [map()], keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  defp do_record_categories(envelope, root, chunk_results, summary_results, opts) do
     labels =
       [chunk_results, summary_results]
       |> List.flatten()
       |> Enum.flat_map(&Map.get(&1.moment.metadata, :categories, []))
+      |> Enum.concat(categories_for(envelope.text))
       |> Enum.concat([envelope.kind])
       |> Enum.reject(&is_nil/1)
       |> Enum.uniq()
 
     Result.collect_ok(labels, fn label ->
-      signal_opts =
-        memory_context_opts(envelope, opts)
-        |> Keyword.merge(
-          stream: envelope.stream,
-          kind: :memory_category,
-          task_id: nil,
-          attention: Keyword.get(opts, :category_attention, 1.1),
-          persist?: Keyword.get(opts, :persist?, false),
-          metadata:
-            envelope.metadata
-            |> Map.merge(%{
-              intake_role: :category,
-              root_memory_id: root.id,
-              source_task_id: envelope.task_id,
-              category: label
-            })
-        )
+      record_category(label, envelope, root, opts)
+    end)
+  end
 
-      signal_memory("Category: #{label}", signal_opts)
+  @spec record_category(term(), envelope(), Moment.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  defp record_category(label, envelope, _root, opts) do
+    case existing_category(label, opts) do
+      %Moment{} = category ->
+        {:ok, %{signal: nil, moment: category, reused?: true}}
+
+      nil ->
+        signal_opts =
+          memory_context_opts(envelope, opts)
+          |> Keyword.merge(
+            stream: envelope.stream,
+            kind: :memory_category,
+            task_id: nil,
+            attention: mission_attention(envelope, Keyword.get(opts, :category_attention, 0.5)),
+            persist?: Keyword.get(opts, :persist?, false),
+            metadata:
+              envelope.metadata
+              |> Map.merge(%{
+                intake_role: :category,
+                source_task_id: envelope.task_id,
+                category: label
+              })
+          )
+
+        signal_memory("Category: #{label}", signal_opts)
+    end
+  end
+
+  @spec existing_category(term(), keyword()) :: Moment.t() | nil
+  defp existing_category(label, opts) do
+    Enum.find(Focus.moments(opts), fn
+      %Moment{kind: :memory_category, metadata: metadata} ->
+        Map.get(metadata, :category) == label
+
+      _other ->
+        false
     end)
   end
 
@@ -444,7 +532,13 @@ defmodule SpectreMnemonic.Intake do
       # Extraction is useful, but it is still just another intake product.
       # Convert it to normal moments fast so the rest of the app does not need
       # to care which adapter had opinions today.
-      with {:ok, graph} <- Extraction.extract(envelope.text, extraction_opts(envelope, opts)),
+      with {:ok, graph} <-
+             Extraction.extract(envelope.source_text, extraction_opts(envelope, opts)),
+           graph <-
+             cap_extraction_graph(
+               graph,
+               Keyword.get(opts, :max_extracted_nodes, @default_max_extracted_nodes)
+             ),
            {:ok, results} <- record_extraction_nodes(graph, root, envelope, opts),
            {:ok, associations} <- link_extraction_graph(graph, root, results, opts) do
         {:ok, results, associations}
@@ -468,6 +562,17 @@ defmodule SpectreMnemonic.Intake do
     |> Keyword.put(:extraction_mode, envelope.extraction_mode)
   end
 
+  @spec mission_attention(envelope(), number()) :: float()
+  defp mission_attention(envelope, base) when is_number(base) do
+    multiplier =
+      case Map.get(envelope.metadata, :mission_priority, 1.0) do
+        priority when is_number(priority) -> priority |> max(0.0) |> min(4.0)
+        _invalid -> 1.0
+      end
+
+    base * multiplier * 1.0
+  end
+
   @spec record_extraction_nodes(map(), Moment.t(), envelope(), keyword()) ::
           {:ok, [map()]} | {:error, term()}
   defp record_extraction_nodes(graph, root, envelope, opts) do
@@ -484,6 +589,7 @@ defmodule SpectreMnemonic.Intake do
           extraction_local_id: local_id,
           extraction_provider: Map.get(graph.metadata, :provider)
         })
+        |> Redaction.apply_term(opts)
 
       signal_opts =
         memory_context_opts(envelope, opts)
@@ -491,7 +597,8 @@ defmodule SpectreMnemonic.Intake do
           stream: envelope.stream,
           kind: kind,
           task_id: nil,
-          attention: Keyword.get(opts, :extraction_attention, attention),
+          attention:
+            mission_attention(envelope, Keyword.get(opts, :extraction_attention, attention)),
           persist?: Keyword.get(opts, :persist?, false),
           metadata: metadata
         )
@@ -567,7 +674,7 @@ defmodule SpectreMnemonic.Intake do
         categories: [:entity]
       }
 
-      {entity.id, "Entity: #{entity.name}", :memory_entity, metadata, 1.6}
+      {entity.id, "Entity: #{entity.name}", :memory_entity, metadata, 0.8}
     end)
   end
 
@@ -587,7 +694,7 @@ defmodule SpectreMnemonic.Intake do
         categories: [:event]
       }
 
-      {event.id, "Event: #{event.text}", :memory_event, metadata, 1.8}
+      {event.id, "Event: #{event.text}", :memory_event, metadata, 0.8}
     end)
   end
 
@@ -602,7 +709,7 @@ defmodule SpectreMnemonic.Intake do
         categories: [:time]
       }
 
-      {time.id, "Time: #{time.value}", :memory_time, metadata, 1.4}
+      {time.id, "Time: #{time.value}", :memory_time, metadata, 0.8}
     end)
   end
 
@@ -621,7 +728,7 @@ defmodule SpectreMnemonic.Intake do
         categories: [:value]
       }
 
-      {value.id, "Value: #{value.kind} #{value.display}", :memory_value, metadata, 1.4}
+      {value.id, "Value: #{value.kind} #{value.display}", :memory_value, metadata, 0.8}
     end)
   end
 
@@ -672,8 +779,10 @@ defmodule SpectreMnemonic.Intake do
     |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
       link_opts =
         opts
+        |> Keyword.take([:namespace, :scope, :persist?, :data_root])
         |> Keyword.merge(edge_opts)
         |> Keyword.put_new(:persist?, persist?)
+        |> Keyword.update(:metadata, %{}, &Redaction.apply_term(&1, opts))
 
       link_memory(source, relation, target, link_opts)
     end)
@@ -984,7 +1093,20 @@ defmodule SpectreMnemonic.Intake do
 
   @spec text_projection(term()) :: binary()
   defp text_projection(input) when is_binary(input), do: input
-  defp text_projection(input), do: inspect(input, pretty: true, limit: :infinity)
+
+  defp text_projection(input) when is_map(input) do
+    case metadata_value(input, :text) || metadata_value(input, :content) do
+      text when is_binary(text) -> text
+      _missing -> inspect_projection(input)
+    end
+  end
+
+  defp text_projection(input), do: inspect_projection(input)
+
+  @spec inspect_projection(term()) :: binary()
+  defp inspect_projection(input) do
+    inspect(input, pretty: true, limit: :infinity, printable_limit: :infinity, width: 120)
+  end
 
   @spec input_kind(term()) :: atom() | nil
   defp input_kind(input) when is_map(input),
@@ -996,15 +1118,21 @@ defmodule SpectreMnemonic.Intake do
   defp infer_kind(input, _text) when is_map(input) or is_list(input), do: :structured_event
 
   defp infer_kind(_input, text) do
-    normalized = String.downcase(text)
-
     cond do
-      json_looking?(text) -> :text
-      code_like?(text) -> :code
-      Regex.match?(~r/\b(todo|task|action item|next step|implement|verify)\b/i, text) -> :task
-      Regex.match?(~r/\b(user|assistant|system):/i, text) -> :chat
-      String.contains?(normalized, "prompt") -> :prompt
-      true -> :text
+      json_looking?(text) ->
+        :text
+
+      code_like?(text) ->
+        :code
+
+      Regex.match?(~r/(?:^|\R)\s*(?:#+\s*)?(todo|task|action item|next step)\b/iu, text) ->
+        :task
+
+      Regex.match?(~r/\b(user|assistant|system):/i, text) ->
+        :chat
+
+      true ->
+        :text
     end
   end
 
@@ -1049,34 +1177,62 @@ defmodule SpectreMnemonic.Intake do
   end
 
   @spec root_text(envelope()) :: binary()
-  defp root_text(envelope), do: "#{envelope.kind}: #{envelope.title}"
+  defp root_text(envelope), do: envelope.text
 
-  @spec chunk_text(binary(), pos_integer(), non_neg_integer()) :: [binary()]
+  @spec chunk_text(binary(), pos_integer(), non_neg_integer()) :: [map()]
   defp chunk_text(text, chunk_size, overlap) do
-    tokens = words(text)
+    tokens = word_spans(text)
 
-    cond do
-      tokens == [] ->
-        [String.trim(text)]
-
-      length(tokens) <= chunk_size ->
-        [String.trim(text)]
-
-      true ->
-        step = max(1, chunk_size - overlap)
-
-        tokens
-        |> Stream.unfold(fn
-          [] ->
-            nil
-
-          remaining ->
-            chunk = Enum.take(remaining, chunk_size)
-            next = Enum.drop(remaining, step)
-            {Enum.join(chunk, " "), next}
-        end)
-        |> Enum.reject(&(&1 == ""))
+    if length(tokens) <= chunk_size do
+      []
+    else
+      step = max(1, chunk_size - overlap)
+      chunk_spans(text, tokens, chunk_size, step, 0, [])
     end
+  end
+
+  @spec chunk_spans(
+          binary(),
+          [{non_neg_integer(), pos_integer()}],
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer(),
+          [map()]
+        ) :: [map()]
+  defp chunk_spans(text, tokens, chunk_size, step, start_index, acc) do
+    token_count = length(tokens)
+    last? = start_index + chunk_size >= token_count
+    {token_start, _length} = Enum.at(tokens, start_index)
+    start_byte = if start_index == 0, do: 0, else: token_start
+
+    end_byte =
+      if last? do
+        byte_size(text)
+      else
+        {next_start, _length} = Enum.at(tokens, start_index + chunk_size)
+        next_start
+      end
+
+    chunk = %{
+      index: length(acc) + 1,
+      start_byte: start_byte,
+      end_byte: end_byte,
+      token_count: min(chunk_size, token_count - start_index),
+      text: binary_part(text, start_byte, end_byte - start_byte)
+    }
+
+    if last? do
+      Enum.reverse([chunk | acc])
+    else
+      chunk_spans(text, tokens, chunk_size, step, start_index + step, [chunk | acc])
+    end
+  end
+
+  @spec word_spans(binary()) :: [{non_neg_integer(), pos_integer()}]
+  defp word_spans(text) do
+    ~r/[\p{L}\p{N}_'-]+/u
+    |> Regex.scan(text, return: :index, capture: :first)
+    |> List.flatten()
   end
 
   @spec categories_for(binary()) :: [atom()]
@@ -1138,11 +1294,7 @@ defmodule SpectreMnemonic.Intake do
   end
 
   @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b[A-Z][A-Za-z0-9_]+\b/, text)
-    |> List.flatten()
-    |> Enum.uniq()
-  end
+  defp entities(text), do: Lexical.entities(text)
 
   @spec keyword_similarity(Moment.t(), Moment.t()) :: float()
   defp keyword_similarity(left, right) do
@@ -1192,9 +1344,12 @@ defmodule SpectreMnemonic.Intake do
         {:summary_words, &positive_integer?/1},
         {:max_related_edges, &non_negative_integer?/1},
         {:max_cross_memory_edges, &non_negative_integer?/1},
+        {:max_extracted_nodes, &non_negative_integer?/1},
         {:similarity_threshold, &bounded_ratio?/1},
         {:cross_memory_similarity_threshold, &bounded_ratio?/1},
         {:extract_entities?, &is_boolean/1},
+        {:summaries?, &is_boolean/1},
+        {:categories?, &is_boolean/1},
         {:cross_memory?, &is_boolean/1},
         {:persist?, &is_boolean/1},
         {:metadata, &map_or_keyword?/1},
@@ -1202,7 +1357,8 @@ defmodule SpectreMnemonic.Intake do
         {:chunk_attention, &is_number/1},
         {:summary_attention, &is_number/1},
         {:category_attention, &is_number/1},
-        {:extraction_attention, &is_number/1}
+        {:extraction_attention, &is_number/1},
+        {:sensitive_numbers, &(&1 in [:classify, :raw, :skip])}
       ]
 
       Enum.reduce_while(validators, :ok, &validate_remember_option(&1, &2, opts))
@@ -1248,6 +1404,58 @@ defmodule SpectreMnemonic.Intake do
   defp words(text) do
     Regex.scan(~r/[\p{L}\p{N}_'-]+/u, text)
     |> List.flatten()
+  end
+
+  @spec normalize_kind(term(), term(), binary()) :: atom()
+  defp normalize_kind(kind, _input, _text)
+       when is_atom(kind) and kind not in [nil, true, false],
+       do: kind
+
+  defp normalize_kind(kind, input, text) when is_binary(kind) do
+    Map.get(@input_kind_by_string, String.downcase(String.trim(kind)), infer_kind(input, text))
+  end
+
+  defp normalize_kind(_kind, input, text), do: infer_kind(input, text)
+
+  @spec cap_extraction_graph(map(), non_neg_integer()) :: map()
+  defp cap_extraction_graph(graph, limit) do
+    {sections, _remaining} =
+      Enum.map_reduce([:entities, :events, :times, :values], limit, fn section, remaining ->
+        selected = graph |> Map.get(section, []) |> Enum.take(remaining)
+        {{section, selected}, max(remaining - length(selected), 0)}
+      end)
+
+    graph =
+      Enum.reduce(sections, graph, fn {section, values}, acc -> Map.put(acc, section, values) end)
+
+    selected_ids =
+      sections
+      |> Enum.flat_map(fn {_section, values} -> Enum.map(values, &Map.get(&1, :id)) end)
+      |> MapSet.new()
+
+    Map.update(graph, :relations, [], fn relations ->
+      Enum.filter(relations, fn relation ->
+        MapSet.member?(selected_ids, relation.source) and
+          MapSet.member?(selected_ids, relation.target)
+      end)
+    end)
+  end
+
+  @spec rollback_intake(Memory.t(), keyword()) :: :ok
+  defp rollback_intake(memory, opts) do
+    run_id = Map.get(memory.metadata, :intake_run_id)
+
+    case Focus.rollback_intake(run_id, opts) do
+      {:ok, _count} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "intake rollback failed intake_run_id=#{inspect(run_id)} reason=#{inspect(reason)}"
+        )
+
+        :ok
+    end
   end
 
   @spec persistence_status(keyword()) :: map()

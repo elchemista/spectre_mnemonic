@@ -2,6 +2,8 @@ defmodule SpectreMnemonic.Knowledge.SMEMHardeningTest do
   use SpectreMnemonic.MemoryCase
 
   alias SpectreMnemonic.Knowledge.SMEM
+  alias SpectreMnemonic.Persistence.FramedLog
+  alias SpectreMnemonic.Persistence.Store.FileFrame
 
   test "batch append, default reduce arity, and replace normalize external event shapes" do
     assert {:ok, [first_seq, second_seq]} =
@@ -86,6 +88,40 @@ defmodule SpectreMnemonic.Knowledge.SMEMHardeningTest do
     assert {:ok, []} = SMEM.replay(opts)
   end
 
+  test "append repairs an incomplete tail instead of hiding every later event" do
+    root = tmp_root("smem-tail-recovery")
+    opts = [data_root: root]
+    path = Path.join([root, "knowledge", "knowledge.smem"])
+
+    assert {:ok, 1} = SMEM.append(%{text: "before crash"}, opts)
+    valid_bytes = File.read!(path)
+    File.write!(path, valid_bytes <> "SKNW\x01partial")
+    FramedLog.reset_sequence_counter({SMEM, :seq, path})
+
+    assert {:ok, 2} = SMEM.append(%{text: "after restart"}, opts)
+    assert {:ok, events} = SMEM.replay(opts)
+    assert Enum.map(events, & &1.text) == ["before crash", "after restart"]
+
+    assert {:ok, %{status: :clean, last_sequence: 2}} =
+             FileFrame.scan_path(path, magic: "SKNW")
+  end
+
+  test "knowledge append refuses CRC corruption and preserves the bytes for recovery" do
+    root = tmp_root("smem-corrupt-refusal")
+    opts = [data_root: root]
+    path = Path.join([root, "knowledge", "knowledge.smem"])
+
+    assert {:ok, 1} = SMEM.append(%{text: "valid"}, opts)
+    damaged = corrupt_last_byte(File.read!(path))
+    File.write!(path, damaged)
+    FramedLog.reset_sequence_counter({SMEM, :seq, path})
+
+    assert {:error, {:corrupt_framed_log, %{reason: :crc_mismatch, path: ^path}}} =
+             SMEM.append(%{text: "must not append"}, opts)
+
+    assert File.read!(path) == damaged
+  end
+
   test "public append reports a stopped writer without calling a missing process" do
     supervisor = SpectreMnemonic.Supervisor
     :ok = Supervisor.terminate_child(supervisor, SMEM)
@@ -118,7 +154,14 @@ defmodule SpectreMnemonic.Knowledge.SMEMHardeningTest do
     root =
       Path.join(System.tmp_dir!(), "spectre-#{label}-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(root) end)
+    on_exit(fn ->
+      FramedLog.reset_sequence_counter(
+        {SMEM, :seq, Path.join([root, "knowledge", "knowledge.smem"])}
+      )
+
+      File.rm_rf!(root)
+    end)
+
     root
   end
 end

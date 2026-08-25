@@ -49,13 +49,15 @@ defmodule SpectreMnemonic.Intake.PlugPipeline do
 
   defp call_plug(other, _memory, _opts), do: {:error, {:invalid_plug, other}}
 
-  @spec normalize_result(term(), Memory.t()) :: {:cont, Memory.t()} | {:halt, Memory.t()}
+  @spec normalize_result(term(), Memory.t()) ::
+          {:cont, Memory.t()} | {:halt, Memory.t()} | {:error, term()}
   defp normalize_result(%Memory{} = memory, _previous), do: {:cont, memory}
   defp normalize_result({:cont, %Memory{} = memory}, _previous), do: {:cont, memory}
   defp normalize_result({:halt, %Memory{} = memory}, _previous), do: {:halt, memory}
 
   defp normalize_result({:ok, %Memory{} = memory}, _previous), do: {:cont, memory}
   defp normalize_result({:ok, result}, previous), do: {:halt, %{previous | result: result}}
+  defp normalize_result({:error, reason}, _previous), do: {:error, reason}
 
   defp normalize_result(result, previous), do: {:halt, %{previous | result: result}}
 end

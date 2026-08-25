@@ -15,6 +15,7 @@ defmodule SpectreMnemonic.MentalModels do
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Recall.Lexical
 
   @mental_model_table :mnemonic_mental_models
   @mental_model_scope_table :mnemonic_mental_models_by_scope
@@ -287,13 +288,7 @@ defmodule SpectreMnemonic.MentalModels do
   end
 
   @spec keywords(binary()) :: [binary()]
-  defp keywords(text) do
-    text
-    |> String.downcase()
-    |> String.split(~r/[^\p{L}\p{N}_]+/u, trim: true)
-    |> Enum.reject(&(String.length(&1) < 2))
-    |> Enum.uniq()
-  end
+  defp keywords(text), do: Lexical.keywords(text, 2)
 
   @spec non_empty_lines(binary()) :: [binary()]
   defp non_empty_lines(text) do
@@ -304,9 +299,5 @@ defmodule SpectreMnemonic.MentalModels do
   end
 
   @spec entities(binary()) :: [binary()]
-  defp entities(text) do
-    Regex.scan(~r/\b\p{Lu}[\p{L}\p{N}_]+\b/u, text)
-    |> List.flatten()
-    |> Enum.uniq()
-  end
+  defp entities(text), do: Lexical.entities(text)
 end

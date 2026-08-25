@@ -15,6 +15,7 @@ defmodule SpectreMnemonic.Recall.Index do
   alias SpectreMnemonic.Memory.Scope
 
   @index_table :mnemonic_embedding_index
+  @collection_table :mnemonic_vettore_collections
 
   @type state :: %{
           vettore: %{optional(tuple()) => map()}
@@ -41,7 +42,16 @@ defmodule SpectreMnemonic.Recall.Index do
   @doc "Queries indexed active moments by cue embedding."
   @spec query(map(), keyword()) :: {:ok, [map()]}
   def query(cue, opts \\ []) do
-    call_if_running({:query, cue, opts}, {:ok, []})
+    limit = query_limit(opts)
+
+    results =
+      (query_vettore_scoped(cue, limit, opts) || brute_force(cue, limit, opts))
+      |> filter_similarity(opts)
+      |> Enum.take(limit)
+
+    {:ok, results}
+  rescue
+    ArgumentError -> {:ok, []}
   end
 
   @doc "Clears ETS index state."
@@ -50,12 +60,20 @@ defmodule SpectreMnemonic.Recall.Index do
     call_if_running(:reset)
   end
 
+  @doc false
+  @spec rebuild :: :ok
+  def rebuild, do: call_if_running(:rebuild)
+
+  @doc false
+  @spec purge_partition(keyword()) :: :ok
+  def purge_partition(opts), do: call_if_running({:purge_partition, opts})
+
   @impl GenServer
   @spec init(keyword()) :: {:ok, state()}
   def init(_opts) do
     ensure_table(@index_table)
-
-    {:ok, %{vettore: %{}}}
+    ensure_table(@collection_table)
+    {:ok, rebuild_from_hot()}
   end
 
   @impl GenServer
@@ -81,28 +99,72 @@ defmodule SpectreMnemonic.Recall.Index do
     {:reply, :ok, state}
   end
 
-  def handle_call({:query, cue, opts}, _from, state) do
-    limit = query_limit(opts)
-
-    results =
-      (query_vettore_scoped(state, cue, limit, opts) || brute_force(cue, limit, opts))
-      |> filter_similarity(opts)
-      |> Enum.take(limit)
-
-    {:reply, {:ok, results}, state}
-  end
-
   def handle_call(:reset, _from, state) do
     close_vettore_collections(state)
     :ets.delete_all_objects(@index_table)
+    :ets.delete_all_objects(@collection_table)
 
     {:reply, :ok, %{state | vettore: %{}}}
+  end
+
+  def handle_call(:rebuild, _from, state) do
+    close_vettore_collections(state)
+    {:reply, :ok, rebuild_from_hot()}
+  end
+
+  def handle_call({:purge_partition, opts}, _from, state) do
+    partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
+
+    ids =
+      @index_table
+      |> :ets.tab2list()
+      |> Enum.flat_map(fn
+        {id, %{namespace: namespace, scope: scope}} when {namespace, scope} == partition -> [id]
+        _other -> []
+      end)
+
+    Enum.each(ids, &:ets.delete(@index_table, &1))
+    :ets.delete(@collection_table, partition)
+
+    state =
+      case Map.pop(state.vettore, partition) do
+        {nil, _vettore} ->
+          state
+
+        {indexed, vettore} ->
+          _result = Vettore.close(indexed.collection)
+          %{state | vettore: vettore}
+      end
+
+    {:reply, :ok, state}
   end
 
   @impl GenServer
   def terminate(_reason, state) do
     close_vettore_collections(state)
     :ok
+  end
+
+  @spec rebuild_from_hot :: state()
+  defp rebuild_from_hot do
+    :ets.delete_all_objects(@index_table)
+    :ets.delete_all_objects(@collection_table)
+
+    :mnemonic_moments
+    |> :ets.tab2list()
+    |> Enum.reduce(%{vettore: %{}}, fn
+      {_id, moment}, state ->
+        case indexable(moment) do
+          {:ok, entry} ->
+            :ets.insert(@index_table, {moment.id, entry})
+            maybe_upsert_vettore(state, moment.id, entry)
+
+          :skip ->
+            state
+        end
+    end)
+  rescue
+    ArgumentError -> %{vettore: %{}}
   end
 
   @spec maybe_upsert_vettore(state(), binary(), map()) :: state()
@@ -163,6 +225,7 @@ defmodule SpectreMnemonic.Recall.Index do
     case Vettore.new(opts) do
       {:ok, collection} ->
         indexed = %{collection: collection, dimensions: dimensions, count: 0}
+        :ets.insert(@collection_table, {partition, indexed})
         state = put_in(state, [:vettore, partition], indexed)
         {:ok, state, indexed}
 
@@ -186,7 +249,9 @@ defmodule SpectreMnemonic.Recall.Index do
     case Vettore.put(indexed.collection, embedding) do
       :ok ->
         count = if existing?, do: indexed.count, else: indexed.count + 1
-        put_in(state, [:vettore, partition], %{indexed | count: count})
+        indexed = %{indexed | count: count}
+        :ets.insert(@collection_table, {partition, indexed})
+        put_in(state, [:vettore, partition], indexed)
 
       {:error, _reason} ->
         state
@@ -211,21 +276,24 @@ defmodule SpectreMnemonic.Recall.Index do
 
       indexed ->
         _result = Vettore.delete(indexed.collection, moment_id)
-        put_in(state, [:vettore, partition], %{indexed | count: max(indexed.count - 1, 0)})
+        indexed = %{indexed | count: max(indexed.count - 1, 0)}
+        :ets.insert(@collection_table, {partition, indexed})
+        put_in(state, [:vettore, partition], indexed)
     end
   rescue
     _exception -> state
   end
 
-  @spec query_vettore_scoped(state(), map(), non_neg_integer(), keyword()) :: [map()] | nil
-  defp query_vettore_scoped(_state, %{vector: nil}, _limit, _opts), do: nil
-  defp query_vettore_scoped(_state, _cue, limit, _opts) when limit <= 0, do: []
+  @spec query_vettore_scoped(map(), non_neg_integer(), keyword()) :: [map()] | nil
+  defp query_vettore_scoped(%{vector: nil}, _limit, _opts), do: nil
+  defp query_vettore_scoped(_cue, limit, _opts) when limit <= 0, do: []
 
-  defp query_vettore_scoped(state, cue, limit, opts) do
+  defp query_vettore_scoped(cue, limit, opts) do
     partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
 
     with true <- vettore_enabled?(),
-         %{count: count} = indexed when count > 0 <- Map.get(state.vettore, partition),
+         [{^partition, %{count: count} = indexed}] when count > 0 <-
+           :ets.lookup(@collection_table, partition),
          query when query != [] <- Vector.to_list(cue.vector),
          {:ok, results} <- search_vettore(indexed, query, min(limit, count)) do
       results
@@ -404,7 +472,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec similarity_floor(keyword()) :: float()
   defp similarity_floor(opts) do
-    case Keyword.get(opts, :min_vector_similarity, 0.0) do
+    case Keyword.get(opts, :min_vector_similarity, 0.15) do
       value when is_number(value) -> (value * 1.0) |> max(0.0) |> min(1.0)
       _invalid -> 0.0
     end

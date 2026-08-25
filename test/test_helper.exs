@@ -19,14 +19,14 @@ defmodule SpectreMnemonic.MemoryCase do
 
   @tables [
     :mnemonic_signals,
-    :mnemonic_streams,
     :mnemonic_moments,
     :mnemonic_moments_by_stream,
     :mnemonic_moments_by_task,
     :mnemonic_moments_by_scope,
-    :mnemonic_moments_by_namespace,
     :mnemonic_moments_by_signal,
     :mnemonic_moment_counts,
+    :mnemonic_moment_eviction,
+    :mnemonic_moment_eviction_keys,
     :mnemonic_status,
     :mnemonic_associations,
     :mnemonic_associations_by_scope,
@@ -47,7 +47,11 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_governance_states_by_scope,
     :mnemonic_governance_facts,
     :mnemonic_embedding_index,
-    :mnemonic_embedding_labels
+    :mnemonic_vettore_collections,
+    :mnemonic_embedding_labels,
+    :mnemonic_durable_records,
+    :mnemonic_model_cache,
+    :mnemonic_framed_log_counters
   ]
 
   using do

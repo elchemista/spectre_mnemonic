@@ -14,6 +14,19 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
 
   @tokenizer_module Module.concat(["Tokenizers", "Tokenizer"])
   @encoding_module Module.concat(["Tokenizers", "Encoding"])
+  @cache_table :mnemonic_model_cache
+  @model_files ["config.json", "tokenizer.json", "model.safetensors"]
+  @model_option_keys [
+    :model_dir,
+    :model_id,
+    :cache_dir,
+    :files,
+    :checksums,
+    :download,
+    :source_dir,
+    :base_url,
+    :revision
+  ]
 
   @doc "Embeds input using local Model2Vec artifacts."
   @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -21,12 +34,10 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     # Local embeddings are nice because no request leaves the machine. They are
     # also fussy little file creatures, so every step returns shape errors
     # instead of turning intake into a bonfire.
-    with {:ok, model_dir} <- model_dir(opts),
-         tokenizer_path <- Path.join(model_dir, "tokenizer.json"),
-         {:ok, tokenizer} <- load_json(tokenizer_path),
-         {:ok, model} <- load_safetensors(Path.join(model_dir, "model.safetensors")),
-         token_ids when token_ids != [] <- tokenize(input, tokenizer, tokenizer_path),
-         {:ok, vector} <- mean_pool(model, token_ids) do
+    with {:ok, artifacts} <- artifacts(opts),
+         token_ids when token_ids != [] <-
+           tokenize(input, artifacts.tokenizer, artifacts.native_tokenizer),
+         {:ok, vector} <- mean_pool(artifacts.model, token_ids) do
       dimensions = Keyword.get(opts, :dimensions) || Vector.dimensions(vector)
       signature_bits = Keyword.get(opts, :signature_bits, dimensions)
       dense = Vector.normalize_to_f32_binary(vector)
@@ -38,7 +49,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
          metadata: %{
            format: :f32_binary,
            dimensions: dimensions,
-           model: Keyword.get(opts, :model_id, Path.basename(model_dir)),
+           model: Keyword.get(opts, :model_id, Path.basename(artifacts.model_dir)),
            normalized: true,
            signature_bits: signature_bits,
            provider: __MODULE__
@@ -56,9 +67,121 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     _kind, _reason -> {:error, :invalid_model_artifacts}
   end
 
+  @doc "Clears cached model artifacts so the next embedding reloads them from disk."
+  @spec reset_cache :: :ok
+  def reset_cache do
+    if :ets.whereis(@cache_table) != :undefined do
+      :ets.delete_all_objects(@cache_table)
+    end
+
+    :ok
+  end
+
+  @spec artifacts(keyword()) :: {:ok, map()} | {:error, term()}
+  defp artifacts(opts) do
+    with {:ok, model_dir} <- model_dir(opts),
+         {:ok, signature} <- artifact_signature(model_dir) do
+      cache_key = {:artifacts, Path.expand(model_dir)}
+
+      case cache_lookup(cache_key) do
+        %{signature: ^signature} = cached ->
+          {:ok, cached}
+
+        _missing_or_changed ->
+          load_artifacts(model_dir, signature, cache_key)
+      end
+    end
+  end
+
+  @spec load_artifacts(Path.t(), term(), term()) :: {:ok, map()} | {:error, term()}
+  defp load_artifacts(model_dir, signature, cache_key) do
+    tokenizer_path = Path.join(model_dir, "tokenizer.json")
+
+    with {:ok, tokenizer} <- load_json(tokenizer_path),
+         {:ok, model} <- load_safetensors(Path.join(model_dir, "model.safetensors")) do
+      artifacts = %{
+        model_dir: model_dir,
+        signature: signature,
+        tokenizer: tokenizer,
+        native_tokenizer: load_native_tokenizer(tokenizer_path),
+        model: model
+      }
+
+      cache_put(cache_key, artifacts)
+      {:ok, artifacts}
+    end
+  end
+
   @spec model_dir(keyword()) :: {:ok, Path.t()} | {:error, term()}
   defp model_dir(opts) do
-    ModelDownloader.ensure_model(opts)
+    cache_key = {:model_dir, model_options_digest(opts)}
+
+    case cache_lookup(cache_key) do
+      %{model_dir: model_dir, signature: signature} ->
+        case artifact_signature(model_dir) do
+          {:ok, ^signature} -> {:ok, model_dir}
+          _changed -> ensure_and_cache_model_dir(opts, cache_key)
+        end
+
+      _missing ->
+        ensure_and_cache_model_dir(opts, cache_key)
+    end
+  end
+
+  @spec ensure_and_cache_model_dir(keyword(), term()) :: {:ok, Path.t()} | {:error, term()}
+  defp ensure_and_cache_model_dir(opts, cache_key) do
+    with {:ok, model_dir} <- ModelDownloader.ensure_model(opts),
+         {:ok, signature} <- artifact_signature(model_dir) do
+      cache_put(cache_key, %{model_dir: model_dir, signature: signature})
+      {:ok, model_dir}
+    end
+  end
+
+  @spec model_options_digest(keyword()) :: binary()
+  defp model_options_digest(opts) do
+    opts
+    |> Keyword.take(@model_option_keys)
+    |> Enum.sort()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+  end
+
+  @spec artifact_signature(Path.t()) :: {:ok, list()} | {:error, term()}
+  defp artifact_signature(model_dir) do
+    Enum.reduce_while(@model_files, {:ok, []}, fn file, {:ok, acc} ->
+      path = Path.join(model_dir, file)
+
+      case File.stat(path, time: :posix) do
+        {:ok, stat} ->
+          fingerprint = {file, stat.size, stat.mtime, stat.ctime, stat.inode}
+          {:cont, {:ok, [fingerprint | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:missing_model_file, path, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, signature} -> {:ok, Enum.reverse(signature)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec cache_lookup(term()) :: term() | nil
+  defp cache_lookup(key) do
+    case :ets.lookup(@cache_table, key) do
+      [{^key, value}] -> value
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @spec cache_put(term(), term()) :: :ok
+  defp cache_put(key, value) do
+    :ets.insert(@cache_table, {key, value})
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   @spec load_json(Path.t()) :: {:ok, map()} | {:error, term()}
@@ -143,11 +266,11 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
       byte_size == rows * dimensions * 4
   end
 
-  @spec tokenize(term(), map(), Path.t()) :: [integer()]
-  defp tokenize(input, tokenizer, tokenizer_path) do
+  @spec tokenize(term(), map(), term()) :: [integer()]
+  defp tokenize(input, tokenizer, native_tokenizer) do
     text = if is_binary(input), do: input, else: inspect(input)
 
-    case hf_token_ids(text, tokenizer_path) do
+    case hf_token_ids(text, native_tokenizer) do
       {:ok, ids} when ids != [] ->
         ids
 
@@ -156,10 +279,19 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     end
   end
 
-  @spec hf_token_ids(binary(), Path.t()) :: {:ok, [integer()]} | :error
-  defp hf_token_ids(text, tokenizer_path) do
-    with {:ok, tokenizer} <- optional_call(@tokenizer_module, :from_file, [tokenizer_path]),
-         {:ok, encoding} <-
+  @spec load_native_tokenizer(Path.t()) :: term() | nil
+  defp load_native_tokenizer(tokenizer_path) do
+    case optional_call(@tokenizer_module, :from_file, [tokenizer_path]) do
+      {:ok, tokenizer} -> tokenizer
+      _unavailable -> nil
+    end
+  end
+
+  @spec hf_token_ids(binary(), term()) :: {:ok, [integer()]} | :error
+  defp hf_token_ids(_text, nil), do: :error
+
+  defp hf_token_ids(text, tokenizer) do
+    with {:ok, encoding} <-
            optional_call(@tokenizer_module, :encode, [
              tokenizer,
              text,

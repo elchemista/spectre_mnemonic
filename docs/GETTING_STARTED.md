@@ -88,12 +88,16 @@ continue through Vettore.
 
 The normal OTP application starts:
 
-- the ETS table owner and active focus;
-- stream routing and stream workers;
-- the persistence manager and durable search index;
-- recall and consolidation workers;
-- the progressive-knowledge writer;
+- the ETS table owner and node-local path-lock owner;
+- the persistence and progressive-knowledge writers;
+- governance plus active and durable vector/search indexes;
 - the consolidation scheduler, disabled until configured.
+
+Stream routing, focus mutation, recall scoring, and consolidation are stateless
+caller operations. The runtime does not create one process per stream, and
+independent `{namespace, scope}` partitions can prepare and project writes in
+parallel. The append-only writer remains deliberately serialized at the final
+disk boundary.
 
 ## Understand scopes
 

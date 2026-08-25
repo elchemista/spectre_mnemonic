@@ -208,6 +208,7 @@ defmodule SpectreMnemonic.RunConformanceTest do
              Memory.remember(payload,
                agent: Agent,
                namespace: "spectre_mnemonic_test",
+               conversation_id: "legacy-conversation",
                stream: unique_stream("legacy-turn")
              )
 
@@ -221,6 +222,7 @@ defmodule SpectreMnemonic.RunConformanceTest do
              Memory.remember("plain legacy payload",
                agent: Agent,
                namespace: "spectre_mnemonic_test",
+               conversation_id: "plain-conversation",
                stream: unique_stream("plain-turn")
              )
 

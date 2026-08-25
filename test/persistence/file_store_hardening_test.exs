@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Store.Codec
   alias SpectreMnemonic.Persistence.Store.Disk
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
@@ -24,6 +25,31 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
     assert read_frames(corrupt_last_byte(first)) == []
     assert read_frames("UNKNOWN") == []
     assert read_frames(invalid_term_frame()) == []
+  end
+
+  test "tail recovery validates framing without requiring application atoms to be loaded" do
+    root = tmp_root("unknown-safe-atom")
+    path = Path.join([root, "segments", "active.smem"])
+    File.mkdir_p!(Path.dirname(path))
+
+    atom_name = "audit_atom_#{System.unique_integer([:positive])}"
+    payload = <<131, 119, byte_size(atom_name), atom_name::binary>>
+    crc = :erlang.crc32(payload)
+
+    frame =
+      <<"SMEM", 1, 1::unsigned-64, 100::signed-64, byte_size(payload)::32, crc::32,
+        payload::binary>>
+
+    File.write!(path, frame)
+
+    assert_raise ArgumentError, fn -> String.to_existing_atom(atom_name) end
+
+    assert {:ok, %{status: :clean, last_sequence: 1, valid_bytes: size, file_bytes: size}} =
+             FileFrame.scan_path(path)
+
+    assert size == byte_size(frame)
+    assert read_frames(frame) == []
+    assert_raise ArgumentError, fn -> String.to_existing_atom(atom_name) end
   end
 
   test "frame size limits reject oversized writes and declared payloads without allocating them" do
@@ -60,6 +86,60 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
     assert {:ok, 1} = StoreFile.put(record("first"), opts)
     :persistent_term.put({StoreFile, :seq, path}, 7)
     assert {:ok, 8} = StoreFile.put(record("second"), opts)
+  end
+
+  test "append truncates an incomplete tail so future frames remain replayable" do
+    root = tmp_root("tail-recovery")
+    opts = [data_root: root]
+    path = Path.join([root, "segments", "active.smem"])
+
+    assert {:ok, 1} = StoreFile.put(record("before-crash"), opts)
+    valid_bytes = File.read!(path)
+    damaged_frame = FileFrame.encode(2, record("partial"))
+    File.write!(path, valid_bytes <> binary_part(damaged_frame, 0, 17))
+
+    # A new VM has no in-memory sequence counter.
+    FramedLog.reset_sequence_counter({StoreFile, :seq, path})
+
+    assert {:ok, 2} = StoreFile.put(record("after-restart"), opts)
+    assert {:ok, frames} = StoreFile.replay(opts)
+
+    assert Enum.map(frames, fn {_seq, _timestamp, stored} -> stored.payload.id end) == [
+             "before-crash",
+             "after-restart"
+           ]
+
+    assert {:ok, %{status: :clean, last_sequence: 2, file_bytes: size, valid_bytes: size}} =
+             FileFrame.scan_path(path)
+  end
+
+  test "append refuses a corrupt complete frame without changing the log" do
+    root = tmp_root("corrupt-tail-refusal")
+    opts = [data_root: root]
+    path = Path.join([root, "segments", "active.smem"])
+
+    assert {:ok, 1} = StoreFile.put(record("valid"), opts)
+    damaged = File.read!(path) <> corrupt_last_byte(FileFrame.encode(2, record("damaged")))
+    File.write!(path, damaged)
+    FramedLog.reset_sequence_counter({StoreFile, :seq, path})
+
+    assert {:error, {:corrupt_framed_log, %{reason: :crc_mismatch, offset: offset, path: ^path}}} =
+             StoreFile.put(record("must-not-append"), opts)
+
+    assert offset < byte_size(damaged)
+    assert File.read!(path) == damaged
+  end
+
+  test "invalid sync policy is rejected before append or compaction mutation" do
+    root = tmp_root("invalid-sync")
+    opts = [data_root: root, sync: :sometimes]
+    path = Path.join([root, "segments", "active.smem"])
+
+    assert {:error, {:invalid_sync_mode, :sometimes}} = StoreFile.put(record("no-write"), opts)
+    refute File.exists?(path)
+
+    assert {:error, {:invalid_sync_mode, :sometimes}} = StoreFile.compact(opts)
+    refute File.exists?(Path.join([root, "snapshots", "current.term"]))
   end
 
   test "invalid compaction retention is rejected before snapshot or segment mutation" do
@@ -246,7 +326,10 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
       Path.join(System.tmp_dir!(), "spectre-#{label}-#{System.unique_integer([:positive])}")
 
     on_exit(fn ->
-      :persistent_term.erase({StoreFile, :seq, Path.join([root, "segments", "active.smem"])})
+      FramedLog.reset_sequence_counter(
+        {StoreFile, :seq, Path.join([root, "segments", "active.smem"])}
+      )
+
       File.rm_rf!(root)
     end)
 

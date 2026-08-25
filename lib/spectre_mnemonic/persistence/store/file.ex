@@ -10,6 +10,8 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
   alias SpectreMnemonic.Persistence.Family
+  alias SpectreMnemonic.Persistence.FramedLog
+  alias SpectreMnemonic.Persistence.PathLock
   alias SpectreMnemonic.Persistence.Store.FileFrame
   alias SpectreMnemonic.Persistence.Store.Record
 
@@ -29,9 +31,11 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     root = data_root(opts)
     path = active_path(root)
 
-    with :ok <- ensure_root(root) do
-      with_path_lock(path, fn -> append_locked(path, record) end)
-    end
+    PathLock.trans({__MODULE__, Path.expand(root)}, fn ->
+      with :ok <- ensure_root(root) do
+        append_locked(path, record, opts)
+      end
+    end)
   end
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
@@ -67,12 +71,24 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     retain = Keyword.get(opts, :retain_compacted_segments, 1)
     erase? = Keyword.get(opts, :erase?, false)
 
-    with :ok <- validate_retention(retain),
-         :ok <- ensure_root(root) do
-      root
-      |> active_path()
-      |> with_path_lock(fn -> compact_locked(root, supplied_records, retain, erase?) end)
+    with :ok <- validate_retention(retain) do
+      compact_under_path_lock(root, supplied_records, retain, erase?, opts)
     end
+  end
+
+  @spec compact_under_path_lock(
+          Path.t(),
+          [Record.t()] | nil,
+          non_neg_integer(),
+          boolean(),
+          keyword()
+        ) :: {:ok, Path.t()} | {:error, term()}
+  defp compact_under_path_lock(root, supplied_records, retain, erase?, opts) do
+    PathLock.trans({__MODULE__, Path.expand(root)}, fn ->
+      with :ok <- ensure_root(root) do
+        compact_locked(root, supplied_records, retain, erase?, opts)
+      end
+    end)
   end
 
   @impl SpectreMnemonic.Persistence.Store.Adapter
@@ -159,21 +175,23 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     end
   end
 
-  @spec append_locked(Path.t(), Record.t()) :: {:ok, pos_integer()} | {:error, term()}
-  defp append_locked(path, record) do
-    seq = next_seq(path)
+  @spec append_locked(Path.t(), Record.t(), keyword()) ::
+          {:ok, pos_integer()} | {:error, term()}
+  defp append_locked(path, record, opts) do
+    key = {__MODULE__, :seq, path}
 
-    with {:ok, frame} <- FileFrame.encode_checked(seq, record) do
-      case File.write(path, frame, [:append, :binary]) do
-        :ok -> {:ok, seq}
-        {:error, reason} -> {:error, reason}
-      end
+    with {:ok, counter} <- FramedLog.sequence_counter(key, path, opts),
+         seq = :atomics.add_get(counter, 1, 1),
+         {:ok, frame} <- FileFrame.encode_checked(seq, record),
+         :ok <- FramedLog.append(path, frame, opts) do
+      :ok = FramedLog.advance_offset(counter, byte_size(frame))
+      {:ok, seq}
     end
   end
 
-  @spec compact_locked(Path.t(), [Record.t()] | nil, non_neg_integer(), boolean()) ::
+  @spec compact_locked(Path.t(), [Record.t()] | nil, non_neg_integer(), boolean(), keyword()) ::
           {:ok, Path.t()} | {:error, term()}
-  defp compact_locked(root, supplied_records, retain, erase?) do
+  defp compact_locked(root, supplied_records, retain, erase?, opts) do
     records = supplied_records || compactable_records(root)
     snapshot = snapshot_path(root)
     temporary = snapshot <> ".tmp"
@@ -184,22 +202,25 @@ defmodule SpectreMnemonic.Persistence.Store.File do
       records: records
     }
 
-    with :ok <- File.write(temporary, :erlang.term_to_binary(payload, [:compressed]), [:binary]),
-         :ok <- install_snapshot(snapshot, temporary),
-         :ok <- rotate_active_segment(root),
-         :ok <- prune_rotated_segments(root, retain),
-         :ok <- remove_previous_if_erasing(root, erase?) do
+    with :ok <-
+           FramedLog.write_file(temporary, :erlang.term_to_binary(payload, [:compressed]), opts),
+         :ok <- install_snapshot(snapshot, temporary, opts),
+         :ok <- rotate_active_segment(root, opts),
+         :ok <- prune_rotated_segments(root, retain, opts),
+         :ok <- remove_previous_if_erasing(root, erase?, opts) do
       {:ok, snapshot}
     else
       {:error, reason} ->
-        File.rm(temporary)
+        FramedLog.remove(temporary, opts)
         {:error, reason}
     end
   end
 
-  @spec remove_previous_if_erasing(Path.t(), boolean()) :: :ok | {:error, term()}
-  defp remove_previous_if_erasing(root, true), do: remove_if_present(previous_snapshot_path(root))
-  defp remove_previous_if_erasing(_root, false), do: :ok
+  @spec remove_previous_if_erasing(Path.t(), boolean(), keyword()) :: :ok | {:error, term()}
+  defp remove_previous_if_erasing(root, true, opts),
+    do: FramedLog.remove(previous_snapshot_path(root), opts)
+
+  defp remove_previous_if_erasing(_root, false, _opts), do: :ok
 
   @spec active_path(Path.t()) :: Path.t()
   defp active_path(root), do: Path.join([root, "segments", "active.smem"])
@@ -292,62 +313,53 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     end
   end
 
-  @spec install_snapshot(Path.t(), Path.t()) :: :ok | {:error, term()}
-  defp install_snapshot(snapshot, temporary) do
+  @spec install_snapshot(Path.t(), Path.t(), keyword()) :: :ok | {:error, term()}
+  defp install_snapshot(snapshot, temporary, opts) do
     previous = Path.join(Path.dirname(snapshot), "previous.term")
 
-    with :ok <- remove_if_present(previous),
-         :ok <- move_current_to_previous(snapshot, previous) do
-      File.rename(temporary, snapshot)
+    with :ok <- FramedLog.remove(previous, opts),
+         :ok <- move_current_to_previous(snapshot, previous, opts) do
+      FramedLog.rename(temporary, snapshot, opts)
     end
   end
 
-  @spec move_current_to_previous(Path.t(), Path.t()) :: :ok | {:error, term()}
-  defp move_current_to_previous(snapshot, previous) do
-    case File.rename(snapshot, previous) do
+  @spec move_current_to_previous(Path.t(), Path.t(), keyword()) :: :ok | {:error, term()}
+  defp move_current_to_previous(snapshot, previous, opts) do
+    case FramedLog.rename(snapshot, previous, opts) do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
-  @spec remove_if_present(Path.t()) :: :ok | {:error, term()}
-  defp remove_if_present(path) do
-    case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @spec rotate_active_segment(Path.t()) :: :ok | {:error, term()}
-  defp rotate_active_segment(root) do
+  @spec rotate_active_segment(Path.t(), keyword()) :: :ok | {:error, term()}
+  defp rotate_active_segment(root, opts) do
     active = active_path(root)
     rotated = Path.join([root, "segments", "compacted-#{System.system_time(:microsecond)}.smem"])
 
     result =
       case File.stat(active) do
-        {:ok, %{size: size}} when size > 0 -> File.rename(active, rotated)
-        {:ok, _empty} -> File.rm(active)
+        {:ok, %{size: size}} when size > 0 -> FramedLog.rename(active, rotated, opts)
+        {:ok, _empty} -> FramedLog.remove(active, opts)
         {:error, :enoent} -> :ok
         {:error, reason} -> {:error, reason}
       end
 
     with :ok <- result,
-         :ok <- File.write(active, "", [:binary]) do
-      :persistent_term.erase({__MODULE__, :seq, active})
-      :ok
+         :ok <- FramedLog.write_file(active, "", opts) do
+      FramedLog.reset_sequence_counter({__MODULE__, :seq, active})
     end
   end
 
-  @spec prune_rotated_segments(Path.t(), non_neg_integer()) :: :ok | {:error, term()}
-  defp prune_rotated_segments(root, retain) when is_integer(retain) and retain >= 0 do
+  @spec prune_rotated_segments(Path.t(), non_neg_integer(), keyword()) ::
+          :ok | {:error, term()}
+  defp prune_rotated_segments(root, retain, opts) when is_integer(retain) and retain >= 0 do
     root
     |> rotated_paths()
     |> Enum.reverse()
     |> Enum.drop(retain)
     |> Enum.reduce_while(:ok, fn path, :ok ->
-      case File.rm(path) do
+      case FramedLog.remove(path, opts) do
         :ok -> {:cont, :ok}
         {:error, :enoent} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
@@ -355,7 +367,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
     end)
   end
 
-  defp prune_rotated_segments(_root, _retain), do: {:error, :invalid_retention}
+  defp prune_rotated_segments(_root, _retain, _opts), do: {:error, :invalid_retention}
 
   @spec validate_retention(term()) :: :ok | {:error, :invalid_retention}
   defp validate_retention(retain) when is_integer(retain) and retain >= 0, do: :ok
@@ -557,53 +569,6 @@ defmodule SpectreMnemonic.Persistence.Store.File do
   defp normalize_family(family) when is_binary(family), do: Family.from_string(family)
   defp normalize_family(_family), do: :error
 
-  @spec next_seq(Path.t()) :: pos_integer()
-  defp next_seq(path) do
-    key = {__MODULE__, :seq, path}
-
-    counter =
-      case :persistent_term.get(key, :missing) do
-        {:atomics, counter} ->
-          counter
-
-        :missing ->
-          install_sequence_counter(key, initial_seq(path))
-
-        seq when is_integer(seq) and seq >= 0 ->
-          install_sequence_counter(key, seq)
-      end
-
-    :atomics.add_get(counter, 1, 1)
-  end
-
-  @spec install_sequence_counter(term(), non_neg_integer()) :: :atomics.atomics_ref()
-  defp install_sequence_counter(key, current) do
-    counter = :atomics.new(1, signed: false)
-    :ok = :atomics.put(counter, 1, current)
-    :persistent_term.put(key, {:atomics, counter})
-    counter
-  end
-
-  @spec initial_seq(Path.t()) :: non_neg_integer()
-  defp initial_seq(path) do
-    {:ok, seq} =
-      replay_path_fold(path, 0, fn {seq, _timestamp, _payload}, current ->
-        {:cont, max(seq, current)}
-      end)
-
-    seq
-  end
-
-  @spec with_path_lock(Path.t(), (-> result)) :: result | {:error, term()} when result: term()
-  defp with_path_lock(path, fun) do
-    lock = {{__MODULE__, :path, path}, self()}
-
-    case :global.trans(lock, fun) do
-      {:aborted, reason} -> {:error, {:file_store_lock_failed, reason}}
-      result -> result
-    end
-  end
-
   @spec replay_path(Path.t()) :: [FileFrame.t()]
   defp replay_path(path) do
     {:ok, frames} = replay_path_fold(path, [], fn frame, acc -> {:cont, [frame | acc]} end)
@@ -614,7 +579,7 @@ defmodule SpectreMnemonic.Persistence.Store.File do
           fold_result(acc)
         when acc: term()
   defp replay_path_fold(path, acc, fun) do
-    case File.open(path, [:read, :binary]) do
+    case File.open(path, [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
           FileFrame.read_frames(io, {:ok, acc}, fn frame, {:ok, acc} ->

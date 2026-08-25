@@ -1,10 +1,13 @@
 defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.ConsolidationScheduler
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Persistence.Manager
+
+  @namespace "spectre_mnemonic_test"
 
   test "search finds persisted memory after active focus is cleared" do
     {:ok, %{moment: moment}} =
@@ -79,7 +82,9 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
     {:ok, packet} =
       SpectreMnemonic.remember("Bob called Alice on 2026-05-10",
         persist?: true,
-        title: "provenance check"
+        title: "provenance check",
+        chunk_words: 3,
+        overlap_words: 0
       )
 
     assert Enum.any?(packet.summaries, &match?(%{source_ids: [_ | _]}, &1.metadata.provenance))
@@ -103,6 +108,51 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
     assert eventually(fn ->
              Governance.state_for(moment.id) == :stale and
                ConsolidationScheduler.status().runs > 0
+           end)
+  after
+    Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
+    restart_scheduler()
+  end
+
+  test "scheduler consolidates and decays every known scoped partition" do
+    alpha = {:tenant, "scheduler-alpha"}
+    beta = {:tenant, "scheduler-beta"}
+
+    assert {:ok, %{moment: alpha_moment}} =
+             SpectreMnemonic.signal("SchedulerAlpha email is alpha@example.com",
+               scope: alpha,
+               persist?: true
+             )
+
+    assert {:ok, %{moment: beta_moment}} =
+             SpectreMnemonic.signal("SchedulerBeta email is beta@example.com",
+               scope: beta,
+               persist?: true
+             )
+
+    Application.put_env(:spectre_mnemonic, :consolidation_scheduler,
+      enabled: false,
+      mode: :none,
+      stale_after_ms: 0,
+      min_attention: 1.0
+    )
+
+    restart_scheduler()
+    result = ConsolidationScheduler.run_now()
+
+    assert {@namespace, alpha} in result.partitions
+    assert {@namespace, beta} in result.partitions
+    assert Governance.state_for(alpha_moment.id, scope: alpha) == :stale
+    assert Governance.state_for(beta_moment.id, scope: beta) == :stale
+
+    assert Enum.any?(result.consolidation.results, fn
+             {{@namespace, ^alpha}, {:ok, count}} -> count > 0
+             _other -> false
+           end)
+
+    assert Enum.any?(result.consolidation.results, fn
+             {{@namespace, ^beta}, {:ok, count}} -> count > 0
+             _other -> false
            end)
   after
     Application.delete_env(:spectre_mnemonic, :consolidation_scheduler)
@@ -135,6 +185,8 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
     assert result.recall_accuracy > 0.0
     assert result.exact_fact_recall >= 0.0
     assert is_integer(result.latency_ms)
+    refute result.persisted?
+    assert Focus.moments(scope: result.scope) == []
   end
 
   defp restart_scheduler do
