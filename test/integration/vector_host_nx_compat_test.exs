@@ -67,6 +67,10 @@ defmodule SpectreMnemonic.Integration.VectorHostNxCompatTest do
 
         def to_flat_list(%{__struct__: unquote(tensor), data: values}), do: values
         def shape(%{__struct__: unquote(tensor), shape: shape}), do: shape
+
+        def reshape(%{__struct__: unquote(tensor)} = value, shape) do
+          %{value | shape: shape}
+        end
       end,
       Macro.Env.location(__ENV__)
     )

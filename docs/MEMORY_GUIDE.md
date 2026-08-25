@@ -330,6 +330,7 @@ Enable the local Model2Vec provider:
 
 ```elixir
 config :spectre_mnemonic,
+  json_library: JSON,
   embedding: [
     fast: [
       enabled: true,
@@ -341,15 +342,21 @@ config :spectre_mnemonic,
 
 Downloads are opt-in. Production deployments can pre-populate the cache or set
 `:model_dir`. Optional SHA-256 checksums are verified before installation.
+Add `{:tokenizers, "~> 0.5"}` to the host application's dependencies for full
+Hugging Face tokenizer behavior. If it is absent, the provider uses a simpler
+vocabulary-based fallback; JSON artifact parsing still requires the configured
+`:json_library`.
 
 Model2Vec matrices remain row-major little-endian f32 binaries and are pooled
-through Vettore. Dense conversion, normalization, cosine scoring, and pooling
-do not require Nx. The persisted embedding format is unchanged.
+through Vettore 0.3.5. Dense conversion, validation, normalization, cosine/dot
+scoring, representation conversion, and pooling now delegate directly to
+`Vettore.Vector`. They do not require Nx, and the persisted embedding format is
+unchanged.
 
 The public `SpectreMnemonic.Embedding.Vector.to_tensor/1` and
-`normalize_tensor/1` functions remain as a temporary compatibility surface. If
-an application still passes Nx tensors, that application can install Nx
-itself:
+`normalize_tensor/1` compatibility functions delegate to Vettore's runtime
+`Vettore.Interop.Nx` boundary. If an application exchanges Nx tensors, that
+application can install Nx itself:
 
 ```elixir
 def deps do
@@ -363,6 +370,25 @@ end
 Without a host-provided Nx module those two conversion calls return
 `{:error, :nx_not_available}`; all ordinary memory and embedding paths continue
 to use Vettore lists and f32 binaries.
+
+### CPU and GPU execution
+
+Vettore's native SIMD CPU kernels remain the default. GPU execution is native
+`wgpu` work and does not involve Nx. A safe production policy enables it only
+for sufficiently large supported operations and falls back to CPU:
+
+```elixir
+config :vettore,
+  gpu: :auto,
+  gpu_min_size: 1_000_000,
+  gpu_fallback: :cpu
+```
+
+This global policy applies to vector normalization and Model2Vec pooling used by
+SpectreMnemonic, as well as eligible Vettore exact reranking. Inspect the
+runtime with `Vettore.Compute.info/0`, `Vettore.gpu_detected?/0`, and
+`Vettore.gpu_info/0`. Tune the threshold on the deployment hardware; small
+single-vector operations are normally faster on CPU.
 
 Active vectors are indexed through one Vettore collection per
 `{namespace, scope}`:
@@ -385,8 +411,34 @@ config :spectre_mnemonic,
 ```
 
 The hybrid strategy combines HNSW candidates, quantized candidates, and exact
-reranking. Failures fall back to deterministic ETS scoring. Consolidation copies
-existing vectors and signatures; it does not re-embed text.
+reranking. HNSW traversal remains on CPU; the global Vettore GPU policy can
+accelerate an eligible exact rerank.
+
+For a large, read-heavy exact index, opt into Vettore's resident GPU Flat path:
+
+```elixir
+config :spectre_mnemonic,
+  embedding: [
+    index: [
+      backend: :vettore,
+      vettore_index: :flat,
+      strategy: :exact,
+      vettore_index_options: [
+        gpu: :auto,
+        gpu_min_size: 1_000_000,
+        gpu_fallback: :cpu
+      ]
+    ]
+  ]
+```
+
+Flat amortizes its device upload across warm queries. Frequent inserts or
+deletes invalidate the resident snapshot, so CPU or a higher threshold is
+usually better for small or write-heavy partitions. GPU Flat currently returns
+at most 64 results per search before its configured fallback applies. All
+Vettore failures still fall back to deterministic ETS scoring.
+Consolidation copies existing vectors and signatures; it does not re-embed
+text.
 
 ## Graph links, entities, and Atlas
 
@@ -542,4 +594,5 @@ partition key shredding.
 
 - [Retrieval and knowledge](RETRIEVAL_AND_KNOWLEDGE.md)
 - [Persistence and operations](PERSISTENCE_AND_OPERATIONS.md)
+- [Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md)
 - [Complete facade API guide](API_GUIDE.md)

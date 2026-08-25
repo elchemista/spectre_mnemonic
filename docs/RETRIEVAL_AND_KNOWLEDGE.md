@@ -456,4 +456,5 @@ SpectreMnemonic.status("search-1", scope: {:project, "search"})
 
 - [Writing and connecting memory](MEMORY_GUIDE.md)
 - [Persistence and operations](PERSISTENCE_AND_OPERATIONS.md)
+- [Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md)
 - [Complete facade API guide](API_GUIDE.md)

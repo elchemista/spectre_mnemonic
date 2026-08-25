@@ -1,7 +1,7 @@
 defmodule SpectreMnemonic.Export.Reader do
   @moduledoc false
 
-  alias SpectreMnemonic.Export.CanonicalJSON
+  alias SpectreMnemonic.JSON
   alias SpectreMnemonic.Persistence.Store.FileFrame
 
   @magic "SMNE"
@@ -17,8 +17,10 @@ defmodule SpectreMnemonic.Export.Reader do
   @spec read(Path.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def read(path, opts \\ []) do
     with :ok <- validate_reader_options(path, opts),
+         :ok <- JSON.ensure_decoder(),
          :ok <- verify_file(path),
-         {:ok, frames} <- fold_frames(path, [], fn frame, acc -> {:cont, [frame | acc]} end) do
+         {:ok, frames} <-
+           fold_frames(path, [], fn frame, _json, acc -> {:cont, [frame | acc]} end) do
       {:ok, Enum.reverse(frames)}
     end
   end
@@ -26,6 +28,7 @@ defmodule SpectreMnemonic.Export.Reader do
   @spec stream(Path.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(path, opts \\ []) do
     with :ok <- validate_reader_options(path, opts),
+         :ok <- JSON.ensure_decoder(),
          :ok <- verify_file(path) do
       {:ok, frame_stream(path)}
     end
@@ -55,27 +58,32 @@ defmodule SpectreMnemonic.Export.Reader do
       digest: :crypto.hash_init(:sha256)
     }
 
-    case fold_frames(path, initial, &verify_frame/2) do
+    case fold_frames(path, initial, &verify_frame/3) do
       {:ok, state} -> finalize_verification(state)
       {:error, _reason} = error -> error
     end
   end
 
-  @spec verify_frame(map(), map()) :: {:cont, map()} | {:halt, map()}
-  defp verify_frame(%{"section" => "manifest", "data" => manifest}, %{manifest: nil} = state)
+  @spec verify_frame(map(), binary(), map()) :: {:cont, map()} | {:halt, map()}
+  defp verify_frame(
+         %{"section" => "manifest", "data" => manifest},
+         _json,
+         %{manifest: nil} = state
+       )
        when is_map(manifest) and state.last_section == -1 do
     {:cont, %{state | manifest: manifest}}
   end
 
   defp verify_frame(
          %{"section" => "trailer", "data" => trailer},
+         _json,
          %{trailer: nil} = state
        )
        when is_map(trailer) and state.last_section == 5 do
     {:cont, %{state | trailer: trailer}}
   end
 
-  defp verify_frame(%{"section" => section, "data" => data} = frame, state)
+  defp verify_frame(%{"section" => section, "data" => data}, json, state)
        when section in @content_sections and is_list(data) do
     index = Enum.find_index(@content_sections, &(&1 == section))
 
@@ -90,7 +98,7 @@ defmodule SpectreMnemonic.Export.Reader do
             count + length(data)
           end)
         )
-        |> Map.update!(:digest, &:crypto.hash_update(&1, CanonicalJSON.encode(frame)))
+        |> Map.update!(:digest, &:crypto.hash_update(&1, json))
         |> verify_privacy_data(data)
         |> verify_partition_data(data)
 
@@ -100,7 +108,7 @@ defmodule SpectreMnemonic.Export.Reader do
     end
   end
 
-  defp verify_frame(_frame, state),
+  defp verify_frame(_frame, _json, state),
     do: {:halt, Map.put(state, :error, :invalid_mnemonic_sections)}
 
   @spec verify_partition_data(map(), [term()]) :: map()
@@ -222,7 +230,7 @@ defmodule SpectreMnemonic.Export.Reader do
       else: {:error, {:mnemonic_count_mismatch, actual, manifest_counts, trailer_counts}}
   end
 
-  @spec fold_frames(Path.t(), acc, (map(), acc -> {:cont, acc} | {:halt, acc})) ::
+  @spec fold_frames(Path.t(), acc, (map(), binary(), acc -> {:cont, acc} | {:halt, acc})) ::
           {:ok, acc} | {:error, term()}
         when acc: term()
   defp fold_frames(path, acc, fun) do
@@ -239,7 +247,12 @@ defmodule SpectreMnemonic.Export.Reader do
     end
   end
 
-  @spec read_frames(IO.device(), pos_integer(), acc, (map(), acc -> {:cont, acc} | {:halt, acc})) ::
+  @spec read_frames(
+          IO.device(),
+          pos_integer(),
+          acc,
+          (map(), binary(), acc -> {:cont, acc} | {:halt, acc})
+        ) ::
           {:ok, acc} | {:error, term()}
         when acc: term()
   defp read_frames(io, expected, acc, fun) do
@@ -247,8 +260,8 @@ defmodule SpectreMnemonic.Export.Reader do
       :eof ->
         {:ok, acc}
 
-      {:ok, frame} ->
-        case fun.(frame, acc) do
+      {:ok, frame, json} ->
+        case fun.(frame, json, acc) do
           {:cont, acc} -> read_frames(io, expected + 1, acc, fun)
           {:halt, %{error: reason}} -> {:error, reason}
           {:halt, acc} -> {:ok, acc}
@@ -259,7 +272,8 @@ defmodule SpectreMnemonic.Export.Reader do
     end
   end
 
-  @spec decode_next(IO.device(), pos_integer()) :: :eof | {:ok, map()} | {:error, term()}
+  @spec decode_next(IO.device(), pos_integer()) ::
+          :eof | {:ok, map(), binary()} | {:error, term()}
   defp decode_next(io, expected) do
     case IO.binread(io, @header_bytes) do
       :eof ->
@@ -285,7 +299,7 @@ defmodule SpectreMnemonic.Export.Reader do
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer()
-        ) :: {:ok, map()} | {:error, term()}
+        ) :: {:ok, map(), binary()} | {:error, term()}
   defp decode_payload(io, expected, sequence, length, crc) do
     maximum = FileFrame.max_payload_bytes()
 
@@ -302,14 +316,14 @@ defmodule SpectreMnemonic.Export.Reader do
              {:ok, json} <- gunzip(payload, sequence, maximum),
              {:ok, frame} <- decode_json(json, sequence),
              :ok <- validate_frame(frame, sequence) do
-          {:ok, frame}
+          {:ok, frame, json}
         end
     end
   end
 
   @spec decode_json(binary(), pos_integer()) :: {:ok, term()} | {:error, term()}
   defp decode_json(json, sequence) do
-    case Jason.decode(json) do
+    case JSON.decode(json) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, _reason} -> {:error, {:invalid_mnemonic_json, sequence}}
     end
@@ -506,7 +520,7 @@ defmodule SpectreMnemonic.Export.Reader do
         {:open, io, expected} = state ->
           case decode_next(io, expected) do
             :eof -> {:halt, state}
-            {:ok, frame} -> {[frame], {:open, io, expected + 1}}
+            {:ok, frame, _json} -> {[frame], {:open, io, expected + 1}}
             {:error, reason} -> {[{:error, reason}], {:halted, io}}
           end
 

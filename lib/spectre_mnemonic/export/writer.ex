@@ -5,6 +5,7 @@ defmodule SpectreMnemonic.Export.Writer do
   alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Export.CanonicalJSON
   alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.JSON
   alias SpectreMnemonic.Knowledge.SMEM
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.Manager
@@ -18,6 +19,7 @@ defmodule SpectreMnemonic.Export.Writer do
   @spec write(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def write(path, opts) do
     with :ok <- validate_write_options(path, opts),
+         :ok <- JSON.ensure_encoder(),
          {:ok, opts} <- Identity.put_namespace(opts),
          {:ok, sections, snapshot_at} <- sections(opts),
          {:ok, frames} <- content_frames(sections, opts),

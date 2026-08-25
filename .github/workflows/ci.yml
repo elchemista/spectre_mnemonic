@@ -20,7 +20,7 @@ env:
 
 jobs:
   test:
-    name: Test and Credo
+    name: Quality and test
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -38,13 +38,25 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Install dependencies
-        run: mix deps.get
+        run: mix deps.get --check-locked
+
+      - name: Audit Hex dependencies
+        run: mix hex.audit
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Compile without warnings
+        run: mix compile --warnings-as-errors
+
+      - name: Run Credo
+        run: mix credo --strict
 
       - name: Run tests
         run: mix test
 
-      - name: Run Credo (non-strict)
-        run: mix credo
+      - name: Run local demonstration
+        run: mix run --no-start example/demo.exs
 
   dialyzer:
     name: Dialyzer
@@ -65,7 +77,61 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
 
       - name: Install dependencies
-        run: mix deps.get
+        run: mix deps.get --check-locked
 
       - name: Run Dialyzer
         run: mix dialyzer
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      MIX_ENV: dev
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Elixir and Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Install dependencies
+        run: mix deps.get --check-locked
+
+      - name: Build documentation
+        run: mix docs --warnings-as-errors
+
+  minimal-consumer:
+    name: Minimal optional-dependency consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      MIX_ENV: dev
+    defaults:
+      run:
+        working-directory: test/fixtures/minimal_consumer
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Elixir and Erlang/OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - name: Resolve consumer dependencies
+        run: mix deps.get --check-locked
+
+      - name: Compile without Tokenizers or Nx
+        run: mix compile --warnings-as-errors
+
+      - name: Run built-in JSON smoke test
+        run: mix run -e 'SpectreMnemonicMinimalConsumer.smoke!()'

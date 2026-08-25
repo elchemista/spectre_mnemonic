@@ -14,6 +14,7 @@ defmodule SpectreMnemonic.MixProject do
       version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
+      test_ignore_filters: [~r|^test/fixtures/|],
       deps: deps(),
       description: description(),
       dialyzer: [plt_add_apps: [:mix]],
@@ -26,9 +27,11 @@ defmodule SpectreMnemonic.MixProject do
           "docs/MEMORY_GUIDE.md",
           "docs/RETRIEVAL_AND_KNOWLEDGE.md",
           "docs/PERSISTENCE_AND_OPERATIONS.md",
+          "docs/PRIVACY_AND_GDPR.md",
           "docs/API_GUIDE.md",
           "docs/PUBLIC_API.md",
           "docs/MNEMONIC_FORMAT.md",
+          "RELEASE.md",
           "CHANGELOG.md",
           "LICENSE"
         ],
@@ -38,9 +41,10 @@ defmodule SpectreMnemonic.MixProject do
             "docs/MEMORY_GUIDE.md",
             "docs/RETRIEVAL_AND_KNOWLEDGE.md",
             "docs/PERSISTENCE_AND_OPERATIONS.md",
+            "docs/PRIVACY_AND_GDPR.md",
             "docs/API_GUIDE.md"
           ],
-          Reference: ["docs/PUBLIC_API.md", "docs/MNEMONIC_FORMAT.md"]
+          Reference: ["docs/PUBLIC_API.md", "docs/MNEMONIC_FORMAT.md", "RELEASE.md"]
         ]
       ],
       source_url: @source_url,
@@ -72,8 +76,8 @@ defmodule SpectreMnemonic.MixProject do
        ref: "dddbf068d0202ba6d0a3788cc03992dc95203eaf",
        only: :test,
        runtime: false},
-      {:jason, "~> 1.4"},
-      {:tokenizers, "~> 0.5"},
+      {:jason, "~> 1.4", optional: true},
+      {:tokenizers, "~> 0.5", optional: true},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
@@ -86,7 +90,7 @@ defmodule SpectreMnemonic.MixProject do
         {:vettore, path: Path.expand(path, __DIR__), override: true}
 
       _unset ->
-        {:vettore, "~> 0.3.4"}
+        {:vettore, "~> 0.3.5"}
     end
   end
 

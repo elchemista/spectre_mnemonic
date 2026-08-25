@@ -18,15 +18,17 @@ end
 
 There is currently no Hex package for SpectreMnemonic.
 
-## Configure an identity and hot-memory bounds
+## Configure identity, JSON, and hot-memory bounds
 
 Every memory record belongs to one application namespace. Choose a stable value
-and keep it unchanged across releases:
+and keep it unchanged across releases. Elixir 1.19 includes the dependency-free
+`JSON` module, so it is the smallest default choice:
 
 ```elixir
 # config/config.exs
 config :spectre_mnemonic,
   namespace: "my_app_memory",
+  json_library: JSON,
   hot_memory: [
     max_moments_per_scope: 1_000,
     max_moments_per_namespace: 10_000
@@ -36,6 +38,53 @@ config :spectre_mnemonic,
 The namespace prevents another application instance's records from entering
 replay or search. A missing namespace fails at the API boundary instead of
 silently sharing a default partition.
+
+### Choose a JSON implementation
+
+SpectreMnemonic does not select or start a JSON library. The configured module
+must export `decode/1` and either `encode/1` or `encode!/1`. JSON is used by
+`.mnemonic` exports/readers and by the local Model2Vec loader; operations that
+do not touch those features work without `:json_library`.
+
+Use the built-in implementation to add no dependency:
+
+```elixir
+config :spectre_mnemonic, json_library: JSON
+```
+
+Or let the host application own Jason:
+
+```elixir
+# mix.exs
+{:jason, "~> 1.4"}
+
+# config/config.exs
+config :spectre_mnemonic, json_library: Jason
+```
+
+Missing, unavailable, or incomplete adapters return explicit
+`:json_library_not_configured` or `{:json_*, ...}` errors at the feature
+boundary. SpectreMnemonic declares Jason as optional, so consumer applications
+must declare it themselves when selecting it.
+
+### Install only optional feature dependencies you use
+
+The base memory and Vettore paths do not require these packages:
+
+```elixir
+def deps do
+  [
+    # Accurate Hugging Face tokenization for the local Model2Vec provider:
+    {:tokenizers, "~> 0.5"},
+    # Compatibility only when the host exchanges Nx tensors:
+    {:nx, "~> 0.11"}
+  ]
+end
+```
+
+Without `tokenizers`, the local Model2Vec adapter uses its bounded lexical
+fallback. Without Nx, ordinary list and little-endian f32 vector operations
+continue through Vettore.
 
 The normal OTP application starts:
 
@@ -281,4 +330,5 @@ Mnemonic application or claim separate named processes and ETS tables.
 - [Writing and connecting memory](MEMORY_GUIDE.md)
 - [Retrieval and knowledge](RETRIEVAL_AND_KNOWLEDGE.md)
 - [Persistence and operations](PERSISTENCE_AND_OPERATIONS.md)
+- [Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md)
 - [Complete facade API guide](API_GUIDE.md)

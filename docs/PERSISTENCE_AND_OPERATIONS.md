@@ -2,7 +2,9 @@
 
 This guide covers durable storage, hybrid search, compaction, scheduling,
 exports, logical forgetting, physical erasure, operational limits, evaluation,
-and development commands.
+and development commands. For controller/processor responsibilities and a
+data-subject request runbook, read
+[Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md).
 
 ## Durable storage
 
@@ -234,6 +236,9 @@ Sweep expired validity windows:
 ~~~
 
 The returned count includes active-only and durable expired moments.
+`valid_until` records do not schedule their own sweep. The host must run this
+operation on its retention schedule and separately govern backups, logs,
+exports, and processor-held copies.
 
 ## Physical partition erasure
 
@@ -311,7 +316,21 @@ optional crypto result.
 
 ## Export a partition
 
-Write one verified .mnemonic file:
+Export requires the host-selected JSON implementation:
+
+~~~elixir
+# Dependency-free on Elixir 1.19:
+config :spectre_mnemonic, json_library: JSON
+
+# Or add Jason to the host deps and select it:
+config :spectre_mnemonic, json_library: Jason
+~~~
+
+The module must provide `decode/1` and either `encode/1` or `encode!/1`.
+Missing or unavailable configuration fails before a file is written or
+verified.
+
+Write one verified `.mnemonic` file:
 
 ~~~elixir
 {:ok, report} =
@@ -342,9 +361,10 @@ structure mode is topology-only. It removes raw memory text, canonical entity
 labels, aliases, cluster titles, category labels, arbitrary metadata, vectors,
 and secret labels.
 
-full mode is the subject-access/data-portability projection. Secrets still never
-export plaintext or cryptographic material; they expose at most presence, label,
-and dates.
+`full` mode is the broad subject-access/data-portability projection. Secrets
+still never export plaintext or cryptographic material; they expose at most
+presence, label, and dates. The host must still establish which data and
+context an applicable request requires.
 
 Caller redaction receives each projected record:
 
@@ -407,8 +427,12 @@ stable ordering, and compute exact counts. Size the exporter for its partition.
 read/2 and stream/2 return detached data only. Format version 1 has no import or
 live-memory restore operation. Runtime recovery uses persistent-store replay.
 Exported copies are host-owned and remain outside erase_partition/1.
+The container is integrity-checked, not encrypted; protect it in storage and
+transit and delete temporary copies on the host's retention schedule.
 
 The normative contract is [.mnemonic format version 1](MNEMONIC_FORMAT.md).
+The operational privacy workflow is
+[Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md).
 
 ## Evaluation and development
 
@@ -423,16 +447,19 @@ It reports recall accuracy, exact-fact recall, and latency.
 Run the local demonstration:
 
 ~~~bash
-mix run example/demo.exs
+mix run --no-start example/demo.exs
 ~~~
 
 Standard checks:
 
 ~~~bash
 mix format --check-formatted
+mix compile --warnings-as-errors
 mix credo --strict
 mix dialyzer
 mix test
+mix docs --warnings-as-errors
+mix hex.audit
 ~~~
 
 The default suite is offline and excludes model-backed system tests.
@@ -482,5 +509,7 @@ The downloaded model cache is local-only and ignored by Git.
 ## Related guides
 
 - [Getting started](GETTING_STARTED.md)
+- [Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md)
 - [Complete facade API guide](API_GUIDE.md)
 - [Public API manifest](PUBLIC_API.md)
+- [Release checklist](../RELEASE.md)

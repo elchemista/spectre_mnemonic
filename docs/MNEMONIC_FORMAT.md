@@ -11,8 +11,11 @@ For writer, reader, stream, and erasure examples, see
 A `.mnemonic` file is a host-owned, trusted/local subject-access artifact. It
 may contain personal data in `full` mode and must be protected accordingly.
 Exported copies are outside `erase_partition/1` and must be deleted by their
-owner. A reader must never decode an Erlang term from this container. Version 1
-payloads are UTF-8 canonical JSON only.
+owner. The checksums provide integrity, not encryption. A reader must never
+decode an Erlang term from this container. Version 1 payloads are UTF-8
+canonical JSON only. See
+[Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md) for the
+host-side disclosure and deletion workflow.
 
 ## File framing
 
@@ -54,6 +57,20 @@ Object keys are serialized in ascending Unicode codepoint order. Arrays retain
 their specified order. Records are ordered by `family`, then `inserted_at`, then
 `id`. Timestamps use ISO 8601 UTC strings. Non-UTF-8 binaries, when explicitly
 included, use `{"$binary":"BASE64"}`.
+
+The bundled writer and reader use the host module configured as
+`config :spectre_mnemonic, json_library: ...`. It must export `decode/1` and
+either `encode/1` or `encode!/1`. The canonical layer owns object ordering,
+array order, and container structure; the adapter encodes JSON strings and
+numbers and decodes frames. Elixir's `JSON` and Jason are covered by the
+interchange tests. Adapter identity is not stored in the file.
+
+Consumers must not assume exports produced by different JSON adapter
+implementations or versions are byte-for-byte equal: valid string escaping and
+number lexical forms can differ. Digest verification remains portable because
+the reader hashes the exact expanded frame bytes rather than re-encoding the
+decoded value. For repeatable byte-level exports, keep the adapter and its
+version stable.
 
 ## Section order and chunking
 
@@ -135,9 +152,11 @@ metadata, cluster titles, canonical entity labels, aliases, categories, and
 secret labels. Readers scan forbidden keys recursively, including nested
 metadata.
 
-`full` is the Article 15/20 subject-access representation. It includes record
-payloads and provenance. Embedding fields remain excluded unless the writer is
-called with `embeddings?: true`.
+`full` is the broad projection intended to support subject-access and, where
+applicable, portability workflows. It includes record payloads and provenance.
+The host determines the final disclosure and contextual information required
+by law. Embedding fields remain excluded unless the writer is called with
+`embeddings?: true`.
 
 `redacted` applies the caller's one-arity redaction function to every non-secret
 payload before JSON encoding. Deterministic output requires a deterministic
@@ -163,9 +182,11 @@ runtime restart does not drop cluster history.
 ## Digest and verification
 
 For every content frame from `nodes` through `governance`, including every
-chunk, canonical-encode the whole decoded frame object (including `section` and
-`data`) without compression. Concatenate those byte strings in file order and
-compute SHA-256. The lowercase hex result must equal both
+chunk, take the exact expanded canonical JSON payload bytes (the whole frame
+object including `section` and `data`) before compression. Concatenate those
+byte strings in file order and compute SHA-256. A reader hashes those expanded
+bytes directly; it does not re-encode the decoded value. The lowercase hex
+result must equal both
 `manifest.content_digest` and `trailer.content_digest`. Counts are the sum of
 records across all chunks of a logical section.
 

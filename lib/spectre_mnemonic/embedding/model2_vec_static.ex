@@ -12,7 +12,8 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   alias SpectreMnemonic.Embedding.ModelDownloader
   alias SpectreMnemonic.Embedding.Vector
 
-  @vettore_vector Module.concat(["Vettore", "Vector"])
+  @tokenizer_module Module.concat(["Tokenizers", "Tokenizer"])
+  @encoding_module Module.concat(["Tokenizers", "Encoding"])
 
   @doc "Embeds input using local Model2Vec artifacts."
   @spec embed(term(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -64,7 +65,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   defp load_json(path) do
     with :ok <- ensure_file(path),
          {:ok, body} <- File.read(path) do
-      Jason.decode(body)
+      SpectreMnemonic.JSON.decode(body)
     end
   end
 
@@ -73,7 +74,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     with :ok <- ensure_file(path),
          {:ok, <<header_size::little-unsigned-integer-64, rest::binary>>} <- File.read(path),
          <<header_json::binary-size(^header_size), tensor_data::binary>> <- rest,
-         {:ok, header} <- Jason.decode(header_json),
+         {:ok, header} <- SpectreMnemonic.JSON.decode(header_json),
          {:ok, tensor_name, tensor} <- find_f32_matrix(header),
          {:ok, start_offset, end_offset, rows, dimensions} <-
            tensor_layout(tensor, byte_size(tensor_data)) do
@@ -157,17 +158,36 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
 
   @spec hf_token_ids(binary(), Path.t()) :: {:ok, [integer()]} | :error
   defp hf_token_ids(text, tokenizer_path) do
-    with true <- Code.ensure_loaded?(Tokenizers.Tokenizer),
-         true <- Code.ensure_loaded?(Tokenizers.Encoding),
-         {:ok, tokenizer} <- Tokenizers.Tokenizer.from_file(tokenizer_path),
+    with {:ok, tokenizer} <- optional_call(@tokenizer_module, :from_file, [tokenizer_path]),
          {:ok, encoding} <-
-           Tokenizers.Tokenizer.encode(tokenizer, text, add_special_tokens: false) do
-      {:ok, Tokenizers.Encoding.get_ids(encoding)}
+           optional_call(@tokenizer_module, :encode, [
+             tokenizer,
+             text,
+             [add_special_tokens: false]
+           ]),
+         ids when is_list(ids) <- optional_call(@encoding_module, :get_ids, [encoding]) do
+      {:ok, ids}
     else
       _error -> :error
     end
   rescue
     _exception -> :error
+  end
+
+  @spec optional_call(module(), atom(), [term()]) :: term()
+  defp optional_call(module, function, args) do
+    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
+      # Optional dependencies require runtime dispatch so downstream projects
+      # can compile without the Tokenizers modules being present.
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(module, function, args)
+    else
+      :unavailable
+    end
+  rescue
+    _exception -> :unavailable
+  catch
+    _kind, _reason -> :unavailable
   end
 
   @spec fallback_token_ids(binary(), map()) :: [integer()]
@@ -210,56 +230,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
     if token_ids == [] do
       {:error, :tokens_out_of_vocab}
     else
-      mean_pool_with_vettore(data, dimensions, token_ids)
-    end
-  end
-
-  @spec mean_pool_with_vettore(binary(), pos_integer(), [non_neg_integer()]) ::
-          {:ok, [float()]} | {:error, term()}
-  defp mean_pool_with_vettore(data, dimensions, token_ids) do
-    if Code.ensure_loaded?(@vettore_vector) and
-         function_exported?(@vettore_vector, :mean_pool_f32, 4) do
-      # Dynamic dispatch lets the current Hex release use the compatibility
-      # fallback until the representation API is available in a release.
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(@vettore_vector, :mean_pool_f32, [data, dimensions, token_ids, [as: :list]])
-    else
-      mean_pool_compat(data, dimensions, token_ids)
-    end
-  rescue
-    _exception -> {:error, :invalid_model_artifacts}
-  catch
-    _kind, _reason -> {:error, :invalid_model_artifacts}
-  end
-
-  # Remove this fallback after the minimum Vettore release includes
-  # `Vettore.Vector.mean_pool_f32/4`.
-  @spec mean_pool_compat(binary(), pos_integer(), [non_neg_integer()]) ::
-          {:ok, [float()]} | {:error, :tokens_out_of_vocab}
-  defp mean_pool_compat(data, dimensions, token_ids) do
-    vectors =
-      token_ids
-      |> Enum.map(&read_row(data, &1, dimensions))
-
-    mean =
-      vectors
-      |> Enum.zip()
-      |> Enum.map(fn tuple ->
-        tuple
-        |> Tuple.to_list()
-        |> Enum.sum()
-        |> Kernel./(length(vectors))
-      end)
-
-    {:ok, mean}
-  end
-
-  @spec read_row(binary(), non_neg_integer(), pos_integer()) :: [float()]
-  defp read_row(data, row, dimensions) do
-    offset = row * dimensions * 4
-
-    for <<value::little-float-32 <- binary_part(data, offset, dimensions * 4)>> do
-      value
+      Vettore.Vector.mean_pool_f32(data, dimensions, token_ids, as: :list)
     end
   end
 end

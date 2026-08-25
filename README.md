@@ -55,17 +55,25 @@ def deps do
 end
 ```
 
-Configure a stable namespace. It identifies the owning application and must
-remain unchanged across deployments:
+Configure a stable namespace and choose the JSON implementation owned by the
+host application. Elixir's built-in `JSON` module requires no extra
+dependency:
 
 ```elixir
 config :spectre_mnemonic,
   namespace: "my_app_memory",
+  json_library: JSON,
   hot_memory: [
     max_moments_per_scope: 1_000,
     max_moments_per_namespace: 10_000
   ]
 ```
+
+`json_library` is required only by JSON-backed features: `.mnemonic`
+export/read operations and the local Model2Vec artifact loader. The rest of the
+memory engine starts and runs without a JSON package. To use Jason instead, add
+`{:jason, "~> 1.4"}` to the host application's dependencies and configure
+`json_library: Jason`. Do not rely on a transitive JSON dependency.
 
 The OTP application starts the ETS owner, active focus, persistence manager,
 durable index, recall engine, and progressive-knowledge writer.
@@ -184,7 +192,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
 - Partition-local entity resolution, typed graph links, reversible merges,
   Episodes, and deterministic Atlas projections.
 - Optional caller-provided or adapter-generated embeddings normalized, pooled,
-  and indexed through Vettore without requiring Nx.
+  and indexed through Vettore 0.3.5, with native CPU/GPU execution and no Nx
+  requirement.
 - BM25-style durable search with text, entity, vector, binary-signature, and
   lifecycle signals.
 - Evidence-grounded observations, curated mental models, and structured
@@ -209,11 +218,16 @@ The full setup, isolation behavior, and direct adapter calls are documented in
   knowledge.
 - [Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md) — stores,
   compaction, scheduler, export, erasure, evaluation, and operational limits.
+- [Privacy, data protection, and GDPR operations](docs/PRIVACY_AND_GDPR.md) —
+  responsibility boundaries, minimisation, retention, subject requests, and
+  verified erasure.
 - [API guide](docs/API_GUIDE.md) — every `SpectreMnemonic` facade call grouped by
   use case, with return values and examples.
 - [`.mnemonic` format](docs/MNEMONIC_FORMAT.md) — normative container, privacy,
   validation, and reader contract.
 - [Public API manifest](docs/PUBLIC_API.md) — normative compatibility surface.
+- [Release checklist](RELEASE.md) — version alignment, compatibility, quality,
+  documentation, distribution, and privacy gates.
 
 ## Important boundaries
 
@@ -224,6 +238,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
   physical erasure for supported stores.
 - `.mnemonic` read and stream calls validate detached exports. Format version 1
   does not import or restore data into live memory.
+- A `.mnemonic` file is not encrypted. Exported copies, backups, provider data,
+  and host logs remain outside `erase_partition/1`.
 - Embeddings are optional. Text, fingerprints, graph traversal, and durable
   scoring continue to work without a model.
 - Action recipes are inert data unless an application explicitly configures an
@@ -234,16 +250,19 @@ The full setup, isolation behavior, and direct adapter calls are documented in
 Run the local end-to-end demonstration:
 
 ```bash
-mix run example/demo.exs
+mix run --no-start example/demo.exs
 ```
 
 Run the standard quality checks:
 
 ```bash
 mix format --check-formatted
+mix compile --warnings-as-errors
 mix credo --strict
 mix dialyzer
 mix test
+mix docs --warnings-as-errors
+mix hex.audit
 ```
 
 The default test suite is offline. Real local embedding and Spectre Agent test

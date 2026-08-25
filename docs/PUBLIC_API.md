@@ -19,6 +19,13 @@ type, and struct contract.
 restore callable; persistent runtime recovery remains the responsibility of the
 configured store replay path.
 
+The runtime configuration contract includes a required stable `:namespace` and
+an explicit `:json_library` for JSON-backed features. The JSON module must
+export `decode/1` and either `encode/1` or `encode!/1`. There is no implicit
+adapter fallback. Elixir's built-in `JSON` requires no package; applications
+that select Jason must declare it directly. Nx and `tokenizers` remain optional
+host dependencies.
+
 ## Manifest
 
 - `Spectre.Mnemonic`

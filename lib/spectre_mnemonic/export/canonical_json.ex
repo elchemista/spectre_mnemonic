@@ -9,8 +9,8 @@ defmodule SpectreMnemonic.Export.CanonicalJSON do
   defp encode_value(true), do: "true"
   defp encode_value(false), do: "false"
   defp encode_value(value) when is_integer(value), do: Integer.to_string(value)
-  defp encode_value(value) when is_float(value), do: Jason.encode!(value)
-  defp encode_value(value) when is_binary(value), do: Jason.encode!(value)
+  defp encode_value(value) when is_float(value), do: SpectreMnemonic.JSON.encode!(value)
+  defp encode_value(value) when is_binary(value), do: SpectreMnemonic.JSON.encode!(value)
 
   defp encode_value(value) when is_list(value) do
     "[" <> Enum.map_join(value, ",", &encode_value/1) <> "]"
@@ -22,7 +22,7 @@ defmodule SpectreMnemonic.Export.CanonicalJSON do
       |> Enum.map(fn {key, item} -> {to_string(key), item} end)
       |> Enum.sort_by(fn {key, _item} -> key end)
       |> Enum.map_join(",", fn {key, item} ->
-        Jason.encode!(key) <> ":" <> encode_value(item)
+        SpectreMnemonic.JSON.encode!(key) <> ":" <> encode_value(item)
       end)
 
     "{" <> entries <> "}"

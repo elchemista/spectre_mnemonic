@@ -10,17 +10,37 @@ alias SpectreMnemonic.Knowledge.Base
 alias SpectreMnemonic.Persistence.Manager
 alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
 
+Application.put_env(:spectre_mnemonic, :namespace, "spectre_mnemonic_example")
+Application.put_env(:spectre_mnemonic, :json_library, JSON)
+
 log = fn step, message ->
   time = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
   IO.puts("[#{time}] #{String.pad_trailing(step, 12)} #{message}")
 end
 
-preview = fn text ->
-  if String.length(text) > 110 do
-    String.slice(text, 0, 107) <> "..."
-  else
-    text
-  end
+preview = fn
+  text when is_binary(text) ->
+    if String.length(text) > 110 do
+      String.slice(text, 0, 107) <> "..."
+    else
+      text
+    end
+
+  value ->
+    inspect(value, limit: 20, printable_limit: 110)
+end
+
+write_json_if_changed = fn path, encoded ->
+  unchanged? =
+    with {:ok, existing} <- File.read(path),
+         {:ok, existing_value} <- JSON.decode(existing),
+         {:ok, encoded_value} <- JSON.decode(encoded) do
+      existing_value == encoded_value
+    else
+      _error -> false
+    end
+
+  unless unchanged?, do: File.write!(path, encoded)
 end
 
 write_tiny_model = fn model_dir ->
@@ -71,7 +91,7 @@ write_tiny_model = fn model_dir ->
     end)
 
   header =
-    Jason.encode!(%{
+    JSON.encode!(%{
       "embeddings" => %{
         "dtype" => "F32",
         "shape" => [map_size(vocab), 4],
@@ -79,18 +99,18 @@ write_tiny_model = fn model_dir ->
       }
     })
 
-  File.write!(
+  write_json_if_changed.(
     Path.join(model_dir, "config.json"),
-    Jason.encode!(%{
+    JSON.encode!(%{
       "model_type" => "model2vec",
       "dim" => 4,
       "description" => "Tiny example fixture for SpectreMnemonic parallel_memory"
     })
   )
 
-  File.write!(
+  write_json_if_changed.(
     Path.join(model_dir, "tokenizer.json"),
-    Jason.encode!(%{"model" => %{"vocab" => vocab}})
+    JSON.encode!(%{"model" => %{"vocab" => vocab}})
   )
 
   File.write!(
@@ -127,13 +147,6 @@ Application.put_env(:spectre_mnemonic, :consolidation_scheduler,
   min_attention: 1.0
 )
 
-demo_embedding = SpectreMnemonic.Embedding.Service.embed("parallel durable replay task", [])
-
-log.(
-  "model",
-  "Smoke test vector_dims=#{Vector.dimensions(demo_embedding.vector)} signature_bytes=#{byte_size(demo_embedding.binary_signature || <<>>)}"
-)
-
 log.("setup", "Configuring persistent memory to use local append-only file storage")
 
 Application.put_env(:spectre_mnemonic, :persistent_memory,
@@ -149,6 +162,15 @@ Application.put_env(:spectre_mnemonic, :persistent_memory,
       opts: [data_root: data_root]
     ]
   ]
+)
+
+{:ok, _applications} = Application.ensure_all_started(:spectre_mnemonic)
+
+demo_embedding = SpectreMnemonic.Embedding.Service.embed("parallel durable replay task", [])
+
+log.(
+  "model",
+  "Smoke test vector_dims=#{Vector.dimensions(demo_embedding.vector)} signature_bytes=#{byte_size(demo_embedding.binary_signature || <<>>)}"
 )
 
 files = [
@@ -505,7 +527,7 @@ log.("search", "Searching active memory plus durable stores for replay records m
 
 Enum.each(search_results, fn result ->
   record = Map.get(result, :record)
-  text = if record && Map.has_key?(record, :text), do: record.text, else: inspect(result)
+  text = (record && Map.get(record, :text)) || Map.get(result, :text) || inspect(result)
 
   log.(
     "search",
@@ -521,11 +543,14 @@ log.("hybrid", "Running durable hybrid search with lifecycle ranking")
 Enum.each(hybrid_results, fn result ->
   log.(
     "hybrid",
-    "source=#{Map.get(result, :source, "-")} family=#{Map.get(result, :family, "-")} state=#{Map.get(result, :state, "-")} score=#{Float.round(Map.get(result, :score, 0.0) * 1.0, 3)} #{preview.(Map.get(result, :text, inspect(result)))}"
+    "source=#{Map.get(result, :source, "-")} family=#{Map.get(result, :family, "-")} state=#{Map.get(result, :state, "-")} score=#{Float.round(Map.get(result, :score, 0.0) * 1.0, 3)} #{preview.(Map.get(result, :text) || inspect(result))}"
   )
 end)
 
-log.("scheduler", "Scheduler is opt-in; current status #{inspect(ConsolidationScheduler.status())}")
+log.(
+  "scheduler",
+  "Scheduler is opt-in; current status #{inspect(ConsolidationScheduler.status())}"
+)
 
 log.("compact", "Running semantic persistent memory compaction")
 {:ok, semantic_compact_results} = Manager.compact(mode: :semantic)

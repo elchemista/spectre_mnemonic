@@ -8,8 +8,27 @@ release declarations.
 
 ## [Unreleased]
 
+### Migration
+
+- Configure `config :spectre_mnemonic, json_library: JSON` before using
+  `.mnemonic` export/read or local Model2Vec. Applications choosing Jason must
+  add `{:jason, "~> 1.4"}` directly and set `json_library: Jason`.
+- Applications that require complete Hugging Face tokenization for local
+  Model2Vec must declare `{:tokenizers, "~> 0.5"}`. The provider otherwise uses
+  its bounded vocabulary fallback.
+
 ### Added
 
+- Added a configurable `:json_library` boundary supporting Elixir's built-in
+  `JSON`, Jason, and compatible host-owned adapters, with explicit
+  configuration and capability errors.
+- Added Vettore 0.3.5 CPU/GPU and Flat-index policy integration tests, plus
+  coverage for runtime-only Nx interoperability.
+- Added a privacy and GDPR operations guide covering responsibility boundaries,
+  minimisation, retention, access, rectification, erasure, processor copies,
+  and automated-decision limitations.
+- Added a release checklist covering version alignment, optional dependency
+  consumers, NIF distribution, documentation, security, and privacy gates.
 - Added opt-in `ex_fastembed` system tests with a real local BGE model covering
   semantic top-result accuracy, Vettore strategies, similarity filtering,
   partition isolation, graph aggregation, and durable rebuilds.
@@ -21,10 +40,14 @@ release declarations.
 
 ### Changed
 
-- Replaced the direct Nx dependency with Vettore-backed dense conversion,
-  normalization, cosine/dot scoring, and Model2Vec f32-matrix mean pooling.
+- Updated Vettore to `~> 0.3.5` and replaced local/dynamic vector fallbacks with
+  direct `Vettore.Vector` conversion, validation, normalization, cosine/dot
+  scoring, Model2Vec f32-matrix mean pooling, and runtime Nx interoperability.
   The existing tensor helper functions remain available when Nx is supplied by
   the host application, and the persisted embedding format is unchanged.
+- Made Jason and `tokenizers` optional dependencies. JSON-backed features use
+  the implementation selected by the host, while Model2Vec retains its bounded
+  lexical fallback when the Tokenizers NIF is absent.
 - Preserved repeated Model2Vec token ids during pooling instead of silently
   deduplicating token occurrences.
 - Reorganized the README as a concise entry point and added task-oriented
@@ -62,6 +85,8 @@ release declarations.
   prefer recent nodes, and report truncation to materialization and export.
 - Removed stale lifecycle projections from the durable index after tombstones.
 - Returned typed JSON/open/stream errors from `.mnemonic` readers.
+- Kept JSON-free core operations independent of a JSON package and made
+  JSON-backed operations fail explicitly when no adapter is configured.
 
 ### Security
 
@@ -71,6 +96,9 @@ release declarations.
 - Fail durable writes closed when the erasure marker guard cannot be checked.
 - Reject unsupported JSON runtime values instead of serializing nondeterministic
   `inspect/1` output.
+- Documented that verified exports are not encrypted and that logical
+  forgetting, physical partition erasure, and host/provider copy deletion are
+  distinct privacy operations.
 
 ### Performance
 

@@ -518,5 +518,6 @@ these calls in production.
 - [Writing and connecting memory](MEMORY_GUIDE.md)
 - [Retrieval and knowledge](RETRIEVAL_AND_KNOWLEDGE.md)
 - [Persistence and operations](PERSISTENCE_AND_OPERATIONS.md)
+- [Privacy, data protection, and GDPR operations](PRIVACY_AND_GDPR.md)
 - [.mnemonic format](MNEMONIC_FORMAT.md)
 - [Exact public API manifest](PUBLIC_API.md)
