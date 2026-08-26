@@ -10,46 +10,82 @@ defmodule SpectreMnemonic.Recall.Index do
 
   use GenServer
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
+  alias SpectreMnemonic.Embedding.Space
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Engine
+  alias SpectreMnemonic.Engine.Config
+  alias SpectreMnemonic.Engine.Projection
+  alias SpectreMnemonic.Engine.Ref
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
+  alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.Telemetry
 
-  @index_table :mnemonic_embedding_index
-  @collection_table :mnemonic_vettore_collections
+  @registry SpectreMnemonic.Engine.Registry
+  @tables_key {__MODULE__, :tables}
+  @config_key {__MODULE__, :config}
 
   @type state :: %{
           vettore: %{optional(tuple()) => map()}
         }
 
   @doc "Starts the index process."
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @spec start_link(keyword() | Config.t()) :: GenServer.on_start()
+  def start_link(opts \\ [])
+  def start_link(%Config{} = config), do: GenServer.start_link(__MODULE__, config)
+
+  def start_link(opts) when is_list(opts),
+    do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc false
+  @spec child_spec(keyword() | Config.t()) :: Supervisor.child_spec()
+  def child_spec(%Config{} = config) do
+    %{
+      id: {__MODULE__, config.ref},
+      start: {__MODULE__, :start_link, [config]}
+    }
   end
+
+  def child_spec(opts) when is_list(opts),
+    do: %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
 
   @doc "Indexes or replaces one moment."
   @spec upsert(SpectreMnemonic.Memory.Moment.t() | SpectreMnemonic.Memory.Secret.t()) :: :ok
-  def upsert(moment) do
-    call_if_running({:upsert, moment})
-  end
+  def upsert(%{namespace: namespace} = moment),
+    do: call_if_running(server_for_namespace(namespace), {:upsert, moment})
+
+  def upsert(_moment), do: :ok
 
   @doc "Removes one moment from the index."
-  @spec delete(binary()) :: :ok
-  def delete(moment_id) do
-    call_if_running({:delete, moment_id})
-  end
+  @spec delete(binary() | map(), keyword()) :: :ok
+  def delete(moment_or_id, opts \\ [])
+
+  def delete(%{id: moment_id, namespace: namespace}, _opts),
+    do: call_if_running(server_for_namespace(namespace), {:delete, moment_id})
+
+  def delete(moment_id, opts) when is_binary(moment_id),
+    do: call_if_running(server_for_opts(opts), {:delete, moment_id})
 
   @doc "Queries indexed active moments by cue embedding."
   @spec query(map(), keyword()) :: {:ok, [map()]}
   def query(cue, opts \\ []) do
-    limit = query_limit(opts)
+    Telemetry.span([:vector, :query], Telemetry.metadata(opts), fn ->
+      with_tables(
+        opts,
+        fn ->
+          limit = query_limit(opts)
 
-    results =
-      (query_vettore_scoped(cue, limit, opts) || brute_force(cue, limit, opts))
-      |> filter_similarity(opts)
-      |> Enum.take(limit)
+          results =
+            (query_vettore_scoped(cue, limit, opts) || brute_force(cue, limit, opts))
+            |> filter_similarity(opts)
+            |> Enum.take(limit)
 
-    {:ok, results}
+          {:ok, results}
+        end,
+        {:ok, []}
+      )
+    end)
   rescue
     ArgumentError -> {:ok, []}
   end
@@ -57,23 +93,57 @@ defmodule SpectreMnemonic.Recall.Index do
   @doc "Clears ETS index state."
   @spec reset :: :ok
   def reset do
-    call_if_running(:reset)
+    Enum.each(index_servers(), &safe_call(&1, :reset))
+    if pid = Process.whereis(__MODULE__), do: safe_call(pid, :reset)
+    :ok
   end
 
   @doc false
-  @spec rebuild :: :ok
-  def rebuild, do: call_if_running(:rebuild)
+  @spec rebuild(keyword()) :: :ok
+  def rebuild(opts \\ []), do: call_if_running(server_for_opts(opts), :rebuild)
 
   @doc false
   @spec purge_partition(keyword()) :: :ok
-  def purge_partition(opts), do: call_if_running({:purge_partition, opts})
+  def purge_partition(opts),
+    do: call_if_running(server_for_opts(opts), {:purge_partition, opts})
+
+  @doc false
+  @spec server(keyword() | binary() | Ref.t()) :: pid() | nil
+  def server(%Ref{} = ref), do: server_for_ref(ref)
+  def server(namespace) when is_binary(namespace), do: server_for_namespace(namespace)
+  def server(opts) when is_list(opts), do: server_for_opts(opts)
+
+  @doc false
+  @spec tables(keyword()) :: map() | nil
+  def tables(opts \\ []) do
+    case registration_for_opts(opts) do
+      %{tables: tables} -> tables
+      nil -> nil
+    end
+  end
 
   @impl GenServer
-  @spec init(keyword()) :: {:ok, state()}
-  def init(_opts) do
-    ensure_table(@index_table)
-    ensure_table(@collection_table)
-    {:ok, rebuild_from_hot()}
+  @spec init(keyword() | Config.t()) :: {:ok, state()} | {:stop, term()}
+  def init(%Config{} = config) do
+    tables = create_tables()
+    put_runtime(tables, config)
+
+    case Registry.register(@registry, {:recall_index, config.ref}, %{
+           tables: tables,
+           config: config
+         }) do
+      {:ok, _owner} ->
+        {:ok, rebuild_from_hot(config.internal_namespace)}
+
+      {:error, {:already_registered, pid}} ->
+        {:stop, {:recall_index_already_started, config.ref, pid}}
+    end
+  end
+
+  def init(opts) when is_list(opts) do
+    tables = create_tables()
+    put_runtime(tables, nil)
+    {:ok, rebuild_from_hot(Keyword.get(opts, :namespace))}
   end
 
   @impl GenServer
@@ -83,7 +153,8 @@ defmodule SpectreMnemonic.Recall.Index do
     # memory; this process just keeps vector shortcuts warm.
     case indexable(moment) do
       {:ok, entry} ->
-        :ets.insert(@index_table, {moment.id, entry})
+        state = maybe_delete_vettore(state, moment.id)
+        :ets.insert(index_table(), {moment.id, entry})
         state = maybe_upsert_vettore(state, moment.id, entry)
 
         {:reply, :ok, state}
@@ -95,48 +166,54 @@ defmodule SpectreMnemonic.Recall.Index do
 
   def handle_call({:delete, moment_id}, _from, state) do
     state = maybe_delete_vettore(state, moment_id)
-    :ets.delete(@index_table, moment_id)
+    :ets.delete(index_table(), moment_id)
     {:reply, :ok, state}
   end
 
   def handle_call(:reset, _from, state) do
     close_vettore_collections(state)
-    :ets.delete_all_objects(@index_table)
-    :ets.delete_all_objects(@collection_table)
+    :ets.delete_all_objects(index_table())
+    :ets.delete_all_objects(collection_table())
 
     {:reply, :ok, %{state | vettore: %{}}}
   end
 
   def handle_call(:rebuild, _from, state) do
     close_vettore_collections(state)
-    {:reply, :ok, rebuild_from_hot()}
+    config = Process.get(@config_key)
+    namespace = if match?(%Config{}, config), do: config.internal_namespace, else: nil
+    {:reply, :ok, rebuild_from_hot(namespace)}
   end
 
   def handle_call({:purge_partition, opts}, _from, state) do
     partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
 
     ids =
-      @index_table
+      index_table()
       |> :ets.tab2list()
       |> Enum.flat_map(fn
         {id, %{namespace: namespace, scope: scope}} when {namespace, scope} == partition -> [id]
         _other -> []
       end)
 
-    Enum.each(ids, &:ets.delete(@index_table, &1))
-    :ets.delete(@collection_table, partition)
+    Enum.each(ids, &:ets.delete(index_table(), &1))
 
     state =
-      case Map.pop(state.vettore, partition) do
-        {nil, _vettore} ->
-          state
-
-        {indexed, vettore} ->
-          _result = Vettore.close(indexed.collection)
-          %{state | vettore: vettore}
-      end
+      state.vettore
+      |> Map.keys()
+      |> Enum.filter(&collection_for_partition?(&1, partition))
+      |> Enum.reduce(state, fn collection_key, acc ->
+        {indexed, vettore} = Map.pop(acc.vettore, collection_key)
+        _result = Vettore.close(indexed.collection)
+        :ets.delete(collection_table(), collection_key)
+        %{acc | vettore: vettore}
+      end)
 
     {:reply, :ok, state}
+  end
+
+  def handle_call(:runtime, _from, state) do
+    {:reply, %{tables: Process.get(@tables_key), config: Process.get(@config_key)}, state}
   end
 
   @impl GenServer
@@ -145,18 +222,18 @@ defmodule SpectreMnemonic.Recall.Index do
     :ok
   end
 
-  @spec rebuild_from_hot :: state()
-  defp rebuild_from_hot do
-    :ets.delete_all_objects(@index_table)
-    :ets.delete_all_objects(@collection_table)
+  @spec rebuild_from_hot(binary() | nil) :: state()
+  defp rebuild_from_hot(namespace) do
+    :ets.delete_all_objects(index_table())
+    :ets.delete_all_objects(collection_table())
 
-    :mnemonic_moments
-    |> :ets.tab2list()
+    namespace
+    |> hot_moments()
     |> Enum.reduce(%{vettore: %{}}, fn
       {_id, moment}, state ->
-        case indexable(moment) do
+        case indexable_for_namespace(moment, namespace) do
           {:ok, entry} ->
-            :ets.insert(@index_table, {moment.id, entry})
+            :ets.insert(index_table(), {moment.id, entry})
             maybe_upsert_vettore(state, moment.id, entry)
 
           :skip ->
@@ -165,6 +242,25 @@ defmodule SpectreMnemonic.Recall.Index do
     end)
   rescue
     ArgumentError -> %{vettore: %{}}
+  end
+
+  @spec hot_moments(binary() | nil) :: [tuple()]
+  defp hot_moments(namespace) do
+    reference =
+      case namespace do
+        value when is_binary(value) ->
+          case Engine.resolve_internal_namespace(value) do
+            {:ok, runtime} -> runtime.config.ref
+            {:error, _reason} -> SpectreMnemonic.DefaultEngine
+          end
+
+        _missing ->
+          SpectreMnemonic.DefaultEngine
+      end
+
+    ActiveETS.with_engine(reference, fn -> ActiveETS.tab2list(:mnemonic_moments) end)
+  rescue
+    ArgumentError -> []
   end
 
   @spec maybe_upsert_vettore(state(), binary(), map()) :: state()
@@ -182,7 +278,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec upsert_vettore(state(), binary(), map()) :: state()
   defp upsert_vettore(state, moment_id, entry) do
-    partition = {entry.namespace, entry.scope}
+    partition = entry_partition(entry)
 
     case ensure_vettore_collection(state, partition, entry.dimensions) do
       {:ok, state, indexed} ->
@@ -225,7 +321,7 @@ defmodule SpectreMnemonic.Recall.Index do
     case Vettore.new(opts) do
       {:ok, collection} ->
         indexed = %{collection: collection, dimensions: dimensions, count: 0}
-        :ets.insert(@collection_table, {partition, indexed})
+        :ets.insert(collection_table(), {partition, indexed})
         state = put_in(state, [:vettore, partition], indexed)
         {:ok, state, indexed}
 
@@ -250,7 +346,7 @@ defmodule SpectreMnemonic.Recall.Index do
       :ok ->
         count = if existing?, do: indexed.count, else: indexed.count + 1
         indexed = %{indexed | count: count}
-        :ets.insert(@collection_table, {partition, indexed})
+        :ets.insert(collection_table(), {partition, indexed})
         put_in(state, [:vettore, partition], indexed)
 
       {:error, _reason} ->
@@ -260,7 +356,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec maybe_delete_vettore(state(), binary()) :: state()
   defp maybe_delete_vettore(state, moment_id) do
-    case :ets.lookup(@index_table, moment_id) do
+    case :ets.lookup(index_table(), moment_id) do
       [{^moment_id, entry}] -> delete_vettore_entry(state, moment_id, entry)
       _missing -> state
     end
@@ -268,7 +364,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec delete_vettore_entry(state(), binary(), map()) :: state()
   defp delete_vettore_entry(state, moment_id, entry) do
-    partition = {entry.namespace, entry.scope}
+    partition = entry_partition(entry)
 
     case Map.get(state.vettore, partition) do
       nil ->
@@ -277,7 +373,7 @@ defmodule SpectreMnemonic.Recall.Index do
       indexed ->
         _result = Vettore.delete(indexed.collection, moment_id)
         indexed = %{indexed | count: max(indexed.count - 1, 0)}
-        :ets.insert(@collection_table, {partition, indexed})
+        :ets.insert(collection_table(), {partition, indexed})
         put_in(state, [:vettore, partition], indexed)
     end
   rescue
@@ -289,11 +385,13 @@ defmodule SpectreMnemonic.Recall.Index do
   defp query_vettore_scoped(_cue, limit, _opts) when limit <= 0, do: []
 
   defp query_vettore_scoped(cue, limit, opts) do
-    partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
+    space_id = cue_space_id(cue, opts)
+    partition = {Identity.namespace!(opts), Scope.from_opts(opts), space_id}
 
-    with true <- vettore_enabled?(),
+    with true <- space_id != :any,
+         true <- vettore_enabled?(),
          [{^partition, %{count: count} = indexed}] when count > 0 <-
-           :ets.lookup(@collection_table, partition),
+           :ets.lookup(collection_table(), partition),
          query when query != [] <- Vector.to_list(cue.vector),
          {:ok, results} <- search_vettore(indexed, query, min(limit, count)) do
       results
@@ -331,7 +429,7 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec vettore_result(Vettore.Result.t(), map()) :: [map()]
   defp vettore_result(%Vettore.Result{id: moment_id}, cue) do
-    case :ets.lookup(@index_table, moment_id) do
+    case :ets.lookup(index_table(), moment_id) do
       [{^moment_id, entry}] ->
         [score_entry(moment_id, entry, cue.vector, Map.get(cue, :binary_signature))]
 
@@ -382,21 +480,37 @@ defmodule SpectreMnemonic.Recall.Index do
     cue_vector = Map.get(cue, :vector)
     cue_signature = Map.get(cue, :binary_signature)
 
-    :ets.foldl(
-      fn {moment_id, entry}, ranked ->
-        if Scope.match?(entry, opts) do
-          moment_id
-          |> score_entry(entry, cue_vector, cue_signature)
-          |> insert_ranked_entry(ranked, limit)
-        else
-          ranked
-        end
-      end,
-      [],
-      @index_table
-    )
+    cue
+    |> brute_force_entries(opts)
+    |> Enum.reduce([], fn {moment_id, entry}, ranked ->
+      if Scope.match?(entry, opts) and compatible_space?(entry, cue, opts) do
+        moment_id
+        |> score_entry(entry, cue_vector, cue_signature)
+        |> insert_ranked_entry(ranked, limit)
+      else
+        ranked
+      end
+    end)
     |> Enum.sort_by(&entry_rank_key/1)
   end
+
+  @spec brute_force_entries(map(), keyword()) :: [{binary(), map()}]
+  defp brute_force_entries(%QueryContext{} = cue, opts) do
+    case Projection.candidates(cue, [], opts) do
+      {:ok, moments, _meta} ->
+        Enum.flat_map(moments, fn moment ->
+          case :ets.lookup(index_table(), moment.id) do
+            [{id, entry}] -> [{id, entry}]
+            [] -> []
+          end
+        end)
+
+      {:fallback, _meta} ->
+        :ets.tab2list(index_table())
+    end
+  end
+
+  defp brute_force_entries(_cue, _opts), do: :ets.tab2list(index_table())
 
   @spec insert_ranked_entry(map(), [map()], pos_integer()) :: [map()]
   defp insert_ranked_entry(candidate, ranked, limit) do
@@ -445,12 +559,51 @@ defmodule SpectreMnemonic.Recall.Index do
        vector: vector,
        binary_signature: signature,
        dimensions: Map.get(metadata, :dimensions) || Vector.dimensions(vector),
+       space_id: Space.id(metadata, []),
        signature_bits: Map.get(metadata, :signature_bits) || byte_size(signature) * 8,
        metadata: metadata
      }}
   end
 
   defp indexable(_moment), do: :skip
+
+  @spec indexable_for_namespace(map(), binary() | nil) :: {:ok, map()} | :skip
+  defp indexable_for_namespace(moment, nil), do: indexable(moment)
+
+  defp indexable_for_namespace(%{namespace: namespace} = moment, namespace),
+    do: indexable(moment)
+
+  defp indexable_for_namespace(_moment, _namespace), do: :skip
+
+  @spec entry_partition(map()) :: tuple()
+  defp entry_partition(entry) do
+    {entry.namespace, entry.scope, Map.get(entry, :space_id, "default")}
+  end
+
+  @spec collection_for_partition?(tuple(), tuple()) :: boolean()
+  defp collection_for_partition?({namespace, scope, _space_id}, {namespace, scope}), do: true
+  defp collection_for_partition?(_collection, _partition), do: false
+
+  @spec compatible_space?(map(), map(), keyword()) :: boolean()
+  defp compatible_space?(entry, cue, opts) do
+    case cue_space_id(cue, opts) do
+      :any -> true
+      space_id -> Map.get(entry, :space_id, "default") == space_id
+    end
+  end
+
+  @spec cue_space_id(map(), keyword()) :: binary() | :any
+  defp cue_space_id(cue, opts) do
+    metadata =
+      case Map.get(cue, :embedding) do
+        %{metadata: metadata} when is_map(metadata) -> metadata
+        _missing -> Map.get(cue, :metadata, %{})
+      end
+
+    if metadata == %{} and not Keyword.has_key?(opts, :embedding_space),
+      do: :any,
+      else: Space.id(metadata, opts)
+  end
 
   @spec embedding_metadata(term()) :: map()
   defp embedding_metadata(%{metadata: metadata}) when is_map(metadata), do: metadata
@@ -480,36 +633,182 @@ defmodule SpectreMnemonic.Recall.Index do
 
   @spec index_config :: map()
   defp index_config do
-    embedding = Application.get_env(:spectre_mnemonic, :embedding, [])
+    embedding_config()
+    |> raw_index_config()
+    |> normalize_index_config()
+  end
 
-    index =
-      cond do
-        is_list(embedding) and Keyword.keyword?(embedding) -> Keyword.get(embedding, :index, [])
-        is_map(embedding) -> Map.get(embedding, :index, Map.get(embedding, "index", %{}))
-        true -> []
-      end
-
-    cond do
-      is_map(index) -> index
-      is_list(index) and Keyword.keyword?(index) -> Map.new(index)
-      true -> %{}
+  @spec embedding_config :: term()
+  defp embedding_config do
+    case Process.get(@config_key) do
+      %Config{legacy?: false, embedding: configured} -> configured || []
+      _legacy_or_direct -> Application.get_env(:spectre_mnemonic, :embedding, [])
     end
   end
 
-  @spec call_if_running(term(), term()) :: term()
-  defp call_if_running(message, fallback \\ :ok) do
-    if Process.whereis(__MODULE__) do
-      GenServer.call(__MODULE__, message)
+  @spec raw_index_config(term()) :: term()
+  defp raw_index_config(embedding) when is_list(embedding) do
+    if Keyword.keyword?(embedding), do: Keyword.get(embedding, :index, []), else: []
+  end
+
+  defp raw_index_config(embedding) when is_map(embedding),
+    do: Map.get(embedding, :index, Map.get(embedding, "index", %{}))
+
+  defp raw_index_config(_embedding), do: []
+
+  @spec normalize_index_config(term()) :: map()
+  defp normalize_index_config(index) when is_map(index), do: index
+
+  defp normalize_index_config(index) when is_list(index) do
+    if Keyword.keyword?(index), do: Map.new(index), else: %{}
+  end
+
+  defp normalize_index_config(_index), do: %{}
+
+  @spec with_tables(keyword(), (-> result), result) :: result when result: term()
+  defp with_tables(opts, fun, fallback) do
+    case registration_for_opts(opts) do
+      %{tables: tables, config: config} ->
+        previous_tables = Process.put(@tables_key, tables)
+        previous_config = Process.put(@config_key, config)
+
+        try do
+          fun.()
+        after
+          restore_process_value(@tables_key, previous_tables)
+          restore_process_value(@config_key, previous_config)
+        end
+
+      nil ->
+        fallback
+    end
+  end
+
+  @spec registration_for_opts(keyword()) :: map() | nil
+  defp registration_for_opts(opts) do
+    case engine_ref_for_opts(opts) do
+      %Ref{} = ref -> registration_for_ref(ref)
+      nil -> legacy_registration()
+    end
+  end
+
+  @spec engine_ref_for_opts(keyword()) :: Ref.t() | nil
+  defp engine_ref_for_opts(opts) do
+    case Keyword.get(opts, :engine_ref) do
+      %Ref{} = ref -> ref
+      _missing -> engine_ref_for_namespace(opts)
+    end
+  end
+
+  @spec engine_ref_for_namespace(keyword()) :: Ref.t() | nil
+  defp engine_ref_for_namespace(opts) do
+    with {:ok, namespace} <- Identity.fetch_namespace(opts),
+         {:ok, runtime} <- Engine.resolve_internal_namespace(namespace) do
+      runtime.config.ref
     else
-      fallback
+      {:error, _reason} -> nil
     end
   end
 
-  @spec ensure_table(atom()) :: :ok | :ets.tid()
-  defp ensure_table(table) do
-    case :ets.whereis(table) do
-      :undefined -> :ets.new(table, [:named_table, :public, :compressed, read_concurrency: true])
-      _tid -> :ok
+  @spec registration_for_ref(Ref.t()) :: map() | nil
+  defp registration_for_ref(%Ref{} = ref) do
+    case Registry.lookup(@registry, {:recall_index, ref}) do
+      [{_pid, registration}] -> registration
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @spec legacy_registration :: map() | nil
+  defp legacy_registration do
+    case Process.whereis(__MODULE__) do
+      nil -> nil
+      pid -> GenServer.call(pid, :runtime)
+    end
+  catch
+    :exit, _reason -> nil
+  end
+
+  @spec server_for_opts(keyword()) :: pid() | nil
+  defp server_for_opts(opts) do
+    case engine_ref_for_opts(opts) do
+      %Ref{} = ref -> server_for_ref(ref)
+      nil -> Process.whereis(__MODULE__)
     end
   end
+
+  @spec server_for_namespace(term()) :: pid() | nil
+  defp server_for_namespace(namespace) when is_binary(namespace) do
+    case Engine.resolve_internal_namespace(namespace) do
+      {:ok, runtime} -> server_for_ref(runtime.config.ref)
+      {:error, _reason} -> Process.whereis(__MODULE__)
+    end
+  end
+
+  defp server_for_namespace(_namespace), do: Process.whereis(__MODULE__)
+
+  @spec server_for_ref(Ref.t()) :: pid() | nil
+  defp server_for_ref(%Ref{} = ref) do
+    case Registry.lookup(@registry, {:recall_index, ref}) do
+      [{pid, _registration}] -> pid
+      [] -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @spec index_servers :: [pid()]
+  defp index_servers do
+    @registry
+    |> Registry.select([{{{:recall_index, :"$1"}, :"$2", :_}, [], [:"$2"]}])
+    |> Enum.uniq()
+  rescue
+    ArgumentError -> []
+  end
+
+  @spec call_if_running(pid() | nil, term(), term()) :: term()
+  defp call_if_running(pid, message, fallback \\ :ok) do
+    case pid do
+      nil -> fallback
+      pid -> GenServer.call(pid, message)
+    end
+  catch
+    :exit, _reason -> fallback
+  end
+
+  @spec safe_call(pid(), term()) :: :ok
+  defp safe_call(pid, message) do
+    _reply = GenServer.call(pid, message)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  @spec create_tables :: map()
+  defp create_tables do
+    common = [:protected, :compressed, read_concurrency: true]
+
+    %{
+      index: :ets.new(:embedding_index, [:set | common]),
+      collections: :ets.new(:vettore_collections, [:set | common])
+    }
+  end
+
+  @spec put_runtime(map(), Config.t() | nil) :: map()
+  defp put_runtime(tables, config) do
+    Process.put(@tables_key, tables)
+    Process.put(@config_key, config)
+    tables
+  end
+
+  @spec index_table :: :ets.tid()
+  defp index_table, do: Process.get(@tables_key) |> Map.fetch!(:index)
+
+  @spec collection_table :: :ets.tid()
+  defp collection_table, do: Process.get(@tables_key) |> Map.fetch!(:collections)
+
+  @spec restore_process_value(term(), term()) :: term()
+  defp restore_process_value(key, nil), do: Process.delete(key)
+  defp restore_process_value(key, value), do: Process.put(key, value)
 end

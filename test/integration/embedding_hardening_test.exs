@@ -5,7 +5,10 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
   alias SpectreMnemonic.Embedding.Model2VecStatic
   alias SpectreMnemonic.Embedding.ModelDownloader
   alias SpectreMnemonic.Embedding.Service
+  alias SpectreMnemonic.Embedding.Space
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.QueryContext
+  alias SpectreMnemonic.Recall.Index
 
   test "embedding service contains legacy adapter exceptions and throws" do
     Application.put_env(:spectre_mnemonic, :embedding_adapter, __MODULE__.RaisingAdapter)
@@ -143,6 +146,37 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
 
   test "deep embedding placeholder stays explicitly disabled" do
     assert {:error, :deep_embedding_disabled} = EmbeddingGemma.embed("text", [])
+  end
+
+  test "models with equal dimensions remain in different embedding spaces" do
+    assert {:ok, %{moment: model_a}} =
+             SpectreMnemonic.signal("model A vector",
+               embedding: %{vector: [1.0, 0.0], model: "model-a", revision: "v1"}
+             )
+
+    assert {:ok, %{moment: model_b}} =
+             SpectreMnemonic.signal("model B vector",
+               embedding: %{vector: [1.0, 0.0], model: "model-b", revision: "v1"}
+             )
+
+    tables = Index.tables()
+    [{_, entry_a}] = :ets.lookup(tables.index, model_a.id)
+    [{_, entry_b}] = :ets.lookup(tables.index, model_b.id)
+
+    assert entry_a.dimensions == entry_b.dimensions
+    refute entry_a.space_id == entry_b.space_id
+
+    {:ok, cue} =
+      QueryContext.new("vector query",
+        embedding: %{vector: [1.0, 0.0], model: "model-a", revision: "v1"}
+      )
+
+    assert {:ok, results} = Index.query(cue, overfetch: 10, min_vector_similarity: 0.0)
+    assert Enum.any?(results, &(&1.id == model_a.id))
+    refute Enum.any?(results, &(&1.id == model_b.id))
+
+    refute Space.new(model: "model-a", dimensions: 2).id ==
+             Space.new(model: "model-b", dimensions: 2).id
   end
 
   test "model downloads reject path traversal and invalid file lists" do

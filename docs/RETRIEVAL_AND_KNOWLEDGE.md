@@ -21,9 +21,11 @@ knowledge provide increasingly curated views.
   )
 ```
 
-Recall ranks visible active moments, merges embedding-index candidates, expands
-the graph, includes selected durable results, and applies a best-effort token
-budget.
+Below the Engine's `brute_force_threshold`, recall may scan a small partition.
+Above it, recall is candidate-first: bounded lexical, entity, stream/task,
+temporal, vector, and explicit-seed postings are fused before governance,
+temporal filtering, feature scoring, graph expansion, and final reranking. The
+candidate cap does not grow with the total corpus.
 
 The returned `SpectreMnemonic.Recall.Packet` contains:
 
@@ -41,6 +43,7 @@ The returned `SpectreMnemonic.Recall.Packet` contains:
 | `active_status` | stream/task state |
 | `trace` | optional graph path explanation |
 | `confidence` | packet-level evidence confidence |
+| `diagnostics` | completeness, per-source status, candidate mode and counts |
 | `usage` | estimated budget usage |
 
 Recall gathers evidence and never writes the final prose answer.
@@ -70,6 +73,8 @@ Recall gathers evidence and never writes the final prose answer.
 | `:overfetch` | extra embedding-index candidates |
 | `:trace` | include graph paths and Episode context |
 | `:plasticity?` | allow eligible traversed edges to be reinforced |
+| `:consistency` | `:available` for partial results or `:strict` to fail on a degraded requested source |
+| `:max_candidates` | lower the Engine-owned candidate cap for this call |
 
 `:member_of` and `:same_as` are excluded from normal traversal by default.
 Request them explicitly only when their structural semantics are useful:
@@ -83,6 +88,11 @@ SpectreMnemonic.recall("episode context",
 
 `max_tokens` is best-effort. Recall may keep one oversized primary item when
 dropping it would make the packet empty.
+
+`packet.diagnostics` never contains memory content. It reports whether the
+result is complete, which sources degraded, candidate counts by source, and
+whether recall used `:candidate_first` or the small-partition
+`:brute_force` fallback.
 
 ### Explain a retrieval
 

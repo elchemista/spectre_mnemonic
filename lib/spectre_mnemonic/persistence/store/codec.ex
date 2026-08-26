@@ -35,7 +35,7 @@ defmodule SpectreMnemonic.Persistence.Store.Codec do
   @spec decode_record(map()) :: {:ok, Record.t()} | {:error, term()}
   def decode_record(%{"codec" => @codec, "version" => @version, "record" => encoded}) do
     case decode_term(encoded) do
-      {:ok, %Record{} = record} -> {:ok, record}
+      {:ok, %Record{} = record} -> {:ok, Record.upgrade(record)}
       {:ok, other} -> {:error, {:invalid_record_term, other}}
       {:error, reason} -> {:error, reason}
     end

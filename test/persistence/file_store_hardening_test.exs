@@ -205,6 +205,72 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
              end)
   end
 
+  test "snapshot v2 is framed, checksummed, and replayed without a monolithic term" do
+    root = tmp_root("snapshot-v2")
+    opts = [data_root: root]
+
+    assert {:ok, 1} = StoreFile.put(record("framed-record"), opts)
+    assert {:ok, snapshot} = StoreFile.compact(opts)
+    assert binary_part(File.read!(snapshot), 0, 4) == "SMEM"
+
+    assert {:ok, %{status: :clean, last_sequence: 3}} = FileFrame.scan_path(snapshot)
+    assert {:ok, [{1, _timestamp, stored}]} = StoreFile.replay(opts)
+    assert stored.payload.id == "framed-record"
+  end
+
+  test "append remains available while a snapshot is being built" do
+    root = tmp_root("snapshot-concurrent-append")
+    opts = [data_root: root]
+    parent = self()
+
+    injector = fn
+      :snapshot_record, _context ->
+        send(parent, {:snapshot_record_blocked, self()})
+
+        receive do
+          :continue_snapshot -> :ok
+        end
+
+      _point, _context ->
+        :ok
+    end
+
+    assert {:ok, 1} = StoreFile.put(record("before-build"), opts)
+
+    compaction =
+      Task.async(fn -> StoreFile.compact(Keyword.put(opts, :failure_injector, injector)) end)
+
+    assert_receive {:snapshot_record_blocked, snapshot_worker}, 1_000
+    assert {:ok, 1} = StoreFile.put(record("during-build"), opts)
+    send(snapshot_worker, :continue_snapshot)
+    assert {:ok, _snapshot} = Task.await(compaction, 5_000)
+
+    assert {:ok, frames} = StoreFile.replay(opts)
+
+    assert frames
+           |> Enum.map(fn {_seq, _timestamp, stored} -> stored.payload.id end)
+           |> MapSet.new() == MapSet.new(["before-build", "during-build"])
+  end
+
+  test "a snapshot truncated midway falls back to the previous snapshot and rotated log" do
+    root = tmp_root("snapshot-v2-midway-corruption")
+    opts = [data_root: root, retain_compacted_segments: 3]
+
+    assert {:ok, 1} = StoreFile.put(record("first-generation"), opts)
+    assert {:ok, _snapshot} = StoreFile.compact(opts)
+    assert {:ok, 1} = StoreFile.put(record("second-generation"), opts)
+    assert {:ok, snapshot} = StoreFile.compact(opts)
+
+    bytes = File.read!(snapshot)
+    File.write!(snapshot, binary_part(bytes, 0, div(byte_size(bytes), 2)))
+
+    assert {:ok, frames} = StoreFile.replay(opts)
+
+    assert frames
+           |> Enum.map(fn {_seq, _timestamp, stored} -> stored.payload.id end)
+           |> MapSet.new() == MapSet.new(["first-generation", "second-generation"])
+  end
+
   test "corrupt current snapshots recover from previous snapshot and latest rotated segment" do
     root = tmp_root("snapshot-recovery")
     opts = [data_root: root, retain_compacted_segments: 3]

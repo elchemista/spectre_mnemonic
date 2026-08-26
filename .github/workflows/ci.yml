@@ -130,6 +130,9 @@ jobs:
       - name: Resolve consumer dependencies
         run: mix deps.get --check-locked
 
+      - name: Assert Spectre is absent
+        run: test -z "$(grep -E '^  \"spectre\":' mix.lock || true)"
+
       - name: Compile without Tokenizers or Nx
         run: mix compile --warnings-as-errors
 

@@ -10,9 +10,11 @@ defmodule SpectreMnemonic.GitHubDistributionTest do
         assert {:spectre, opts} = dependency
         assert opts[:path] == Path.expand(path, File.cwd!())
         assert opts[:override]
+        assert opts[:optional]
 
       _unset ->
-        assert {:spectre, "~> 0.3.3"} = dependency
+        assert {:spectre, "~> 0.3.3", opts} = dependency
+        assert opts[:optional]
     end
 
     refute Keyword.has_key?(config, :package)

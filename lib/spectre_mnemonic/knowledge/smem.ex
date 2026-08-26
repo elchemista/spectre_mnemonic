@@ -11,14 +11,16 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
   @magic "SKNW"
   @version 1
-  @header_bytes byte_size(@magic) + 1 + 8 + 8 + 4 + 4
   @max_text_graphemes 2_000
 
+  alias SpectreMnemonic.Engine
   alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.Knowledge.Projection
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Store.FileFrame
+  alias SpectreMnemonic.Persistence.StoreWriter
   alias SpectreMnemonic.Result
 
   @event_types [:summary, :skill, :latest_ingestion, :fact, :procedure, :compaction_marker]
@@ -58,7 +60,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_context(event, opts) do
-      call_writer({:append, event, opts})
+      call_writer({:append, event, opts}, opts)
     end
   end
 
@@ -68,7 +70,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_contexts(events, opts) do
-      call_writer({:append_many, events, opts})
+      call_writer({:append_many, events, opts}, opts)
     end
   end
 
@@ -149,6 +151,26 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   end
 
   @doc false
+  @spec reduce_all(keyword(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
+          {:ok, acc} | {:error, term()}
+        when acc: term()
+  def reduce_all(opts, acc, fun) when is_list(opts) and is_function(fun, 2) do
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      root = data_root(opts)
+      reduce_path(active_path(root), acc, &reduce_all_frame(&1, &2, opts, fun))
+    end
+  end
+
+  @spec reduce_all_frame(tuple(), acc, keyword(), (tuple(), acc -> {:cont, acc} | {:halt, acc})) ::
+          {:cont, acc} | {:halt, acc}
+        when acc: term()
+  defp reduce_all_frame({_seq, _timestamp, event} = frame, current, opts, fun) do
+    if Scope.match_namespace?(event, opts),
+      do: fun.(frame, current),
+      else: {:cont, current}
+  end
+
+  @doc false
   @spec verify_erased(keyword()) :: :ok | {:error, term()}
   def verify_erased(opts) do
     case reduce(opts, [], &collect_knowledge_survivor/2) do
@@ -180,32 +202,44 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(:knowledge, opts),
          :ok <- validate_event_contexts(events, opts) do
-      call_writer({:replace, events, opts})
+      call_writer({:replace, events, opts}, opts)
     end
   end
 
   @impl GenServer
   def handle_call({:append, event, opts}, _from, state) do
-    {:reply, safe_write(fn -> do_append(event, opts) end), state}
+    {:reply, execute_write({:append, event, opts}), state}
   end
 
   def handle_call({:append_many, events, opts}, _from, state) do
-    result = safe_write(fn -> Result.collect_ok(events, &do_append(&1, opts)) end)
-    {:reply, result, state}
+    {:reply, execute_write({:append_many, events, opts}), state}
   end
 
   def handle_call({:replace, events, opts}, _from, state) do
-    {:reply, safe_write(fn -> do_replace(events, opts) end), state}
+    {:reply, execute_write({:replace, events, opts}), state}
   end
+
+  @spec execute_write(term()) :: term()
+  defp execute_write({:append, event, opts}),
+    do: safe_write(fn -> do_append(event, opts) end)
+
+  defp execute_write({:append_many, events, opts}),
+    do: safe_write(fn -> Result.collect_ok(events, &do_append(&1, opts)) end)
+
+  defp execute_write({:replace, events, opts}),
+    do: safe_write(fn -> do_replace(events, opts) end)
 
   @spec do_append(event(), keyword()) :: {:ok, pos_integer()} | {:error, term()}
   defp do_append(event, opts) do
     root = data_root(opts)
     path = active_path(root)
+    event = normalize_event(event, opts)
 
     with :ok <- ensure_root(root),
-         {:ok, seq, counter} <- next_seq(path, opts) do
-      write_event(path, event, seq, counter, opts)
+         {:ok, seq, counter} <- next_seq(path, opts),
+         {:ok, sequence} <- write_event(path, event, seq, counter, opts),
+         :ok <- Projection.upsert(event, opts) do
+      {:ok, sequence}
     end
   end
 
@@ -225,6 +259,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
          :ok <- FramedLog.write_file(tmp_path, frames, opts),
          :ok <- FramedLog.rename(tmp_path, path, opts) do
       reset_seq(path)
+      :ok = Projection.rebuild(opts)
       {:ok, length(events)}
     else
       {:error, reason} ->
@@ -309,8 +344,6 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   @spec write_event(Path.t(), event(), pos_integer(), :atomics.atomics_ref(), keyword()) ::
           {:ok, pos_integer()} | {:error, term()}
   defp write_event(path, event, seq, counter, opts) do
-    event = normalize_event(event, opts)
-
     with {:ok, frame} <- frame(seq, event) do
       case FramedLog.append(path, frame, opts) do
         :ok ->
@@ -324,21 +357,12 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
   end
 
   @spec frame(pos_integer(), event()) ::
-          {:ok, binary()} | {:error, {:frame_too_large, non_neg_integer(), pos_integer()}}
+          {:ok, binary()} | {:error, term()}
   defp frame(seq, event) do
-    payload = :erlang.term_to_binary(event, [:compressed])
-    maximum = FileFrame.max_payload_bytes()
-
-    if safe_payload_size?(payload, maximum) do
-      crc = :erlang.crc32(payload)
-      timestamp = System.system_time(:millisecond)
-
-      {:ok,
-       <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(payload)::32,
-         crc::32, payload::binary>>}
-    else
-      {:error, {:frame_too_large, payload_size(payload), maximum}}
-    end
+    FileFrame.encode_checked(seq, event, System.system_time(:millisecond),
+      magic: @magic,
+      version: @version
+    )
   end
 
   @spec ensure_root(Path.t()) :: :ok | {:error, term()}
@@ -378,7 +402,7 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     case File.open(path, [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
-          {:ok, read_frames(io, acc, fun)}
+          {:ok, FileFrame.read_frames(io, acc, fun, magic: @magic, version: @version)}
         after
           File.close(io)
         end
@@ -388,100 +412,6 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
 
       {:error, reason} ->
         {:error, reason}
-    end
-  end
-
-  @spec read_frames(File.io_device(), acc, (tuple(), acc -> {:cont, acc} | {:halt, acc})) :: acc
-        when acc: term()
-  defp read_frames(io, acc, fun) do
-    case IO.binread(io, @header_bytes) do
-      <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32>> ->
-        read_payload(io, seq, timestamp, len, crc, acc, fun)
-
-      incomplete_or_unknown when is_binary(incomplete_or_unknown) ->
-        acc
-
-      :eof ->
-        acc
-
-      {:error, _reason} ->
-        acc
-    end
-  end
-
-  @spec read_payload(
-          File.io_device(),
-          pos_integer(),
-          integer(),
-          non_neg_integer(),
-          non_neg_integer(),
-          acc,
-          (tuple(), acc -> {:cont, acc} | {:halt, acc})
-        ) :: acc
-        when acc: term()
-  defp read_payload(io, seq, timestamp, len, crc, acc, fun) do
-    if len <= FileFrame.max_payload_bytes() do
-      case IO.binread(io, len) do
-        payload when is_binary(payload) and byte_size(payload) == len ->
-          read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
-
-        _incomplete_or_error ->
-          acc
-      end
-    else
-      acc
-    end
-  end
-
-  @spec read_complete_payload(
-          File.io_device(),
-          pos_integer(),
-          integer(),
-          binary(),
-          non_neg_integer(),
-          acc,
-          (tuple(), acc -> {:cont, acc} | {:halt, acc})
-        ) :: acc
-        when acc: term()
-  defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun) do
-    if :erlang.crc32(payload) == crc do
-      case decode_payload(payload) do
-        {:ok, event} -> continue_frame(io, {seq, timestamp, event}, acc, fun)
-        :error -> acc
-      end
-    else
-      acc
-    end
-  end
-
-  @spec decode_payload(binary()) :: {:ok, term()} | :error
-  defp decode_payload(payload) do
-    if safe_payload_size?(payload, FileFrame.max_payload_bytes()) do
-      {:ok, :erlang.binary_to_term(payload, [:safe])}
-    else
-      :error
-    end
-  rescue
-    _exception -> :error
-  end
-
-  @spec safe_payload_size?(binary(), pos_integer()) :: boolean()
-  defp safe_payload_size?(payload, maximum), do: payload_size(payload) <= maximum
-
-  @spec payload_size(binary()) :: non_neg_integer()
-  defp payload_size(<<131, 80, expanded::unsigned-big-32, _compressed::binary>> = payload),
-    do: max(byte_size(payload), expanded)
-
-  defp payload_size(payload), do: byte_size(payload)
-
-  @spec continue_frame(File.io_device(), tuple(), acc, (tuple(), acc ->
-                                                          {:cont, acc} | {:halt, acc})) ::
-          acc
-        when acc: term()
-  defp continue_frame(io, frame, acc, fun) do
-    case fun.(frame, acc) do
-      {:cont, acc} -> read_frames(io, acc, fun)
-      {:halt, acc} -> acc
     end
   end
 
@@ -549,11 +479,37 @@ defmodule SpectreMnemonic.Knowledge.SMEM do
     |> compact_text()
   end
 
-  @spec call_writer(term()) :: term()
-  defp call_writer(message) do
-    case Process.whereis(__MODULE__) do
-      nil -> {:error, :knowledge_writer_not_started}
-      _pid -> GenServer.call(__MODULE__, message, 30_000)
+  @spec call_writer(term(), keyword()) :: term()
+  defp call_writer(message, opts) do
+    case Keyword.get(opts, :engine_ref) do
+      %SpectreMnemonic.Engine.Ref{} = ref ->
+        path = path(opts)
+
+        StoreWriter.trans(
+          {__MODULE__, ref, path},
+          fn -> execute_write(message) end,
+          opts
+        )
+
+      _legacy_or_direct ->
+        call_default_writer(message, opts)
+    end
+  end
+
+  @spec call_default_writer(term(), keyword()) :: term()
+  defp call_default_writer(message, opts) do
+    case Engine.resolve(SpectreMnemonic.DefaultEngine) do
+      {:ok, runtime} ->
+        path = path(opts)
+
+        StoreWriter.trans(
+          {__MODULE__, runtime.config.ref, path},
+          fn -> execute_write(message) end,
+          Keyword.put(opts, :engine_ref, runtime.config.ref)
+        )
+
+      {:error, _reason} ->
+        {:error, :knowledge_writer_not_started}
     end
   end
 

@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Memory.Observation
   alias SpectreMnemonic.Reflection.Packet
@@ -76,7 +77,7 @@ defmodule SpectreMnemonic.Integration.MemorySemanticsTest do
       metadata: %{}
     }
 
-    :ets.insert(:mnemonic_observations, {legacy.id, legacy})
+    ActiveETS.insert(:mnemonic_observations, {legacy.id, legacy})
 
     assert {:ok, [found]} =
              SpectreMnemonic.search_observations("legacy preference",

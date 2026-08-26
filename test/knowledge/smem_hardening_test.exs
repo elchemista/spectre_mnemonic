@@ -122,18 +122,10 @@ defmodule SpectreMnemonic.Knowledge.SMEMHardeningTest do
     assert File.read!(path) == damaged
   end
 
-  test "public append reports a stopped writer without calling a missing process" do
-    supervisor = SpectreMnemonic.Supervisor
-    :ok = Supervisor.terminate_child(supervisor, SMEM)
-
-    on_exit(fn ->
-      if Process.whereis(SMEM) == nil do
-        {:ok, _pid} = Supervisor.restart_child(supervisor, SMEM)
-      end
-    end)
-
-    assert {:error, :knowledge_writer_not_started} = SMEM.append(%{text: "not written"})
-    {:ok, _pid} = Supervisor.restart_child(supervisor, SMEM)
+  test "public append uses the Engine store writer without a global SMEM process" do
+    refute Process.whereis(SMEM)
+    assert {:ok, _sequence} = SMEM.append(%{text: "engine-owned writer"})
+    refute Process.whereis(SMEM)
   end
 
   defp invalid_term_frame do

@@ -7,6 +7,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
   `{namespace, scope}` partition.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Moment
@@ -78,7 +79,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
   @doc "Returns the signal already associated with a resolved entity."
   @spec signal_for(Moment.t()) :: term() | nil
   def signal_for(%Moment{signal_id: signal_id}) do
-    case :ets.lookup(:mnemonic_signals, signal_id) do
+    case ETS.lookup(:mnemonic_signals, signal_id) do
       [{^signal_id, signal}] -> signal
       [] -> nil
     end
@@ -324,7 +325,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
   @spec registered_id(tuple(), [binary()]) :: binary() | nil
   defp registered_id(partition, keys) do
     Enum.find_value(keys, fn key ->
-      case :ets.lookup(:mnemonic_entity_registry, {partition, key}) do
+      case ETS.lookup(:mnemonic_entity_registry, {partition, key}) do
         [{{^partition, ^key}, id}] -> id
         [] -> nil
       end
@@ -537,7 +538,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
 
   @spec lookup_entity(binary(), tuple()) :: {:ok, Moment.t()} | :miss
   defp lookup_entity(id, partition) do
-    case :ets.lookup(:mnemonic_moments, id) do
+    case ETS.lookup(:mnemonic_moments, id) do
       [{^id, %Moment{kind: :memory_entity} = entity}] ->
         if Scope.partition(entity) == partition, do: {:ok, entity}, else: :miss
 
@@ -549,7 +550,7 @@ defmodule SpectreMnemonic.Graph.Resolver do
   @spec register_aliases(binary(), tuple(), [binary()]) :: :ok
   defp register_aliases(id, partition, keys) do
     Enum.each(keys, fn key ->
-      :ets.insert(:mnemonic_entity_registry, {{partition, key}, id})
+      ETS.insert(:mnemonic_entity_registry, {{partition, key}, id})
     end)
 
     :ok
@@ -557,16 +558,16 @@ defmodule SpectreMnemonic.Graph.Resolver do
 
   @spec delete_stale_entries(tuple(), binary()) :: :ok
   defp delete_stale_entries(partition, id) do
-    :ets.match_delete(:mnemonic_entity_registry, {{partition, :_}, id})
+    ETS.match_delete(:mnemonic_entity_registry, {{partition, :_}, id})
     :ok
   end
 
   @spec redirect_registry(tuple(), binary(), binary()) :: :ok
   defp redirect_registry(partition, loser_id, winner_id) do
     :mnemonic_entity_registry
-    |> :ets.match_object({{partition, :_}, loser_id})
+    |> ETS.match_object({{partition, :_}, loser_id})
     |> Enum.each(fn {{^partition, key}, ^loser_id} ->
-      :ets.insert(:mnemonic_entity_registry, {{partition, key}, winner_id})
+      ETS.insert(:mnemonic_entity_registry, {{partition, key}, winner_id})
     end)
 
     :ok

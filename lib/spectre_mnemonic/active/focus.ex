@@ -7,6 +7,14 @@ defmodule SpectreMnemonic.Active.Focus do
   delegated to `SpectreMnemonic.Persistence.Manager`.
   """
 
+  alias SpectreMnemonic.Active.BatchVisibility
+  alias SpectreMnemonic.Active.Command
+  alias SpectreMnemonic.Active.ETS
+  alias SpectreMnemonic.Active.Eviction
+  alias SpectreMnemonic.Active.Projection, as: ActiveProjection
+  alias SpectreMnemonic.Active.Repository
+  alias SpectreMnemonic.Active.Status
+  alias SpectreMnemonic.Active.Validation
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Governance
@@ -21,7 +29,6 @@ defmodule SpectreMnemonic.Active.Focus do
   alias SpectreMnemonic.Memory.Signal
   alias SpectreMnemonic.Memory.Temporal
   alias SpectreMnemonic.Persistence.Manager
-  alias SpectreMnemonic.Persistence.PathLock
   alias SpectreMnemonic.Recall.Fingerprint
   alias SpectreMnemonic.Recall.Index
   alias SpectreMnemonic.Recall.Lexical
@@ -60,7 +67,7 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, record_result()} | {:error, term()}
   def record_signal(input, opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> record_signal_checked(input, opts) end)
+      Command.run(opts, fn -> record_signal_checked(input, opts) end)
     end
   end
 
@@ -69,25 +76,7 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, map()} | {:error, term()}
   def status(stream_or_task_id, opts \\ []) do
     with {:ok, namespace} <- Identity.fetch_namespace(opts) do
-      lookup_status({namespace, Keyword.get(opts, :scope)}, stream_or_task_id)
-    end
-  end
-
-  @spec lookup_status(tuple(), term()) :: {:ok, map()} | {:error, :not_found}
-  defp lookup_status(partition, stream_or_task_id) do
-    [
-      {partition, {:task, stream_or_task_id}},
-      {partition, {:stream, stream_or_task_id}}
-    ]
-    |> Enum.find_value(fn key ->
-      case :ets.lookup(:mnemonic_status, key) do
-        [{^key, status}] -> {:ok, status}
-        [] -> nil
-      end
-    end)
-    |> case do
-      nil -> {:error, :not_found}
-      result -> result
+      Status.lookup({namespace, Keyword.get(opts, :scope)}, stream_or_task_id)
     end
   end
 
@@ -96,7 +85,7 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, Association.t()} | {:error, :unknown_memory_id | term()}
   def link(source_id, relation, target_id, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> link_checked(source_id, relation, target_id, opts) end)
+      Command.run(opts, fn -> link_checked(source_id, relation, target_id, opts) end)
     end
   end
 
@@ -106,7 +95,7 @@ defmodule SpectreMnemonic.Active.Focus do
           | {:error, term()}
   def artifact(path_or_binary, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> artifact_checked(path_or_binary, opts) end)
+      Command.run(opts, fn -> artifact_checked(path_or_binary, opts) end)
     end
   end
 
@@ -116,13 +105,13 @@ defmodule SpectreMnemonic.Active.Focus do
 
   def forget(selector, opts) when is_function(selector, 1) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> forget_moments(forget_ids(selector, opts), opts) end)
+      Command.run(opts, fn -> forget_moments(forget_ids(selector, opts), opts) end)
     end
   end
 
   def forget(selector, opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> forget_moments(forget_ids(selector, opts), opts) end)
+      Command.run(opts, fn -> forget_moments(forget_ids(selector, opts), opts) end)
     end
   end
 
@@ -131,7 +120,7 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, non_neg_integer()} | {:error, term()}
   def rollback_intake(intake_run_id, opts) when is_binary(intake_run_id) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> do_rollback_intake(intake_run_id, opts) end)
+      Command.run(opts, fn -> do_rollback_intake(intake_run_id, opts) end)
     end
   end
 
@@ -183,7 +172,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec hydrate_moment(Moment.t(), keyword()) :: :ok | {:error, term()}
   def hydrate_moment(%Moment{} = moment, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> do_hydrate_moment(moment, opts) end)
+      Command.run(opts, fn -> do_hydrate_moment(moment, opts) end)
     end
   end
 
@@ -191,7 +180,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec drop_episode(Episode.t(), keyword()) :: :ok | {:error, term()}
   def drop_episode(%Episode{} = episode, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> do_drop_episode(episode, opts) end)
+      Command.run(opts, fn -> do_drop_episode(episode, opts) end)
     end
   end
 
@@ -205,13 +194,13 @@ defmodule SpectreMnemonic.Active.Focus do
   @doc false
   @spec upsert_association_if_present(Association.t()) :: :ok | :missing
   def upsert_association_if_present(%Association{} = association) do
-    with_record_lock(association, fn -> do_upsert_association_if_present(association) end)
+    Command.run_for_record(association, fn -> do_upsert_association_if_present(association) end)
   end
 
   @doc false
   @spec drop_association(Association.t()) :: :ok
   def drop_association(%Association{} = association) do
-    with_record_lock(association, fn ->
+    Command.run_for_record(association, fn ->
       delete_association(association)
       :ok
     end)
@@ -221,8 +210,8 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec put_episode(Episode.t()) :: :ok
   def put_episode(%Episode{} = episode) do
     partition = Scope.partition(episode)
-    :ets.insert(:mnemonic_episodes, {episode.id, episode})
-    :ets.insert(:mnemonic_episodes_by_scope, {partition, episode.id})
+    ETS.insert(:mnemonic_episodes, {episode.id, episode})
+    ETS.insert(:mnemonic_episodes_by_scope, {partition, episode.id})
     :ok
   end
 
@@ -230,7 +219,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec purge_partition(keyword()) :: {:ok, map()} | {:error, term()}
   def purge_partition(opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn -> do_purge_partition(opts) end)
+      Command.run(opts, fn -> do_purge_partition(opts) end)
     end
   end
 
@@ -238,7 +227,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec reinforce_attention([binary()], keyword()) :: :ok
   def reinforce_attention(ids, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      with_partition_lock(opts, fn ->
+      Command.run(opts, fn ->
         Enum.each(Enum.uniq(ids), &reinforce_moment_attention(&1, opts))
         :ok
       end)
@@ -253,11 +242,66 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
+  @doc false
+  @spec validate_pinned_transition(binary(), atom(), keyword()) :: :ok | {:error, term()}
+  def validate_pinned_transition(memory_id, :pinned, opts) do
+    namespace = Identity.namespace!(opts)
+    limit = Keyword.get(opts, :max_pinned_bytes, 128 * 1024 * 1024)
+
+    case ETS.lookup(:mnemonic_moment_sizes, memory_id) do
+      [{^memory_id, size, _partition, ^namespace, false}] ->
+        if hot_bytes({:pinned, namespace}) + size <= limit,
+          do: :ok,
+          else: {:error, {:mnemonic_limit_exceeded, :max_pinned_bytes}}
+
+      [{^memory_id, _size, _partition, ^namespace, true}] ->
+        :ok
+
+      [{^memory_id, size, _partition, ^namespace}] ->
+        if hot_bytes({:pinned, namespace}) + size <= limit,
+          do: :ok,
+          else: {:error, {:mnemonic_limit_exceeded, :max_pinned_bytes}}
+
+      _missing ->
+        :ok
+    end
+  end
+
+  def validate_pinned_transition(_memory_id, _state, _opts), do: :ok
+
+  @doc false
+  @spec sync_pinned_accounting(binary(), atom(), keyword()) :: :ok
+  def sync_pinned_accounting(memory_id, state, opts) do
+    namespace = Identity.namespace!(opts)
+    pinned? = state == :pinned
+
+    case ETS.lookup(:mnemonic_moment_sizes, memory_id) do
+      [{^memory_id, size, partition, ^namespace, current}] when current != pinned? ->
+        delta = if pinned?, do: size, else: -size
+        adjust_hot_bytes({:pinned, namespace}, delta)
+        ETS.insert(:mnemonic_moment_sizes, {memory_id, size, partition, namespace, pinned?})
+
+        case lookup_moment(memory_id) do
+          [moment] -> put_eviction_index(moment)
+          [] -> :ok
+        end
+
+      [{^memory_id, size, partition, ^namespace}] ->
+        if pinned?, do: adjust_hot_bytes({:pinned, namespace}, size)
+        ETS.insert(:mnemonic_moment_sizes, {memory_id, size, partition, namespace, pinned?})
+
+      _missing_or_unchanged ->
+        :ok
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
   @spec decay_attention_under_lock(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   defp decay_attention_under_lock(opts) do
-    PathLock.trans({__MODULE__, :attention_decay}, fn ->
-      safe_focus_call(fn -> {:ok, decay_all_attention(opts)} end)
-    end)
+    Command.run(opts, fn -> {:ok, decay_all_attention(opts)} end)
   end
 
   @doc false
@@ -354,7 +398,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec do_upsert_association_if_present(Association.t()) :: :ok | :missing
   defp do_upsert_association_if_present(association) do
-    case :ets.lookup(:mnemonic_associations, association.id) do
+    case ETS.lookup(:mnemonic_associations, association.id) do
       [{_id, %Association{}}] ->
         insert_association(association)
         :ok
@@ -367,7 +411,7 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec record_signal_checked(term(), keyword()) :: {:ok, record_result()} | {:error, term()}
   defp record_signal_checked(input, opts) do
     with :ok <- Erasure.ensure_writable(opts),
-         :ok <- validate_signal_options(opts) do
+         :ok <- Validation.signal_options(opts) do
       if Keyword.get(opts, :secret?, false),
         do: record_secret_signal(input, opts),
         else: record_plain_signal(input, opts)
@@ -378,7 +422,7 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, Association.t()} | {:error, term()}
   defp link_checked(source_id, relation, target_id, opts) do
     with :ok <- Erasure.ensure_writable(opts),
-         :ok <- validate_link_request(source_id, relation, target_id, opts),
+         :ok <- Validation.link_request(source_id, relation, target_id, opts),
          {:ok, association_opts} <- association_context(source_id, target_id, opts) do
       association = build_association(source_id, relation, target_id, association_opts)
 
@@ -397,12 +441,12 @@ defmodule SpectreMnemonic.Active.Focus do
           {:ok, Artifact.t() | %{artifact: Artifact.t(), action_recipe: ActionRecipe.t()}}
           | {:error, term()}
   defp artifact_checked(path_or_binary, opts) do
-    with :ok <- validate_structured_options(opts),
+    with :ok <- Validation.structured_options(opts),
          artifact <- build_artifact(path_or_binary, opts),
          {:ok, artifact} <- persist_value(:artifacts, artifact, opts),
          {:ok, action_bundle} <-
            maybe_attach_action_recipe(artifact.id, opts, artifact.inserted_at) do
-      :ets.insert(:mnemonic_artifacts, {artifact.id, artifact})
+      ETS.insert(:mnemonic_artifacts, {artifact.id, artifact})
       insert_action_bundle(action_bundle)
       {:ok, artifact_result(artifact, action_recipe(action_bundle))}
     end
@@ -465,15 +509,16 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec store_recorded_signal(Signal.t(), Moment.t() | Secret.t(), keyword(), DateTime.t()) ::
           {:ok, record_result()} | {:error, term()}
   defp store_recorded_signal(signal, moment, opts, now) do
-    with {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
+    with :ok <- validate_hot_record_size(moment, opts),
+         {:ok, _signal_result} <- maybe_persist_value(:signals, signal, opts),
          {:ok, _moment_result} <- maybe_persist_value(:moments, moment, opts),
          :ok <- maybe_observe_moment(moment, opts),
          {:ok, action_bundle} <- maybe_attach_action_recipe(moment.id, opts, now) do
       # Durable writes are complete before any hot projection becomes visible.
-      :ets.insert(:mnemonic_signals, {signal.id, signal})
-      :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
-      insert_moment(moment)
-      update_status(signal, now)
+      ETS.insert(:mnemonic_signals, {signal.id, signal})
+      ETS.insert(:mnemonic_attention, {moment.id, moment.attention})
+      insert_moment(moment, opts)
+      Status.put(signal, now)
       insert_action_bundle(action_bundle)
       Index.upsert(moment)
       enforce_hot_bounds(moment, opts)
@@ -499,12 +544,7 @@ defmodule SpectreMnemonic.Active.Focus do
   defp lookup_episode(id), do: lookup_one(:mnemonic_episodes, id)
 
   @spec lookup_one(atom(), term()) :: [term()]
-  defp lookup_one(table, id) do
-    case :ets.lookup(table, id) do
-      [{^id, value}] -> [value]
-      [] -> []
-    end
-  end
+  defp lookup_one(table, id), do: Repository.lookup(table, id)
 
   @spec build_moment(Signal.t(), keyword(), DateTime.t()) :: Moment.t()
   defp build_moment(signal, opts, now) do
@@ -610,6 +650,10 @@ defmodule SpectreMnemonic.Active.Focus do
          locked?: true,
          revealed?: false,
          algorithm: Map.fetch!(encrypted, :algorithm),
+         key_id: Map.get(encrypted, :key_id),
+         key_version: Map.get(encrypted, :key_version),
+         crypto_version: Map.get(encrypted, :crypto_version),
+         aad_version: Map.get(encrypted, :aad_version),
          ciphertext: Map.fetch!(encrypted, :ciphertext),
          iv: Map.fetch!(encrypted, :iv),
          tag: Map.fetch!(encrypted, :tag),
@@ -789,7 +833,7 @@ defmodule SpectreMnemonic.Active.Focus do
   defp insert_action_bundle(nil), do: :ok
 
   defp insert_action_bundle(%{recipe: recipe, association: association}) do
-    :ets.insert(:mnemonic_action_recipes, {recipe.id, recipe})
+    ETS.insert(:mnemonic_action_recipes, {recipe.id, recipe})
     insert_association(association)
     :ok
   end
@@ -839,9 +883,8 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
-  @spec insert_moment(Moment.t() | Secret.t()) :: true
-  defp insert_moment(moment) do
-    partition = Scope.partition(moment)
+  @spec insert_moment(Moment.t() | Secret.t(), keyword()) :: true
+  defp insert_moment(moment, opts \\ []) do
     existing = lookup_moment(moment.id)
     new? = existing == []
 
@@ -850,22 +893,10 @@ defmodule SpectreMnemonic.Active.Focus do
       [] -> :ok
     end
 
-    :ets.insert(:mnemonic_moments, {moment.id, moment})
-    :ets.insert(:mnemonic_moments_by_stream, {{partition, moment.stream}, moment.id})
-
-    if moment.task_id do
-      :ets.insert(:mnemonic_moments_by_task, {{partition, moment.task_id}, moment.id})
-    end
-
-    :ets.insert(:mnemonic_moments_by_scope, {partition, moment.id})
-
-    if is_binary(moment.signal_id) and moment.signal_id != "" do
-      :ets.insert(:mnemonic_moments_by_signal, {moment.signal_id, moment.id})
-    end
-
-    :ets.insert(:mnemonic_atlas_dirty, {partition, moment.id})
+    ActiveProjection.put_moment(moment, opts)
 
     if new?, do: increment_moment_counts(moment)
+    update_moment_bytes(existing, moment)
     put_eviction_index(moment)
 
     true
@@ -873,9 +904,11 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec do_hydrate_moment(Moment.t(), keyword()) :: :ok | {:error, term()}
   defp do_hydrate_moment(%Moment{} = moment, opts) do
+    BatchVisibility.publish_record(moment)
+
     if Scope.match?(moment, opts) do
-      :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
-      insert_moment(moment)
+      ETS.insert(:mnemonic_attention, {moment.id, moment.attention})
+      insert_moment(moment, opts)
       Index.upsert(moment)
       enforce_hot_bounds(moment, opts)
       :ok
@@ -901,26 +934,7 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @spec insert_association(Association.t()) :: true
-  defp insert_association(association) do
-    partition = Scope.partition(association)
-    :ets.insert(:mnemonic_associations, {association.id, association})
-    :ets.insert(:mnemonic_associations_by_scope, {partition, association.id})
-
-    :ets.insert(
-      :mnemonic_associations_by_memory,
-      {{partition, association.source_id}, association.id}
-    )
-
-    :ets.insert(
-      :mnemonic_associations_by_memory,
-      {{partition, association.target_id}, association.id}
-    )
-
-    if association.relation not in [:attached_action, :member_of, :same_as] do
-      :ets.insert(:mnemonic_atlas_dirty, {partition, association.source_id})
-      :ets.insert(:mnemonic_atlas_dirty, {partition, association.target_id})
-    end
-  end
+  defp insert_association(association), do: ActiveProjection.put_association(association)
 
   @spec forget_moments([binary()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   defp forget_moments([], _opts), do: {:ok, 0}
@@ -1170,8 +1184,8 @@ defmodule SpectreMnemonic.Active.Focus do
   defp apply_forget_plan(plan) do
     Enum.each(plan.associations, &delete_association/1)
     Enum.each(plan.episodes, &delete_episode/1)
-    Enum.each(plan.recipe_ids, &:ets.delete(:mnemonic_action_recipes, &1))
-    Enum.each(plan.signal_ids, &:ets.delete(:mnemonic_signals, &1))
+    Enum.each(plan.recipe_ids, &ETS.delete(:mnemonic_action_recipes, &1))
+    Enum.each(plan.signal_ids, &ETS.delete(:mnemonic_signals, &1))
     Enum.each(plan.moments, &evict_hot_moment/1)
     delete_derived_hot_records(plan.moment_ids)
     :ok
@@ -1180,15 +1194,15 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec delete_episode(Episode.t()) :: true
   defp delete_episode(episode) do
     partition = Scope.partition(episode)
-    :ets.delete(:mnemonic_episodes, episode.id)
-    :ets.delete_object(:mnemonic_episodes_by_scope, {partition, episode.id})
+    ETS.delete(:mnemonic_episodes, episode.id)
+    ETS.delete_object(:mnemonic_episodes_by_scope, {partition, episode.id})
   end
 
   @spec delete_derived_hot_records(MapSet.t()) :: :ok
   defp delete_derived_hot_records(moment_ids) do
     Enum.each([:mnemonic_observations, :mnemonic_mental_models], fn table ->
       table
-      |> :ets.tab2list()
+      |> ETS.tab2list()
       |> Enum.each(&delete_referencing_record(&1, table, moment_ids))
     end)
 
@@ -1199,96 +1213,47 @@ defmodule SpectreMnemonic.Active.Focus do
   defp delete_referencing_record({id, record}, table, moment_ids) do
     if record_references?(record, moment_ids) do
       delete_derived_scope_index(table, record, id)
-      :ets.delete(table, id)
+      ETS.delete(table, id)
     end
   end
 
   @spec delete_derived_scope_index(atom(), map(), term()) :: true | :ok
   defp delete_derived_scope_index(:mnemonic_observations, record, id),
-    do: :ets.delete_object(:mnemonic_observations_by_scope, {Scope.partition(record), id})
+    do: ETS.delete_object(:mnemonic_observations_by_scope, {Scope.partition(record), id})
 
   defp delete_derived_scope_index(:mnemonic_mental_models, record, id),
-    do: :ets.delete_object(:mnemonic_mental_models_by_scope, {Scope.partition(record), id})
+    do: ETS.delete_object(:mnemonic_mental_models_by_scope, {Scope.partition(record), id})
 
   defp delete_derived_scope_index(_table, _record, _id), do: :ok
 
   @spec delete_association(Association.t()) :: true
-  defp delete_association(association) do
-    partition = Scope.partition(association)
-    :ets.delete(:mnemonic_associations, association.id)
-    :ets.delete_object(:mnemonic_associations_by_scope, {partition, association.id})
-
-    :ets.delete_object(
-      :mnemonic_associations_by_memory,
-      {{partition, association.source_id}, association.id}
-    )
-
-    :ets.delete_object(
-      :mnemonic_associations_by_memory,
-      {{partition, association.target_id}, association.id}
-    )
-  end
+  defp delete_association(association), do: ActiveProjection.delete_association(association)
 
   @spec delete_moment_indexes(Moment.t() | Secret.t()) :: :ok
   defp delete_moment_indexes(moment) do
-    partition = Scope.partition(moment)
-    :ets.delete_object(:mnemonic_moments_by_stream, {{partition, moment.stream}, moment.id})
-
-    if moment.task_id do
-      :ets.delete_object(:mnemonic_moments_by_task, {{partition, moment.task_id}, moment.id})
-    end
-
-    :ets.delete_object(:mnemonic_moments_by_scope, {partition, moment.id})
-
-    if is_binary(moment.signal_id) and moment.signal_id != "" do
-      :ets.delete(:mnemonic_moments_by_signal, moment.signal_id)
-    end
+    ActiveProjection.delete_moment_indexes(moment)
 
     delete_eviction_index(moment)
+    delete_moment_bytes(moment.id)
     decrement_moment_counts(moment)
   end
 
-  @spec increment_moment_counts(Moment.t() | Secret.t()) :: :ok
-  defp increment_moment_counts(moment) do
-    partition = Scope.partition(moment)
-
-    :ets.update_counter(
-      :mnemonic_moment_counts,
-      {:scope, partition},
-      {2, 1},
-      {{:scope, partition}, 0}
-    )
-
-    :ets.update_counter(
-      :mnemonic_moment_counts,
-      {:namespace, moment.namespace},
-      {2, 1},
-      {{:namespace, moment.namespace}, 0}
-    )
-
-    :ok
+  @spec update_moment_bytes([Moment.t() | Secret.t()], Moment.t() | Secret.t()) :: :ok
+  defp update_moment_bytes(existing, moment) do
+    Eviction.replace_bytes(existing, moment, pinned?(moment, context_opts(moment, [])))
   end
+
+  @spec delete_moment_bytes(binary()) :: :ok
+  defp delete_moment_bytes(id), do: Eviction.delete_bytes(id)
+
+  @spec adjust_hot_bytes(tuple(), integer()) :: :ok
+  defp adjust_hot_bytes(key, delta), do: Eviction.adjust_bytes(key, delta)
+
+  @spec increment_moment_counts(Moment.t() | Secret.t()) :: :ok
+  defp increment_moment_counts(moment), do: Eviction.increment_count(moment)
 
   @spec decrement_moment_counts(Moment.t() | Secret.t()) :: :ok
-  defp decrement_moment_counts(moment) do
-    partition = Scope.partition(moment)
-
-    :ets.update_counter(
-      :mnemonic_moment_counts,
-      {:scope, partition},
-      {2, -1, 0, 0},
-      {{:scope, partition}, 0}
-    )
-
-    :ets.update_counter(
-      :mnemonic_moment_counts,
-      {:namespace, moment.namespace},
-      {2, -1, 0, 0},
-      {{:namespace, moment.namespace}, 0}
-    )
-
-    :ok
-  end
+  defp decrement_moment_counts(moment), do: Eviction.decrement_count(moment)
 
   @spec forget_ids(selector(), keyword()) :: [binary()]
   defp forget_ids({:stream, stream}, opts) do
@@ -1323,11 +1288,7 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @spec indexed_ids(atom(), term()) :: [binary()]
-  defp indexed_ids(table, key) do
-    table
-    |> :ets.lookup(key)
-    |> Enum.map(fn {_key, id} -> id end)
-  end
+  defp indexed_ids(table, key), do: Repository.indexed_ids(table, key)
 
   @spec direct_moment_ids(binary()) :: [binary()]
   defp direct_moment_ids(id) do
@@ -1335,26 +1296,6 @@ defmodule SpectreMnemonic.Active.Focus do
       [_moment] -> [id]
       [] -> []
     end
-  end
-
-  @spec update_status(Signal.t(), DateTime.t()) :: true
-  defp update_status(signal, now) do
-    status = %{
-      namespace: signal.namespace,
-      scope: signal.scope,
-      stream: signal.stream,
-      task_id: signal.task_id,
-      kind: signal.kind,
-      status: :active,
-      last_input: signal.input,
-      updated_at: now
-    }
-
-    partition = {signal.namespace, signal.scope}
-    :ets.insert(:mnemonic_status, {{partition, {:stream, signal.stream}}, status})
-
-    if signal.task_id,
-      do: :ets.insert(:mnemonic_status, {{partition, {:task, signal.task_id}}, status})
   end
 
   @spec infer_kind(term(), keyword()) :: atom()
@@ -1423,16 +1364,28 @@ defmodule SpectreMnemonic.Active.Focus do
     namespace = Identity.namespace(moment)
     evict_until({:namespace, namespace}, {:namespace, namespace}, per_namespace, opts)
 
+    evict_bytes_until(
+      {:scope, partition},
+      {:scope, partition},
+      Keyword.get(opts, :max_hot_bytes_per_scope, 64 * 1024 * 1024),
+      opts
+    )
+
+    evict_bytes_until(
+      {:namespace, namespace},
+      {:namespace, namespace},
+      Keyword.get(opts, :max_hot_bytes_per_engine, 512 * 1024 * 1024),
+      opts
+    )
+
     :ok
   end
 
+  @spec validate_hot_record_size(Moment.t() | Secret.t(), keyword()) :: :ok | {:error, term()}
+  defp validate_hot_record_size(moment, opts), do: Eviction.validate_size(moment, opts)
+
   @spec moment_count(term()) :: non_neg_integer()
-  defp moment_count(key) do
-    case :ets.lookup(:mnemonic_moment_counts, key) do
-      [{^key, count}] when is_integer(count) and count >= 0 -> count
-      _missing -> 0
-    end
-  end
+  defp moment_count(key), do: Eviction.count(key)
 
   @spec hot_limit(atom(), non_neg_integer()) :: non_neg_integer()
   defp hot_limit(key, default) do
@@ -1460,11 +1413,30 @@ defmodule SpectreMnemonic.Active.Focus do
     end
   end
 
+  @spec evict_bytes_until(tuple(), tuple(), non_neg_integer(), keyword()) :: :ok
+  defp evict_bytes_until(axis, count_key, limit, opts) do
+    if hot_bytes(count_key) > limit do
+      case next_eviction_candidate(axis, opts) do
+        nil ->
+          :ok
+
+        moment ->
+          evict_hot_moment(moment)
+          evict_bytes_until(axis, count_key, limit, opts)
+      end
+    else
+      :ok
+    end
+  end
+
+  @spec hot_bytes(tuple()) :: non_neg_integer()
+  defp hot_bytes(key), do: Eviction.hot_bytes(key)
+
   @spec next_eviction_candidate(tuple(), keyword()) :: Moment.t() | Secret.t() | nil
   defp next_eviction_candidate(axis, opts) do
     start = {axis, -1, -1.0, -1, ""}
 
-    case :ets.next(:mnemonic_moment_eviction, start) do
+    case ETS.next(:mnemonic_moment_eviction, start) do
       {^axis, 1, _attention, _inserted_at, _id} ->
         nil
 
@@ -1496,39 +1468,18 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec put_eviction_index(Moment.t() | Secret.t()) :: true
   defp put_eviction_index(moment) do
-    delete_eviction_index(moment)
-    inserted_at = DateTime.to_unix(moment.inserted_at, :microsecond)
-    pinned_rank = if pinned?(moment, context_opts(moment, [])), do: 1, else: 0
-    attention = current_attention(moment)
-
-    keys = [
-      {{:scope, Scope.partition(moment)}, pinned_rank, attention, inserted_at, moment.id},
-      {{:namespace, moment.namespace}, pinned_rank, attention, inserted_at, moment.id}
-    ]
-
-    Enum.each(keys, &:ets.insert(:mnemonic_moment_eviction, {&1, moment.id}))
-    :ets.insert(:mnemonic_moment_eviction_keys, {moment.id, keys})
+    Eviction.put_index(
+      moment,
+      pinned?(moment, context_opts(moment, [])),
+      current_attention(moment)
+    )
   end
 
   @spec delete_eviction_index(Moment.t() | Secret.t()) :: true
-  defp delete_eviction_index(moment) do
-    case :ets.lookup(:mnemonic_moment_eviction_keys, moment.id) do
-      [{_id, keys}] -> Enum.each(keys, &:ets.delete(:mnemonic_moment_eviction, &1))
-      [] -> :ok
-    end
-
-    :ets.delete(:mnemonic_moment_eviction_keys, moment.id)
-  end
+  defp delete_eviction_index(moment), do: Eviction.delete_index(moment)
 
   @spec delete_stale_eviction_key(binary()) :: true
-  defp delete_stale_eviction_key(id) do
-    case :ets.lookup(:mnemonic_moment_eviction_keys, id) do
-      [{^id, keys}] -> Enum.each(keys, &:ets.delete(:mnemonic_moment_eviction, &1))
-      [] -> :ok
-    end
-
-    :ets.delete(:mnemonic_moment_eviction_keys, id)
-  end
+  defp delete_stale_eviction_key(id), do: Eviction.delete_index(id)
 
   @spec pinned?(Moment.t() | Secret.t(), keyword()) :: boolean()
   defp pinned?(moment, opts) do
@@ -1537,7 +1488,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec current_attention(Moment.t() | Secret.t()) :: float()
   defp current_attention(moment) do
-    case :ets.lookup(:mnemonic_attention, moment.id) do
+    case ETS.lookup(:mnemonic_attention, moment.id) do
       [{_id, attention}] when is_number(attention) -> attention * 1.0
       _missing -> moment.attention * 1.0
     end
@@ -1590,7 +1541,7 @@ defmodule SpectreMnemonic.Active.Focus do
     namespace = Identity.namespace!(opts)
 
     :mnemonic_moments
-    |> :ets.tab2list()
+    |> ETS.tab2list()
     |> Enum.reduce(0, fn {_id, moment}, count ->
       maybe_decay_attention(moment, count, namespace, cutoff, factor, floor, opts)
     end)
@@ -1639,7 +1590,7 @@ defmodule SpectreMnemonic.Active.Focus do
 
   @spec update_hot_attention(Moment.t() | Secret.t()) :: :ok
   defp update_hot_attention(moment) do
-    :ets.insert(:mnemonic_attention, {moment.id, moment.attention})
+    ETS.insert(:mnemonic_attention, {moment.id, moment.attention})
     insert_moment(moment)
     :ok
   end
@@ -1671,14 +1622,15 @@ defmodule SpectreMnemonic.Active.Focus do
       |> Enum.map(& &1.target_id)
 
     Enum.each(associations, &delete_association/1)
-    Enum.each(recipe_ids, &:ets.delete(:mnemonic_action_recipes, &1))
+    Enum.each(recipe_ids, &ETS.delete(:mnemonic_action_recipes, &1))
     delete_moment_indexes(moment)
-    :ets.delete(:mnemonic_moments, moment.id)
-    :ets.delete(:mnemonic_attention, moment.id)
-    :ets.delete(:mnemonic_signals, moment.signal_id)
-    :ets.delete_object(:mnemonic_atlas_dirty, {Scope.partition(moment), moment.id})
-    refresh_status(moment)
-    Index.delete(moment.id)
+    ETS.delete(:mnemonic_moments, moment.id)
+    ETS.delete(:mnemonic_attention, moment.id)
+    ETS.delete(:mnemonic_signals, moment.signal_id)
+    ETS.delete_object(:mnemonic_atlas_dirty, {Scope.partition(moment), moment.id})
+    Status.refresh(moment)
+    Index.delete(moment)
+    ActiveProjection.delete_candidate(moment)
     :ok
   end
 
@@ -1694,8 +1646,8 @@ defmodule SpectreMnemonic.Active.Focus do
     Enum.each(moments, &evict_hot_moment/1)
 
     Enum.each(episodes, fn episode ->
-      :ets.delete(:mnemonic_episodes, episode.id)
-      :ets.delete_object(:mnemonic_episodes_by_scope, {partition, episode.id})
+      ETS.delete(:mnemonic_episodes, episode.id)
+      ETS.delete_object(:mnemonic_episodes_by_scope, {partition, episode.id})
     end)
 
     direct_tables = [
@@ -1713,12 +1665,12 @@ defmodule SpectreMnemonic.Active.Focus do
         count + delete_partition_rows(table, partition)
       end)
 
-    :ets.match_delete(:mnemonic_status, {{partition, :_}, :_})
-    :ets.match_delete(:mnemonic_entity_registry, {{partition, :_}, :_})
-    :ets.match_delete(:mnemonic_atlas_dirty, {partition, :_})
-    :ets.match_delete(:mnemonic_observations_by_scope, {partition, :_})
-    :ets.match_delete(:mnemonic_mental_models_by_scope, {partition, :_})
-    :ets.match_delete(:mnemonic_governance_states_by_scope, {partition, :_})
+    ETS.match_delete(:mnemonic_status, {{partition, :_}, :_})
+    ETS.match_delete(:mnemonic_entity_registry, {{partition, :_}, :_})
+    ETS.match_delete(:mnemonic_atlas_dirty, {partition, :_})
+    ETS.match_delete(:mnemonic_observations_by_scope, {partition, :_})
+    ETS.match_delete(:mnemonic_mental_models_by_scope, {partition, :_})
+    ETS.match_delete(:mnemonic_governance_states_by_scope, {partition, :_})
 
     {:ok,
      %{
@@ -1732,61 +1684,17 @@ defmodule SpectreMnemonic.Active.Focus do
   @spec delete_partition_rows(atom(), tuple()) :: non_neg_integer()
   defp delete_partition_rows(table, partition) do
     table
-    |> :ets.tab2list()
+    |> ETS.tab2list()
     |> Enum.count(&delete_partition_row(&1, table, partition))
   end
 
   @spec delete_partition_row({term(), term()}, atom(), tuple()) :: boolean()
   defp delete_partition_row({id, value}, table, partition) do
     if Scope.partition(value) == partition do
-      :ets.delete(table, id)
+      ETS.delete(table, id)
       true
     else
       false
-    end
-  end
-
-  @spec refresh_status(Moment.t() | Secret.t()) :: :ok
-  defp refresh_status(moment) do
-    partition = Scope.partition(moment)
-    refresh_status_key(partition, :stream, moment.stream, :mnemonic_moments_by_stream)
-
-    if moment.task_id do
-      refresh_status_key(partition, :task, moment.task_id, :mnemonic_moments_by_task)
-    end
-
-    :ok
-  end
-
-  @spec refresh_status_key(tuple(), :stream | :task, term(), atom()) :: :ok
-  defp refresh_status_key(partition, type, key, index_table) do
-    status_key = {partition, {type, key}}
-    :ets.delete(:mnemonic_status, status_key)
-    {namespace, scope} = partition
-    opts = [namespace: namespace, scope: scope]
-
-    index_table
-    |> indexed_ids({partition, key})
-    |> moments_by_ids(opts)
-    |> Enum.max_by(&DateTime.to_unix(&1.inserted_at, :microsecond), fn -> nil end)
-    |> case do
-      nil ->
-        :ok
-
-      latest ->
-        status = %{
-          namespace: namespace,
-          scope: scope,
-          stream: latest.stream,
-          task_id: latest.task_id,
-          kind: latest.kind,
-          status: :active,
-          last_input: latest.input,
-          updated_at: latest.inserted_at
-        }
-
-        :ets.insert(:mnemonic_status, {status_key, status})
-        :ok
     end
   end
 
@@ -1840,123 +1748,6 @@ defmodule SpectreMnemonic.Active.Focus do
       label when is_atom(label) or is_number(label) -> to_string(label)
       label -> inspect(label)
     end
-  end
-
-  @spec validate_signal_options(keyword()) :: :ok | {:error, term()}
-  defp validate_signal_options(opts) do
-    with :ok <- validate_structured_options(opts),
-         :ok <- validate_boolean_option(opts, :secret?),
-         :ok <- validate_number_option(opts, :attention) do
-      validate_number_option(opts, :confidence)
-    end
-  end
-
-  @spec validate_link_request(term(), term(), term(), keyword()) :: :ok | {:error, term()}
-  defp validate_link_request(source_id, relation, target_id, opts) do
-    with :ok <- validate_link_endpoint(:source_id, source_id),
-         :ok <- validate_link_endpoint(:target_id, target_id),
-         :ok <- validate_link_relation(relation),
-         :ok <- validate_link_weight(Keyword.get(opts, :weight, 1.0)) do
-      validate_structured_options(opts)
-    end
-  end
-
-  @spec validate_link_endpoint(atom(), term()) :: :ok | {:error, term()}
-  defp validate_link_endpoint(_key, value) when is_binary(value) and value != "", do: :ok
-  defp validate_link_endpoint(key, value), do: {:error, {:invalid_link_endpoint, key, value}}
-
-  @spec validate_link_relation(term()) :: :ok | {:error, term()}
-  defp validate_link_relation(relation)
-       when is_atom(relation) and relation not in [nil, true, false],
-       do: :ok
-
-  defp validate_link_relation(relation), do: {:error, {:invalid_link_relation, relation}}
-
-  @spec validate_link_weight(term()) :: :ok | {:error, term()}
-  defp validate_link_weight(weight) when is_number(weight) and weight >= 0 and weight <= 1,
-    do: :ok
-
-  defp validate_link_weight(weight), do: {:error, {:invalid_link_weight, weight}}
-
-  @spec validate_structured_options(keyword()) :: :ok | {:error, term()}
-  defp validate_structured_options(opts) do
-    with :ok <- validate_map_option(opts, :metadata),
-         :ok <- validate_map_option(opts, :action_recipe_metadata),
-         :ok <- validate_boolean_option(opts, :persist?) do
-      validate_action_recipe(Keyword.get(opts, :action_recipe))
-    end
-  end
-
-  @spec validate_map_option(keyword(), atom()) :: :ok | {:error, term()}
-  defp validate_map_option(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error ->
-        :ok
-
-      {:ok, value} when is_map(value) ->
-        :ok
-
-      {:ok, value} when is_list(value) ->
-        if Keyword.keyword?(value),
-          do: :ok,
-          else: {:error, {:invalid_focus_option, key, value}}
-
-      {:ok, value} ->
-        {:error, {:invalid_focus_option, key, value}}
-    end
-  end
-
-  @spec validate_boolean_option(keyword(), atom()) :: :ok | {:error, term()}
-  defp validate_boolean_option(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error -> :ok
-      {:ok, value} when is_boolean(value) -> :ok
-      {:ok, value} -> {:error, {:invalid_focus_option, key, value}}
-    end
-  end
-
-  @spec validate_number_option(keyword(), atom()) :: :ok | {:error, term()}
-  defp validate_number_option(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error -> :ok
-      {:ok, value} when is_number(value) -> :ok
-      {:ok, value} -> {:error, {:invalid_focus_option, key, value}}
-    end
-  end
-
-  @spec validate_action_recipe(term()) :: :ok | {:error, term()}
-  defp validate_action_recipe(nil), do: :ok
-  defp validate_action_recipe(recipe) when is_binary(recipe) or is_map(recipe), do: :ok
-
-  defp validate_action_recipe(recipe) when is_list(recipe) do
-    if Keyword.keyword?(recipe),
-      do: :ok,
-      else: {:error, {:invalid_focus_option, :action_recipe, recipe}}
-  end
-
-  defp validate_action_recipe(recipe),
-    do: {:error, {:invalid_focus_option, :action_recipe, recipe}}
-
-  @spec safe_focus_call((-> result)) :: result | {:error, term()} when result: term()
-  defp safe_focus_call(fun) do
-    fun.()
-  rescue
-    exception ->
-      {:error, {:active_focus_failed, exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {:active_focus_failed, kind, reason}}
-  end
-
-  @spec with_partition_lock(keyword(), (-> result)) :: result | {:error, term()}
-        when result: term()
-  defp with_partition_lock(opts, fun) do
-    key = {__MODULE__, Identity.namespace!(opts), Scope.from_opts(opts)}
-    PathLock.trans(key, fn -> safe_focus_call(fun) end)
-  end
-
-  @spec with_record_lock(map(), (-> result)) :: result | {:error, term()} when result: term()
-  defp with_record_lock(record, fun) do
-    PathLock.trans({__MODULE__, Scope.partition(record)}, fn -> safe_focus_call(fun) end)
   end
 
   @spec redacted_secret_text(binary()) :: binary()

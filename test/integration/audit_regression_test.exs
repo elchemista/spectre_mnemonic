@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.AuditRegressionTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Export
@@ -257,7 +258,7 @@ defmodule SpectreMnemonic.AuditRegressionTest do
              pinned.id
            ]
 
-    refute :ets.member(:mnemonic_moments, rejected_by_bound.id)
+    refute ActiveETS.member(:mnemonic_moments, rejected_by_bound.id)
 
     Application.put_env(:spectre_mnemonic, :hot_memory,
       max_moments_per_scope: 2,
@@ -275,7 +276,7 @@ defmodule SpectreMnemonic.AuditRegressionTest do
                max_moments_per_namespace: 0
              )
 
-    assert :ets.member(:mnemonic_moments, config_only.id)
+    assert ActiveETS.member(:mnemonic_moments, config_only.id)
 
     attention_scope = {:subject, "attention-bound"}
 
@@ -339,7 +340,7 @@ defmodule SpectreMnemonic.AuditRegressionTest do
     assert results |> Enum.map(& &1.moment.id) |> Enum.uniq() |> length() == 40
 
     Enum.each(results, fn result ->
-      assert :ets.member(:mnemonic_moments, result.moment.id)
+      assert ActiveETS.member(:mnemonic_moments, result.moment.id)
     end)
   end
 
@@ -359,7 +360,8 @@ defmodule SpectreMnemonic.AuditRegressionTest do
     }
 
     refute Process.whereis(Engine)
-    :sys.suspend(Index)
+    index = Index.server([])
+    :sys.suspend(index)
 
     try do
       assert {:ok, [%{id: id} | _rest]} = Index.query(cue, scope: scope, overfetch: 1)
@@ -376,7 +378,7 @@ defmodule SpectreMnemonic.AuditRegressionTest do
 
       assert Enum.any?(packet.moments, &(&1.id == moment.id))
     after
-      :sys.resume(Index)
+      :sys.resume(index)
     end
   end
 end

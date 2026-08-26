@@ -72,17 +72,33 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
           {:ok, binary()} | {:error, {:frame_too_large, non_neg_integer(), pos_integer()}}
   def encode_checked(seq, payload, timestamp \\ System.system_time(:millisecond))
       when is_integer(seq) and seq > 0 and is_integer(timestamp) do
+    encode_checked(seq, payload, timestamp, [])
+  end
+
+  @doc false
+  @spec encode_checked(pos_integer(), term(), integer(), keyword()) ::
+          {:ok, binary()}
+          | {:error, {:frame_too_large, non_neg_integer(), pos_integer()} | :invalid_frame_format}
+  def encode_checked(seq, payload, timestamp, opts)
+      when is_integer(seq) and seq > 0 and is_integer(timestamp) and is_list(opts) do
+    magic = Keyword.get(opts, :magic, @magic)
+    version = Keyword.get(opts, :version, @version)
     encoded_payload = :erlang.term_to_binary(payload, [:compressed])
     maximum = max_payload_bytes()
 
-    if safe_payload_size?(encoded_payload, maximum) do
-      crc = :erlang.crc32(encoded_payload)
+    cond do
+      not valid_format?(magic, version) ->
+        {:error, :invalid_frame_format}
 
-      {:ok,
-       <<@magic, @version, seq::unsigned-64, timestamp::signed-64, byte_size(encoded_payload)::32,
-         crc::32, encoded_payload::binary>>}
-    else
-      {:error, {:frame_too_large, payload_size(encoded_payload), maximum}}
+      safe_payload_size?(encoded_payload, maximum) ->
+        crc = :erlang.crc32(encoded_payload)
+
+        {:ok,
+         <<magic::binary, version, seq::unsigned-64, timestamp::signed-64,
+           byte_size(encoded_payload)::32, crc::32, encoded_payload::binary>>}
+
+      true ->
+        {:error, {:frame_too_large, payload_size(encoded_payload), maximum}}
     end
   end
 
@@ -145,12 +161,22 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
   """
   @spec read_frames(File.io_device(), acc, fold_fun(acc)) :: acc when acc: term()
   def read_frames(io, acc, fun) when is_function(fun, 2) do
+    read_frames(io, acc, fun, [])
+  end
+
+  @doc false
+  @spec read_frames(File.io_device(), acc, fold_fun(acc), keyword()) :: acc when acc: term()
+  def read_frames(io, acc, fun, opts) when is_function(fun, 2) and is_list(opts) do
     # I chose framed append-only storage because the recovery story is boring:
     # read until the bytes stop making sense, then stop. Future work can add
     # better repair tooling; today we do not turn one bad tail into a funeral.
+    magic = Keyword.get(opts, :magic, @magic)
+    version = Keyword.get(opts, :version, @version)
+
     case IO.binread(io, @header_bytes) do
-      <<@magic, @version, seq::unsigned-64, timestamp::signed-64, len::32, crc::32>> ->
-        read_payload(io, seq, timestamp, len, crc, acc, fun)
+      <<^magic::binary-size(4), ^version, seq::unsigned-64, timestamp::signed-64, len::32,
+        crc::32>> ->
+        read_payload(io, seq, timestamp, len, crc, acc, fun, opts)
 
       incomplete_or_unknown when is_binary(incomplete_or_unknown) ->
         acc
@@ -170,14 +196,15 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
           non_neg_integer(),
           non_neg_integer(),
           acc,
-          fold_fun(acc)
+          fold_fun(acc),
+          keyword()
         ) :: acc
         when acc: term()
-  defp read_payload(io, seq, timestamp, len, crc, acc, fun) do
+  defp read_payload(io, seq, timestamp, len, crc, acc, fun, opts) do
     if len <= max_payload_bytes() do
       case IO.binread(io, len) do
         payload when is_binary(payload) and byte_size(payload) == len ->
-          read_complete_payload(io, seq, timestamp, payload, crc, acc, fun)
+          read_complete_payload(io, seq, timestamp, payload, crc, acc, fun, opts)
 
         _incomplete_or_error ->
           acc
@@ -194,13 +221,14 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
           binary(),
           non_neg_integer(),
           acc,
-          fold_fun(acc)
+          fold_fun(acc),
+          keyword()
         ) :: acc
         when acc: term()
-  defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun) do
+  defp read_complete_payload(io, seq, timestamp, payload, crc, acc, fun, opts) do
     if :erlang.crc32(payload) == crc do
       case decode_payload(payload) do
-        {:ok, decoded} -> continue_frame(io, {seq, timestamp, decoded}, acc, fun)
+        {:ok, decoded} -> continue_frame(io, {seq, timestamp, decoded}, acc, fun, opts)
         :error -> acc
       end
     else
@@ -233,13 +261,18 @@ defmodule SpectreMnemonic.Persistence.Store.FileFrame do
 
   defp expanded_payload_size(payload), do: byte_size(payload)
 
-  @spec continue_frame(File.io_device(), t(), acc, fold_fun(acc)) :: acc when acc: term()
-  defp continue_frame(io, frame, acc, fun) do
+  @spec continue_frame(File.io_device(), t(), acc, fold_fun(acc), keyword()) :: acc
+        when acc: term()
+  defp continue_frame(io, frame, acc, fun, opts) do
     case fun.(frame, acc) do
-      {:cont, acc} -> read_frames(io, acc, fun)
+      {:cont, acc} -> read_frames(io, acc, fun, opts)
       {:halt, acc} -> acc
     end
   end
+
+  @spec valid_format?(term(), term()) :: boolean()
+  defp valid_format?(magic, version),
+    do: is_binary(magic) and byte_size(magic) == byte_size(@magic) and version in 0..255
 
   @spec scan_frames(
           File.io_device(),

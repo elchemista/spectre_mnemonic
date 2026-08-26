@@ -44,8 +44,6 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
   end
 
   test "knowledge writer contains malformed events and unusable roots" do
-    writer = Process.whereis(SMEM)
-
     assert {:error, {:knowledge_write_failed, Protocol.UndefinedError, _message}} =
              SMEM.append(%{type: :fact, text: "invalid metadata", metadata: :invalid})
 
@@ -57,8 +55,7 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert {:error, _reason} = SMEM.replay(data_root: root)
 
     assert {:ok, _sequence} = SMEM.append(%{type: :fact, text: "writer remains healthy"})
-    assert Process.whereis(SMEM) == writer
-    assert Process.alive?(writer)
+    refute Process.whereis(SMEM)
   end
 
   test "knowledge frames reject oversized compressed and expanded payloads" do
@@ -132,6 +129,24 @@ defmodule SpectreMnemonic.Knowledge.SMEMTest do
     assert result.score > 0
     assert length(rest) <= 1
     assert length(Focus.moments()) == before_count
+  end
+
+  test "load and search use the hot knowledge projection instead of rereading the log" do
+    {:ok, _} =
+      SMEM.append(%{type: :summary, summary: "Projected knowledge summary"})
+
+    {:ok, _} =
+      SMEM.append(%{type: :fact, text: "projection-only narwhal deployment fact"})
+
+    File.write!(SMEM.path(), "corrupt after durable projection commit")
+
+    assert {:ok, knowledge} = SpectreMnemonic.load_knowledge()
+    assert knowledge.summary == "Projected knowledge summary"
+
+    assert {:ok, [result | _rest]} =
+             SpectreMnemonic.search_knowledge("narwhal deployment", limit: 3)
+
+    assert result.event.text == "projection-only narwhal deployment fact"
   end
 
   test "default compaction writes compact replacement events without markdown files" do

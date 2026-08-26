@@ -11,6 +11,27 @@ defmodule SpectreMnemonic.Persistence.Store.Placeholder do
       def capabilities(_opts), do: @capabilities
 
       @impl SpectreMnemonic.Persistence.Store.Adapter
+      @spec contract(keyword()) :: SpectreMnemonic.Persistence.Store.Contract.t()
+      def contract(_opts) do
+        %SpectreMnemonic.Persistence.Store.Contract{
+          adapter: __MODULE__,
+          operation_id: :unsupported,
+          replay_fold: false,
+          erase_semantics: :none,
+          placeholder?: true,
+          conformant?: false
+        }
+      end
+
+      @impl SpectreMnemonic.Persistence.Store.Adapter
+      @spec health(keyword()) :: {:error, term()}
+      def health(_opts), do: missing_adapter_implementation()
+
+      @impl SpectreMnemonic.Persistence.Store.Adapter
+      @spec classify_retry(term()) :: :permanent
+      def classify_retry(_reason), do: :permanent
+
+      @impl SpectreMnemonic.Persistence.Store.Adapter
       @spec put(SpectreMnemonic.Persistence.Store.Record.t(), keyword()) :: {:error, term()}
       def put(_record, _opts), do: missing_adapter_implementation()
 

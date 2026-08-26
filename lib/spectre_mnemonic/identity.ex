@@ -29,13 +29,51 @@ defmodule SpectreMnemonic.Identity do
     if Keyword.has_key?(opts, :scopes) do
       {:error, :multiple_scopes_not_allowed}
     else
-      case configured_namespace() do
-        {:ok, configured} ->
-          fetch_requested_namespace(Keyword.fetch(opts, :namespace), configured)
+      fetch_namespace_for_context(opts)
+    end
+  end
 
-        {:error, _reason} = error ->
-          error
-      end
+  @spec fetch_namespace_for_context(keyword()) ::
+          {:ok, namespace()}
+          | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+  defp fetch_namespace_for_context(opts) do
+    case Keyword.get(opts, :engine_namespace) do
+      namespace when is_binary(namespace) ->
+        with {:ok, engine_namespace} <- normalize_namespace(namespace) do
+          fetch_requested_namespace(Keyword.fetch(opts, :namespace), engine_namespace)
+        end
+
+      _legacy ->
+        fetch_legacy_or_active_engine_namespace(opts)
+    end
+  end
+
+  @spec fetch_legacy_or_active_engine_namespace(keyword()) ::
+          {:ok, namespace()}
+          | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+  defp fetch_legacy_or_active_engine_namespace(opts) do
+    requested = Keyword.fetch(opts, :namespace)
+
+    case requested do
+      {:ok, namespace} when is_binary(namespace) ->
+        if SpectreMnemonic.Engine.internal_namespace?(namespace) do
+          normalize_namespace(namespace)
+        else
+          compare_with_configured(requested)
+        end
+
+      _missing_or_invalid ->
+        compare_with_configured(requested)
+    end
+  end
+
+  @spec compare_with_configured(:error | {:ok, term()}) ::
+          {:ok, namespace()}
+          | {:error, :namespace_required | {:namespace_mismatch, binary(), binary()}}
+  defp compare_with_configured(requested) do
+    case configured_namespace() do
+      {:ok, configured} -> fetch_requested_namespace(requested, configured)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -112,6 +150,7 @@ defmodule SpectreMnemonic.Identity do
     metadata
     |> Map.put(:namespace, namespace!(opts))
     |> Map.put(:scope, Keyword.get(opts, :scope))
+    |> maybe_put_batch_id(Keyword.get(opts, :batch_id))
   end
 
   @doc "Creates a prefixed UUIDv7 id."
@@ -161,6 +200,12 @@ defmodule SpectreMnemonic.Identity do
   end
 
   defp normalize_namespace(_namespace), do: {:error, :namespace_required}
+
+  @spec maybe_put_batch_id(map(), term()) :: map()
+  defp maybe_put_batch_id(metadata, batch_id) when is_binary(batch_id) and batch_id != "",
+    do: Map.put(metadata, :batch_id, batch_id)
+
+  defp maybe_put_batch_id(metadata, _batch_id), do: metadata
 
   @spec hex(non_neg_integer(), pos_integer()) :: binary()
   defp hex(value, width) do

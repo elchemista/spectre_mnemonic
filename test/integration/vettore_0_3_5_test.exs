@@ -41,9 +41,15 @@ defmodule SpectreMnemonic.Integration.Vettore035Test do
                embedding: [1.0, 0.0]
              )
 
-    state = :sys.get_state(Index)
-    indexed = Map.fetch!(state.vettore, {"spectre_mnemonic_test", scope})
+    state = Index.server([]) |> :sys.get_state()
 
+    indexed =
+      Enum.find_value(state.vettore, fn
+        {{"spectre_mnemonic_test", ^scope, _embedding_space_id}, indexed} -> indexed
+        _other -> nil
+      end)
+
+    assert indexed
     assert indexed.collection.index == :flat
     assert indexed.collection.index_options == [gpu: :auto, gpu_min_size: 1, gpu_fallback: :cpu]
 

@@ -2,11 +2,55 @@
 
 All notable changes to Spectre Mnemonic are documented in this file.
 
-The current package and public API version is `0.1.0`. The numbered sections
+The current package and public API version is `0.2.0`. The numbered sections
 below record internal development milestones; they are not published package
 release declarations.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-26
+
+### Highlights
+
+- Introduced the supervised `SpectreMnemonic.Engine` as the single core for
+  standalone and Spectre Stack usage, with stable `Engine.Ref`, `storage_id`,
+  per-Engine configuration, health, scheduler, stores, persistence runtime,
+  durable/vector indexes, projection shards, and bounded queues.
+- Made Spectre optional and added a real minimal-consumer CI gate that compiles
+  and runs without Spectre or a transitive JSON dependency. The OTP application
+  no longer requires a global namespace; legacy configuration starts the
+  compatible DefaultEngine.
+- Added multi-Engine isolation in one VM and documented the explicit
+  single-node/one-writer-per-`storage_id` deployment contract.
+- Removed `PathLock`. Partition executors now own mutation lifetimes,
+  generation-fenced erasure, deadlines, cancellation, bounded admission, and
+  atomic batch visibility; store writers serialize only physical boundaries.
+- Added candidate-first projection shards with unnamed protected ETS tables,
+  bounded lexical/entity/stream/task/temporal/vector candidates, small-scope
+  brute-force fallback, recall diagnostics, and strict/available consistency.
+- Added record schema v2, operation and commit identities, write receipts,
+  primary-authoritative commit semantics, durable repair jobs, streaming
+  replay, framed v2 snapshots, and rotate/build/commit compaction while keeping
+  v1 read compatibility.
+- Replaced the durable corpus maps with unnamed protected ETS documents,
+  postings, document frequencies, lifecycle state, recent candidates, and
+  generation metadata. Rebuild and physical snapshot publication now fold and
+  write records incrementally without materializing the live corpus.
+- Added explicit embedding-space identity, byte and queue quotas, pinned-memory
+  accounting, per-Engine knowledge projection, coalesced maintenance, secret
+  key/crypto/AAD versions, scoped reveal helpers, and truthful crypto-shred
+  reports.
+- Added optional, content-free Telemetry spans and events for public memory
+  operations, candidate collection, embeddings, vector queries, bounded queue
+  waits, writes, repair, replay, rebuild, compaction, erasure, secret reveal,
+  and maintenance.
+- Added the persistence adapter Contract and structural Conformance audit.
+  Postgres, Mongo, and S3 remain explicitly non-conformant placeholders.
+- Added `:instance` as an opt-in Spectre isolation dimension. The historical
+  `isolate_by: []` shared scope remains unchanged, while missing Instance refs
+  fail closed with the dimension-specific error.
+- Completed the coordinated Spectre runtime integration: a named Stack Runtime
+  supervises the Engine resource, resource resolution is restart-safe and
+  cached, and generic package-data erasure includes Mnemonic before checkpoint
+  deletion.
 
 ### Migration
 

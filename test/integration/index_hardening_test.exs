@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Integration.IndexHardeningTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Durable.Documents
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
   alias SpectreMnemonic.Embedding.Vector
   alias SpectreMnemonic.Memory.Moment
@@ -15,8 +16,9 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     vector = Vector.normalize_to_f32_binary([1.0, 0.0])
     signature = <<0b1000_0000>>
 
-    assert {:error, {:already_started, pid}} = RecallIndex.start_link()
+    pid = RecallIndex.server(@namespace)
     assert is_pid(pid)
+    refute Process.whereis(RecallIndex)
     assert :ok = RecallIndex.upsert(%{not: :indexable})
     assert {:ok, []} = RecallIndex.query(%{vector: nil})
 
@@ -43,12 +45,13 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     assert :ok = RecallIndex.delete("already-missing")
     assert {:ok, []} = RecallIndex.query(%{vector: vector, binary_signature: signature})
 
-    supervisor = SpectreMnemonic.Supervisor
-    :ok = Supervisor.terminate_child(supervisor, RecallIndex)
+    {:ok, runtime} = SpectreMnemonic.Engine.resolve(SpectreMnemonic.DefaultEngine)
+    child_id = {RecallIndex, runtime.config.ref}
+    :ok = Supervisor.terminate_child(runtime.engine_pid, child_id)
 
     on_exit(fn ->
-      if Process.whereis(RecallIndex) == nil do
-        {:ok, _pid} = Supervisor.restart_child(supervisor, RecallIndex)
+      if RecallIndex.server(@namespace) == nil do
+        {:ok, _pid} = Supervisor.restart_child(runtime.engine_pid, child_id)
       end
     end)
 
@@ -56,7 +59,7 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     assert :ok = RecallIndex.delete(moment.id)
     assert :ok = RecallIndex.reset()
     assert {:ok, []} = RecallIndex.query(%{vector: vector})
-    {:ok, _pid} = Supervisor.restart_child(supervisor, RecallIndex)
+    {:ok, _pid} = Supervisor.restart_child(runtime.engine_pid, child_id)
   end
 
   test "active vector fallback ranks only the requested partition with bounded overfetch" do
@@ -97,12 +100,12 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     assert_receive {:blocking_search_entered, ^ref}
 
     rebuild_task = Task.async(fn -> DurableIndex.rebuild() end)
-    assert_receive {:blocking_replay_entered, ^ref}
+    assert_receive {:blocking_replay_entered, ^ref, replay_pid}
 
     concurrent = durable_record("concurrent-upsert", "concurrent rebuild sentinel", scope)
     assert :ok = DurableIndex.upsert(concurrent)
 
-    send(Manager, {:release_replay, ref})
+    send(replay_pid, {:release_replay, ref})
     assert :ok = Task.await(rebuild_task, 1_000)
 
     send(search_task.pid, {:release_search, ref})
@@ -165,7 +168,7 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     )
 
     assert {:error, {:persistent_memory_replay_failed, _failures}} = DurableIndex.rebuild()
-    assert Process.alive?(Process.whereis(DurableIndex))
+    assert Process.alive?(DurableIndex.server(@namespace))
 
     assert {:ok, after_failure} = DurableIndex.search("stable replay fallback", scope: scope)
     assert Enum.any?(after_failure, &(&1.id == "stable-record"))
@@ -176,13 +179,75 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     record = durable_record("stats-record", "cached corpus statistics", scope)
 
     assert :ok = DurableIndex.upsert(record)
-    assert :sys.get_state(DurableIndex).dirty?
+    durable_index = DurableIndex.server(@namespace)
+    assert :sys.get_state(durable_index).dirty?
 
     assert {:ok, [_result]} = DurableIndex.search("cached corpus statistics", scope: scope)
-    refute :sys.get_state(DurableIndex).dirty?
+    refute :sys.get_state(durable_index).dirty?
 
     assert {:ok, [_result]} = DurableIndex.search("cached corpus statistics", scope: scope)
-    refute :sys.get_state(DurableIndex).dirty?
+    refute :sys.get_state(durable_index).dirty?
+  end
+
+  test "durable corpus and postings live in unnamed protected ETS tables" do
+    scope = {:tenant, "durable-ets-ownership"}
+
+    assert :ok =
+             DurableIndex.upsert(
+               durable_record("ets-owned", "protected durable ETS sentinel", scope)
+             )
+
+    durable_index = DurableIndex.server(@namespace)
+    state = :sys.get_state(durable_index)
+
+    refute Map.has_key?(state, :docs)
+    refute Map.has_key?(state, :postings)
+
+    Enum.each(state.tables, fn {_name, table} ->
+      assert :ets.info(table, :owner) == durable_index
+      assert :ets.info(table, :protection) == :protected
+      refute :ets.info(table, :named_table)
+    end)
+
+    assert_raise ArgumentError, fn ->
+      :ets.insert(state.tables.documents, {:unauthorized, %{}})
+    end
+
+    assert {:ok, results} =
+             DurableIndex.search("protected durable ETS sentinel", scope: scope)
+
+    assert Enum.any?(results, &(&1.id == "ets-owned"))
+  end
+
+  test "durable rebuild releases transferred ETS tables when its caller dies" do
+    durable_index = DurableIndex.server(@namespace)
+    parent = self()
+
+    {worker, worker_monitor} =
+      spawn_monitor(fn ->
+        {:ok, ref, _runtime_opts} = GenServer.call(durable_index, :begin_rebuild)
+        rebuilt = Documents.empty_state()
+
+        Enum.each(rebuilt.tables, fn {name, table} ->
+          true = :ets.give_away(table, durable_index, {:durable_rebuild, ref, name})
+        end)
+
+        send(parent, {:durable_tables_transferred, self(), Map.values(rebuilt.tables)})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:durable_tables_transferred, ^worker, transferred}, 1_000
+
+    assert eventually(fn ->
+             state = :sys.get_state(durable_index)
+             map_size(state.rebuild.transferred) == map_size(state.tables)
+           end)
+
+    Process.exit(worker, :kill)
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker, :killed}, 1_000
+
+    assert eventually(fn -> is_nil(:sys.get_state(durable_index).rebuild) end)
+    assert Enum.all?(transferred, &(:ets.info(&1) == :undefined))
   end
 
   test "a family tombstone does not hide another family with the same caller id" do
@@ -217,18 +282,14 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
   end
 
   defp insert_vector_entry(id, label, namespace, scope, vector, signature) do
-    :ets.insert(:mnemonic_embedding_index, {
-      id,
-      %{
-        label: label,
-        namespace: namespace,
-        scope: scope,
-        vector: vector,
-        binary_signature: signature,
-        dimensions: 2,
-        signature_bits: 8,
-        metadata: %{}
-      }
+    RecallIndex.upsert(%Moment{
+      id: id,
+      namespace: namespace,
+      scope: scope,
+      vector: vector,
+      binary_signature: signature,
+      embedding: %{metadata: %{label: label, dimensions: 2, signature_bits: 8}},
+      inserted_at: DateTime.utc_now()
     })
   end
 
@@ -261,6 +322,18 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     )
   end
 
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
   defmodule BlockingAdapter do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
@@ -285,7 +358,7 @@ defmodule SpectreMnemonic.Integration.IndexHardeningTest do
     @impl SpectreMnemonic.Persistence.Store.Adapter
     def replay(opts) do
       ref = Keyword.fetch!(opts, :ref)
-      send(Keyword.fetch!(opts, :test_pid), {:blocking_replay_entered, ref})
+      send(Keyword.fetch!(opts, :test_pid), {:blocking_replay_entered, ref, self()})
 
       receive do
         {:release_replay, ^ref} -> {:ok, []}

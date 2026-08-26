@@ -1,6 +1,6 @@
-# Spectre Mnemonic public API — 0.1.0
+# Spectre Mnemonic public API — 0.2.0
 
-This file is the normative public API manifest for Spectre Mnemonic `0.1.0`.
+This file is the normative public API manifest for Spectre Mnemonic `0.2.0`.
 Its package and Stack contracts target Spectre `0.3.3` from Hex.
 For task-oriented explanations and examples, start with the
 [API guide](API_GUIDE.md); use this manifest to determine compatibility.
@@ -15,12 +15,18 @@ public. Modules with no callable row expose only their documented module,
 type, and struct contract.
 
 `SpectreMnemonic.Export.read/1,2` and `stream/1,2` decode and verify detached
-`.mnemonic` exports. Version `0.1.0` exposes no `.mnemonic` import or live-memory
+`.mnemonic` exports. Version `0.2.0` exposes no `.mnemonic` import or live-memory
 restore callable; persistent runtime recovery remains the responsibility of the
 configured store replay path.
 
-The runtime configuration contract includes a required stable `:namespace` and
-an explicit `:json_library` for JSON-backed features. The JSON module must
+Each explicit Engine requires a stable `:storage_id` and `:namespace`. A global
+namespace is no longer required to start the OTP application; configuring one
+starts the 0.1.x-compatible DefaultEngine. Calls without `engine:` return
+`:mnemonic_engine_required` when no DefaultEngine exists. The runtime is
+single-node and the host must enforce one active writer per `storage_id` across
+nodes.
+
+JSON-backed features require an explicit `:json_library`. The JSON module must
 export `decode/1` and either `encode/1` or `encode!/1`. There is no implicit
 adapter fallback. Elixir's built-in `JSON` requires no package; applications
 that select Jason must declare it directly. Nx and `tokenizers` remain optional
@@ -29,11 +35,18 @@ host dependencies.
 ## Manifest
 
 - `Spectre.Mnemonic`
-  - functions: `config/1`
+  - functions: `config/1`, `erase_instance/1`, `erase_instance/2`, `erasure_plan/1`, `erasure_plan/2`
 - `Spectre.Mnemonic.Memory`
   - functions: `options/1`, `options/2`, `remember/4`
 - `SpectreMnemonic`
-  - functions: `artifact/1`, `artifact/2`, `atlas/0`, `atlas/1`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `erase_partition/1`, `export/1`, `export/2`, `forget/1`, `forget/2`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `merge_entities/2`, `merge_entities/3`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `sweep_expired/0`, `sweep_expired/1`, `unmerge_entities/2`, `unmerge_entities/3`, `verify_observation/1`, `verify_observation/2`
+  - functions: `artifact/1`, `artifact/2`, `atlas/0`, `atlas/1`, `compact_knowledge/0`, `compact_knowledge/1`, `consolidate/0`, `consolidate/1`, `consolidate_observations/0`, `consolidate_observations/1`, `erase_partition/1`, `export/1`, `export/2`, `forget/1`, `forget/2`, `health/1`, `knowledge/0`, `knowledge/1`, `learn/1`, `learn/2`, `link/3`, `link/4`, `load_knowledge/0`, `load_knowledge/1`, `merge_entities/2`, `merge_entities/3`, `put_mental_model/1`, `put_mental_model/2`, `recall/1`, `recall/2`, `reflect/1`, `reflect/2`, `remember/1`, `remember/2`, `reveal/1`, `reveal/2`, `search/1`, `search/2`, `search_knowledge/1`, `search_knowledge/2`, `search_mental_models/1`, `search_mental_models/2`, `search_observations/1`, `search_observations/2`, `signal/1`, `signal/2`, `status/1`, `status/2`, `sweep_expired/0`, `sweep_expired/1`, `unmerge_entities/2`, `unmerge_entities/3`, `verify_observation/1`, `verify_observation/2`
+- `SpectreMnemonic.Engine`
+  - functions: `child_spec/1`, `health/1`, `resolve/1`, `start_link/1`
+- `SpectreMnemonic.Engine.Config`
+- `SpectreMnemonic.Engine.Ref`
+  - functions: `new/1`
+- `SpectreMnemonic.Engine.Runtime`
+- `SpectreMnemonic.Embedding.Space`
 - `SpectreMnemonic.Atlas`
   - functions: `build/0`, `build/1`
 - `SpectreMnemonic.Atlas.LabelAdapter`
@@ -45,8 +58,6 @@ host dependencies.
   - functions: `analyze/1`, `analyze/2`, `run/2`, `run/3`
 - `SpectreMnemonic.Actions.Runtime.Adapter`
   - callbacks: `analyze/2`, `run/3`
-- `SpectreMnemonic.Active.ETSOwner`
-  - functions: `child_spec/1`, `member?/2`, `start_link/1`
 - `SpectreMnemonic.Active.Focus`
   - functions: `action_recipes/1`, `action_recipes/2`, `artifact/1`, `artifact/2`, `artifacts/1`, `artifacts/2`, `associations/0`, `associations/1`, `forget/1`, `forget/2`, `link/3`, `link/4`, `moments/0`, `moments/1`, `record_signal/2`, `status/1`, `status/2`
 - `SpectreMnemonic.Active.Router`
@@ -116,14 +127,24 @@ host dependencies.
 - `SpectreMnemonic.Memory.Skill`
 - `SpectreMnemonic.MentalModels`
   - functions: `put/1`, `put/2`, `search/1`, `search/2`
+- `SpectreMnemonic.Migration`
+  - functions: `migrate_instance_partition/2`, `migrate_instance_partition/3`, `migrate_partition/2`, `repartition/3`
+- `SpectreMnemonic.Migration.Assigner`
+  - callbacks: `assign/1`, `destination_options/0`, `source_options/0`
 - `SpectreMnemonic.Observations`
   - functions: `consolidate/0`, `consolidate/1`, `search/1`, `search/2`, `verify/1`, `verify/2`
 - `SpectreMnemonic.Persistence.Compact.Adapter`
   - callbacks: `compact/2`
 - `SpectreMnemonic.Persistence.Manager`
-  - functions: `append/2`, `append/3`, `child_spec/1`, `compact/0`, `compact/1`, `config/0`, `get/2`, `get/3`, `put/1`, `put/2`, `replay/0`, `replay/1`, `search/1`, `search/2`, `start_link/0`, `start_link/1`
+  - functions: `append/2`, `append/3`, `child_spec/1`, `compact/0`, `compact/1`, `config/0`, `get/2`, `get/3`, `put/1`, `put/2`, `replay/0`, `replay/1`, `replay_all/0`, `replay_all/1`, `replay_fold/2`, `replay_fold/3`, `search/1`, `search/2`, `start_link/0`, `start_link/1`
+- `SpectreMnemonic.Persistence.WriteReceipt`
 - `SpectreMnemonic.Persistence.Store.Adapter`
-  - callbacks: `capabilities/1`, `delete_or_tombstone/3`, `get/3`, `put/2`, `replay/1`, `replay_fold/3`, `search/2`, `semantic_compact/2`
+  - functions: `describe/1`, `describe/2`
+  - callbacks: `capabilities/1`, `classify_retry/1`, `contract/1`, `delete_or_tombstone/3`, `erase_partition/4`, `get/3`, `health/1`, `put/2`, `put_batch/2`, `replay/1`, `replay_fold/3`, `replay_page/2`, `search/2`, `semantic_compact/2`, `verify_erased/4`
+- `SpectreMnemonic.Persistence.Store.Contract`
+  - functions: `validate/1`
+- `SpectreMnemonic.Persistence.Store.Conformance`
+  - functions: `audit/1`, `audit/2`
 - `SpectreMnemonic.Persistence.Store.Codec`
   - functions: `decode_record/1`, `decode_term/1`, `encode_record/1`, `encode_term/1`
 - `SpectreMnemonic.Persistence.Store.Disk`
@@ -152,7 +173,7 @@ host dependencies.
 - `SpectreMnemonic.SearchResult`
   - functions: `key/1`, `new/1`, `new/2`
 - `SpectreMnemonic.Secrets`
-  - functions: `encrypt/3`, `maybe_reveal/2`, `reveal/2`, `reveal_instruction/0`, `shred/1`, `shred/2`
+  - functions: `encrypt/3`, `maybe_reveal/2`, `reveal/2`, `reveal_instruction/0`, `shred/1`, `shred/2`, `shred_report/1`, `shred_report/2`, `with_revealed/2`, `with_revealed/3`
 - `SpectreMnemonic.Secrets.Authorization.Adapter`
   - callbacks: `authorize/2`
 - `SpectreMnemonic.Secrets.Crypto.AESGCM`

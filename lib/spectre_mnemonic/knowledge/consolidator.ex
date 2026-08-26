@@ -19,6 +19,8 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
 
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Atlas
+  alias SpectreMnemonic.Engine.PartitionExecutor
+  alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.Consolidation
@@ -61,6 +63,20 @@ defmodule SpectreMnemonic.Knowledge.Consolidator do
   def consolidate(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- validate_options(opts) do
+      execute_consolidation(opts)
+    end
+  end
+
+  defp execute_consolidation(opts) do
+    PartitionExecutor.trans(
+      PartitionExecutor.key(opts),
+      fn -> consolidate_writable(opts) end,
+      opts
+    )
+  end
+
+  defp consolidate_writable(opts) do
+    with :ok <- Erasure.ensure_writable(opts) do
       safe_consolidation(fn -> consolidate_checked(opts) end)
     end
   end

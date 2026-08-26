@@ -16,6 +16,9 @@ defmodule SpectreMnemonic.Persistence.Family do
     :semantic_compaction_jobs,
     :artifacts,
     :action_recipes,
+    :batch_begins,
+    :batch_commits,
+    :repair_jobs,
     :tombstones,
     :episodes,
     :erasure_markers

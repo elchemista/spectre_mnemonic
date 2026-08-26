@@ -11,6 +11,10 @@ defmodule SpectreMnemonic.Secrets.Crypto.Adapter do
   @typedoc "Encrypted binary fields stored on `%SpectreMnemonic.Memory.Secret{}`."
   @type encrypted_payload :: %{
           required(:algorithm) => atom(),
+          optional(:key_id) => binary(),
+          optional(:key_version) => pos_integer(),
+          optional(:crypto_version) => pos_integer(),
+          optional(:aad_version) => pos_integer(),
           required(:ciphertext) => binary(),
           required(:iv) => binary(),
           required(:tag) => binary(),

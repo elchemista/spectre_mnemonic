@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.MemoryReviewRegressionTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
@@ -46,7 +47,7 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
     assert {:ok, [%Record{family: :erasure_markers}]} = Manager.replay(opts)
   end
 
-  test "erasure evicts partition dedupe state and permits an identical clean re-append" do
+  test "erasure evicts dedupe state and seals the partition against resurrection" do
     scope = {:subject, "dedupe-after-erasure"}
     opts = [namespace: @namespace, scope: scope]
     payload = %{id: "same-payload", text: "plaintext removed from manager cache"}
@@ -54,13 +55,17 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
     assert {:ok, first_write} = Manager.append(:moments, payload, opts)
     refute Map.get(first_write, :idempotent?, false)
     assert {:ok, _report} = SpectreMnemonic.erase_partition(opts)
-    refute inspect(:sys.get_state(Manager)) =~ payload.text
 
-    assert {:ok, second_write} = Manager.append(:moments, payload, opts)
-    refute Map.get(second_write, :idempotent?, false)
-    assert second_write.stores != []
-    assert {:ok, records} = Manager.replay(opts)
-    assert Enum.any?(records, &(&1.family == :moments and &1.payload.id == payload.id))
+    runtime_state =
+      :sys.get_state(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
+
+    writer_state =
+      :sys.get_state(engine_child_pid(SpectreMnemonic.Persistence.PrimaryWriter))
+
+    refute inspect({runtime_state, writer_state}) =~ payload.text
+
+    assert {:error, :partition_erased} = Manager.append(:moments, payload, opts)
+    assert {:ok, [%Record{family: :erasure_markers}]} = Manager.replay(opts)
   end
 
   test "erasure fails before mutation when any configured store cannot erase and verify" do
@@ -497,25 +502,27 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
     }
 
     assert :ok = DurableIndex.upsert(state_record)
-    assert Map.has_key?(:sys.get_state(DurableIndex).states, {@namespace, scope, memory_id})
+    durable_index = DurableIndex.server(@namespace)
+    lifecycle = :sys.get_state(durable_index).tables.lifecycle
+    assert :ets.member(lifecycle, {@namespace, scope, memory_id})
     assert :ok = DurableIndex.upsert(tombstone)
-    refute Map.has_key?(:sys.get_state(DurableIndex).states, {@namespace, scope, memory_id})
+    refute :ets.member(lifecycle, {@namespace, scope, memory_id})
   end
 
   test "write guards fail closed when durable marker verification is unavailable" do
-    manager = Process.whereis(Manager)
-    assert Process.unregister(Manager)
+    {:ok, runtime} = SpectreMnemonic.Engine.resolve(SpectreMnemonic.DefaultEngine)
+    child_id = {SpectreMnemonic.Persistence.Runtime, runtime.config.ref}
+    assert :ok = Supervisor.terminate_child(runtime.engine_pid, child_id)
 
     try do
       assert {:error,
-              {:erasure_guard_unavailable,
-               {:marker_replay_failed, {:persistent_memory_manager_unavailable, _reason}}}} =
+              {:erasure_guard_unavailable, {:marker_replay_failed, :mnemonic_engine_required}}} =
                SpectreMnemonic.Erasure.ensure_writable(
                  namespace: @namespace,
                  scope: {:subject, "guard-unavailable"}
                )
     after
-      Process.register(manager, Manager)
+      {:ok, _pid} = Supervisor.restart_child(runtime.engine_pid, child_id)
     end
   end
 
@@ -532,7 +539,7 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
   end
 
   defp association(id) do
-    [{^id, association}] = :ets.lookup(:mnemonic_associations, id)
+    [{^id, association}] = ActiveETS.lookup(:mnemonic_associations, id)
     association
   end
 
@@ -562,7 +569,7 @@ defmodule SpectreMnemonic.MemoryReviewRegressionTest do
         :mnemonic_episodes_by_scope,
         :mnemonic_atlas_dirty
       ],
-      &:ets.delete_all_objects/1
+      &ActiveETS.delete_all_objects/1
     )
   end
 

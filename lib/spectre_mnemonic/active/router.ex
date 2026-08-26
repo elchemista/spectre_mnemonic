@@ -7,6 +7,7 @@ defmodule SpectreMnemonic.Active.Router do
   """
 
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Engine.Limits
   alias SpectreMnemonic.Identity
 
   @doc "Routes and records a signal."
@@ -15,7 +16,8 @@ defmodule SpectreMnemonic.Active.Router do
            %{signal: SpectreMnemonic.Memory.Signal.t(), moment: SpectreMnemonic.Memory.Moment.t()}}
           | {:error, term()}
   def signal(input, opts) do
-    with {:ok, opts} <- Identity.put_namespace(opts) do
+    with :ok <- Limits.validate_input(input, opts),
+         {:ok, opts} <- Identity.put_namespace(opts) do
       Focus.record_signal(input, Keyword.put(opts, :stream, route(input, opts)))
     end
   end
