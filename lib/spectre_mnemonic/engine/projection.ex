@@ -254,12 +254,12 @@ defmodule SpectreMnemonic.Engine.Projection do
 
   @spec collect_ids(map(), tuple(), [tuple()], [binary()], pos_integer()) :: {[binary()], map()}
   defp collect_ids(tables, partition, keys, explicit_ids, limit) do
-    initial = {[], MapSet.new(), %{vector_or_seed: 0}}
+    initial = {[], %{}, %{vector_or_seed: 0}}
     initial = add_ids(initial, normalize_ids(explicit_ids), limit, :vector_or_seed)
 
     {ids, seen, sources} =
       Enum.reduce_while(keys, initial, fn key, acc ->
-        if MapSet.size(elem(acc, 1)) >= limit do
+        if map_size(elem(acc, 1)) >= limit do
           {:halt, acc}
         else
           posting = lookup_ids(tables.postings, {partition, key})
@@ -268,7 +268,7 @@ defmodule SpectreMnemonic.Engine.Projection do
       end)
 
     {ids, _seen, sources} =
-      if MapSet.size(seen) < limit do
+      if map_size(seen) < limit do
         add_ids({ids, seen, sources}, lookup_ids(tables.recent, partition), limit, :recent)
       else
         {ids, seen, sources}
@@ -277,20 +277,20 @@ defmodule SpectreMnemonic.Engine.Projection do
     {Enum.reverse(ids), sources}
   end
 
-  @spec add_ids({[binary()], MapSet.t(), map()}, [binary()], pos_integer(), term()) ::
-          {[binary()], MapSet.t(), map()}
+  @spec add_ids({[binary()], map(), map()}, [binary()], pos_integer(), term()) ::
+          {[binary()], map(), map()}
   defp add_ids({ids, seen, sources}, candidates, limit, source) do
     {ids, seen, added} =
       Enum.reduce_while(candidates, {ids, seen, 0}, fn id, {acc, set, count} ->
         cond do
-          MapSet.size(set) >= limit ->
+          map_size(set) >= limit ->
             {:halt, {acc, set, count}}
 
-          MapSet.member?(set, id) ->
+          Map.has_key?(set, id) ->
             {:cont, {acc, set, count}}
 
           true ->
-            {:cont, {[id | acc], MapSet.put(set, id), count + 1}}
+            {:cont, {[id | acc], Map.put(set, id, true), count + 1}}
         end
       end)
 

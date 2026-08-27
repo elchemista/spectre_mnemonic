@@ -9,8 +9,8 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
 
   @type state :: %{
           dedupe: map(),
-          replay_cache: MapSet.t(binary()),
-          cache: :ets.tid()
+          replay_cache: %{optional(binary()) => true},
+          cache: :ets.table()
         }
 
   @spec new() :: state()
@@ -24,19 +24,19 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
         write_concurrency: true
       ])
 
-    %{dedupe: %{}, replay_cache: MapSet.new(), cache: cache}
+    %{dedupe: %{}, replay_cache: %{}, cache: cache}
   end
 
   @spec reset(state()) :: state()
   def reset(state) do
     :ets.delete_all_objects(state.cache)
-    %{state | dedupe: %{}, replay_cache: MapSet.new()}
+    %{state | dedupe: %{}, replay_cache: %{}}
   end
 
   @spec invalidate(state()) :: state()
   def invalidate(state) do
     :ets.delete_all_objects(state.cache)
-    %{state | replay_cache: MapSet.new()}
+    %{state | replay_cache: %{}}
   end
 
   @spec invalidate_all(state()) :: state()
@@ -83,7 +83,7 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
         {:ok, dedupe, state}
 
       :error ->
-        if MapSet.member?(state.replay_cache, cache_key) and cache_loaded?(state, cache_key) do
+        if Map.has_key?(state.replay_cache, cache_key) and cache_loaded?(state, cache_key) do
           dedupe = dedupe_from_records(cache_records(state, cache_key))
           {:ok, dedupe, put_in(state, [:dedupe, cache_key], dedupe)}
         else
@@ -110,14 +110,14 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
   end
 
   defp ensure_replay_cache(cache_key, config, namespace, state) do
-    if MapSet.member?(state.replay_cache, cache_key) and cache_loaded?(state, cache_key) do
+    if Map.has_key?(state.replay_cache, cache_key) and cache_loaded?(state, cache_key) do
       {:ok, state}
     else
       case config |> Config.replayable_stores() |> Replay.checked() do
         {:ok, records} ->
           visible = Enum.filter(records, &(&1.namespace in [nil, namespace]))
           cache_replace(state, cache_key, visible)
-          {:ok, %{state | replay_cache: MapSet.put(state.replay_cache, cache_key)}}
+          {:ok, %{state | replay_cache: Map.put(state.replay_cache, cache_key, true)}}
 
         {:error, failures} ->
           {:error, failures}
@@ -164,7 +164,7 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
   defp record_timestamp(_record), do: 0
 
   defp cache_record_if_loaded(state, cache_key, record) do
-    if MapSet.member?(state.replay_cache, cache_key) do
+    if Map.has_key?(state.replay_cache, cache_key) do
       :ets.insert(state.cache, {{cache_key, cache_record_key(record)}, record})
       apply_cache_lifecycle(state, cache_key, record)
     end
@@ -216,7 +216,7 @@ defmodule SpectreMnemonic.Persistence.Dedupe do
         state =
           state
           |> put_in([:dedupe, cache_key], dedupe)
-          |> Map.update!(:replay_cache, &MapSet.put(&1, cache_key))
+          |> Map.update!(:replay_cache, &Map.put(&1, cache_key, true))
 
         {:ok, dedupe, state}
 

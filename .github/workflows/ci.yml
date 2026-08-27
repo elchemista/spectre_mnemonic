@@ -20,11 +20,20 @@ env:
 
 jobs:
   test:
-    name: Quality and test
+    name: Quality and test (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.19.x"
+            otp: "28.x"
+          - elixir: "1.20.x"
+            otp: "29.x"
     env:
       MIX_ENV: test
+      MIX_BUILD_PATH: _build/quality
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -32,10 +41,19 @@ jobs:
           persist-credentials: false
 
       - name: Set up Elixir and Erlang/OTP
+        id: beam
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Restore quality build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build/quality
+          key: ${{ runner.os }}-otp-${{ steps.beam.outputs.otp-version }}-elixir-${{ steps.beam.outputs.elixir-version }}-quality-${{ hashFiles('mix.lock') }}
 
       - name: Install dependencies
         run: mix deps.get --check-locked
