@@ -21,8 +21,11 @@ defmodule SpectreMnemonic.Intake do
 
   require Logger
 
+  alias SpectreMnemonic.Active.BatchVisibility
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Engine.Limits
+  alias SpectreMnemonic.Engine.PartitionExecutor
   alias SpectreMnemonic.Graph.Resolver
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Intake.Extraction
@@ -35,6 +38,7 @@ defmodule SpectreMnemonic.Intake do
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Memory.Signal
   alias SpectreMnemonic.Memory.Temporal
+  alias SpectreMnemonic.Persistence.Manager
   alias SpectreMnemonic.Recall.Lexical
   alias SpectreMnemonic.Redaction
   alias SpectreMnemonic.Result
@@ -97,14 +101,103 @@ defmodule SpectreMnemonic.Intake do
   @spec remember(term(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
     with :ok <- validate_remember_options(opts),
+         :ok <- Limits.validate_input(input, opts),
          {:ok, opts} <- Identity.put_namespace(opts),
+         opts <- put_operation_identity(opts),
          {:ok, memory} <- normalize(input, opts),
          memory <- attach_recent_moments(memory, opts),
          {:ok, memory} <- run_plugs(memory, opts) do
-      dispatch_memory(memory, opts)
+      PartitionExecutor.trans(
+        PartitionExecutor.key(opts),
+        fn -> dispatch_batch(memory, opts) end,
+        opts
+      )
     else
-      {:halt, %Memory{} = memory} -> dispatch_memory(memory, opts)
-      {:error, reason} -> {:error, reason}
+      {:halt, %Memory{} = memory} ->
+        opts = put_operation_identity(opts)
+
+        PartitionExecutor.trans(
+          PartitionExecutor.key(opts),
+          fn -> dispatch_batch(memory, opts) end,
+          opts
+        )
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec dispatch_batch(Memory.t(), keyword()) :: {:ok, Packet.t()} | {:error, term()}
+  defp dispatch_batch(memory, opts) do
+    opts = batch_options(memory, opts)
+
+    BatchVisibility.with_batch(Keyword.fetch!(opts, :batch_id), fn ->
+      with :ok <- begin_batch(opts),
+           {:ok, packet} <- dispatch_memory(memory, opts),
+           :ok <- commit_batch(opts),
+           :ok <- BatchVisibility.publish(opts) do
+        {:ok, packet}
+      end
+    end)
+  end
+
+  @spec batch_options(Memory.t(), keyword()) :: keyword()
+  defp batch_options(%Memory{result: nil, secret?: true}, opts),
+    do: Keyword.put_new(opts, :persist?, true)
+
+  defp batch_options(_memory, opts), do: opts
+
+  @spec put_operation_identity(keyword()) :: keyword()
+  defp put_operation_identity(opts) do
+    operation_id =
+      case Keyword.get(opts, :operation_id) do
+        value when is_binary(value) and value != "" -> value
+        _missing -> Identity.uuid7()
+      end
+
+    batch_id = Keyword.get(opts, :batch_id) || batch_id(operation_id)
+
+    opts
+    |> Keyword.put(:operation_id, operation_id)
+    |> Keyword.put(:batch_id, batch_id)
+  end
+
+  @spec batch_id(binary()) :: binary()
+  defp batch_id(operation_id) do
+    digest = :crypto.hash(:sha256, operation_id)
+    "batch_" <> Base.url_encode64(digest, padding: false)
+  end
+
+  @spec begin_batch(keyword()) :: :ok | {:error, term()}
+  defp begin_batch(opts), do: write_batch_marker(:batch_begins, opts)
+
+  @spec commit_batch(keyword()) :: :ok | {:error, term()}
+  defp commit_batch(opts), do: write_batch_marker(:batch_commits, opts)
+
+  @spec write_batch_marker(:batch_begins | :batch_commits, keyword()) ::
+          :ok | {:error, term()}
+  defp write_batch_marker(family, opts) do
+    if Keyword.get(opts, :persist?, false) do
+      batch_id = Keyword.fetch!(opts, :batch_id)
+      operation_id = Keyword.fetch!(opts, :operation_id)
+
+      marker_opts =
+        opts
+        |> Keyword.delete(:batch_id)
+        |> Keyword.put(:operation_id, "#{operation_id}:#{family}")
+        |> Keyword.put(:dedupe_key, "#{family}:#{batch_id}")
+        |> Keyword.put(:source_event_id, batch_id)
+
+      case Manager.append(
+             family,
+             %{id: batch_id, batch_id: batch_id, operation_id: operation_id},
+             marker_opts
+           ) do
+        {:ok, _receipt} -> :ok
+        {:error, _reason} = error -> error
+      end
+    else
+      :ok
     end
   end
 
@@ -230,7 +323,7 @@ defmodule SpectreMnemonic.Intake do
         |> Map.merge(Map.new(Keyword.get(opts, :metadata, %{})))
         |> Redaction.apply_term(opts)
         |> Identity.put_context(opts)
-        |> Map.put(:intake_run_id, Identity.generate("intake", opts))
+        |> Map.put(:intake_run_id, Keyword.fetch!(opts, :batch_id))
         |> maybe_put(:mission, mission)
         |> maybe_put(:extraction_mode, extraction_mode)
         |> Temporal.put_metadata(temporal)
@@ -351,6 +444,7 @@ defmodule SpectreMnemonic.Intake do
   defp record_chunks(envelope, root, opts) do
     envelope.text
     |> chunk_text(chunk_words(opts), overlap_words(opts))
+    |> Enum.take(Keyword.get(opts, :max_chunks_per_intake, 256))
     |> Result.collect_ok(fn chunk ->
       metadata =
         envelope.metadata
@@ -776,10 +870,21 @@ defmodule SpectreMnemonic.Intake do
     persist? = Keyword.get(opts, :persist?, false)
 
     planned_edges
+    |> Enum.take(Keyword.get(opts, :max_associations_per_intake, 1_024))
     |> Result.collect_ok(fn {source, relation, target, edge_opts} ->
       link_opts =
         opts
-        |> Keyword.take([:namespace, :scope, :persist?, :data_root])
+        |> Keyword.take([
+          :engine_ref,
+          :engine_internal?,
+          :engine_namespace,
+          :storage_id,
+          :namespace,
+          :scope,
+          :persist?,
+          :data_root,
+          :batch_id
+        ])
         |> Keyword.merge(edge_opts)
         |> Keyword.put_new(:persist?, persist?)
         |> Keyword.update(:metadata, %{}, &Redaction.apply_term(&1, opts))
@@ -1068,15 +1173,24 @@ defmodule SpectreMnemonic.Intake do
   defp semantic_similarity(_left, _right), do: 0.0
 
   @spec memory_context_opts(Memory.t(), keyword()) :: keyword()
-  defp memory_context_opts(envelope, _opts) do
-    [
+  defp memory_context_opts(envelope, opts) do
+    opts
+    |> Keyword.take([
+      :engine_ref,
+      :engine_internal?,
+      :engine_namespace,
+      :storage_id,
+      :namespace,
+      :batch_id
+    ])
+    |> Keyword.merge(
       scope: envelope.scope,
       occurred_at: envelope.occurred_at,
       observed_at: envelope.observed_at,
       last_verified_at: envelope.last_verified_at,
       valid_from: envelope.valid_from,
       valid_until: envelope.valid_until
-    ]
+    )
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 

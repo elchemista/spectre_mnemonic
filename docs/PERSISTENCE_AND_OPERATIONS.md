@@ -8,12 +8,16 @@ data-subject request runbook, read
 
 ## Durable storage
 
-The default backend is an append-only local file store. Configure it explicitly
-to choose data roots and routing behavior:
+The default backend is an append-only local file store. Configure it on the
+Engine so a single operation cannot replace stores or paths:
 
 ~~~elixir
-config :spectre_mnemonic,
-  persistent_memory: [
+{SpectreMnemonic.Engine,
+ name: MyApp.Memory,
+ storage_id: "my-app-memory",
+ namespace: "my_app",
+ data_root: "data/memory",
+ persistent_memory: [
     write_mode: :all,
     read_mode: :smart,
     failure_mode: :strict,
@@ -23,11 +27,15 @@ config :spectre_mnemonic,
         adapter: SpectreMnemonic.Persistence.Store.File,
         role: :primary,
         duplicate: true,
-        opts: [data_root: "mnemonic_data"]
+        opts: []
       ]
     ]
-  ]
+  ]}
 ~~~
+
+The Engine injects its resolved data root into built-in File stores. Global
+`persistent_memory` configuration remains available to the legacy
+DefaultEngine.
 
 Persistence records are backend-neutral envelopes. Known families include:
 
@@ -42,6 +50,26 @@ Persistence records are backend-neutral envelopes. Known families include:
 
 The configured stores remain the source of truth. Hot ETS and the durable
 search index are rebuildable projections.
+
+### Adapter contract and conformance
+
+Adapters expose a machine-readable
+`SpectreMnemonic.Persistence.Store.Contract` covering idempotency and operation
+IDs, batch visibility, commit revisions, cursors and pagination, replay fold,
+conflict detection, erase semantics, schema versions, health, retry
+classification, transactional capability, and maximum batch size.
+
+~~~elixir
+{:ok, contract} =
+  SpectreMnemonic.Persistence.Store.Adapter.describe(MyApp.Store)
+
+{:ok, report} =
+  SpectreMnemonic.Persistence.Store.Conformance.audit(MyApp.Store)
+~~~
+
+The bundled Postgres, Mongo, and S3 modules remain explicit non-conformant
+placeholders. They must not be treated as complete adapters until they provide
+the callbacks and pass the shared behavioural suite.
 
 ### Frame safety
 
@@ -72,21 +100,28 @@ opts: [data_root: "mnemonic_data", sync: :data]
 
 Supported values are `:always`, `:data`, and `:none`. `:none` only provides the
 filesystem/page-cache guarantee and must not be described operationally as
-power-loss durability. Concurrent direct calls to the file adapter are ordered
-by a node-local, owner-monitored path lock; no distributed `:global` lock is
-used.
+power-loss durability. A bounded `PartitionExecutor` owns the logical mutation;
+a bounded `StoreWriter` serializes only the necessary physical file boundary.
+There is no VM-global writer and no distributed lock.
 
 Inspect replayed live records:
 
 ~~~elixir
 {:ok, records} =
   SpectreMnemonic.Persistence.Manager.replay(
+    engine_ref: %SpectreMnemonic.Engine.Ref{id: "my-app-memory"},
     scope: {:project, "checkout"}
   )
 ~~~
 
-Replay applies tombstones, erasure generations, partition filters, and
-lifecycle visibility before returning durable records.
+Replay folds adapters incrementally, accepts v1 and v2 envelopes, and applies
+committed-batch markers, tombstones, erasure generations, partition filters,
+and lifecycle visibility. New envelopes are v2 records with operation, commit,
+batch, revision, and digest identities.
+
+The primary decides commit. A committed primary with a failed replica returns
+`{:ok, %SpectreMnemonic.Persistence.WriteReceipt{repair_required?: true}}` and
+enqueues idempotent repair; it does not return an ambiguous error after commit.
 
 ## Durable hybrid search
 
@@ -111,17 +146,26 @@ The normal entry point searches both active and durable memory:
 Rebuild the derived index after manual store maintenance:
 
 ~~~elixir
-SpectreMnemonic.Durable.Index.rebuild()
+SpectreMnemonic.Durable.Index.rebuild(
+  engine_ref: %SpectreMnemonic.Engine.Ref{id: "my-app-memory"}
+)
 ~~~
 
 Rebuild is normally automatic during startup and configured maintenance.
 
-Durable replay is cached as an ETS projection and invalidated on writes and
-compaction; recall, entity resolution, forget planning, and Atlas do not rescan
-the append-only file on every hot-path call. Active Vettore collection handles
-are also published through ETS. Query embedding, Vettore search, BM25 scoring,
-and final ranking run in the requesting process, while the index GenServers
-coordinate only mutations and rebuild snapshots.
+Documents, postings, document frequencies, lifecycle state, recent candidates,
+partition counts, and generation metadata live in unnamed protected ETS tables
+owned by the Engine's durable-index process. Search asks that process only for a
+bounded candidate snapshot; it never copies the whole corpus to the caller.
+Rebuild folds persistent replay directly into a temporary ETS generation,
+applies writes that arrived concurrently, and atomically swaps the generation.
+Recall, entity resolution, forget planning, and Atlas therefore do not rescan
+the append-only file on each hot-path call.
+
+Active Vettore collection handles are also published through protected ETS.
+Query embedding, Vettore search, BM25 scoring, and final ranking run in the
+requesting process, while index processes coordinate only short mutation,
+candidate-snapshot, and generation-swap boundaries.
 
 ## Consolidation
 
@@ -161,8 +205,10 @@ and default durable outputs.
 
 ## Physical and semantic compaction
 
-Physical compaction writes and syncs an atomic live-record snapshot, applies and
-then removes tombstone events, and rotates the active segment:
+Physical compaction rotates the active segment briefly, builds a framed v2
+snapshot with per-frame CRC and a final digest outside the brief rotation and
+publication boundaries, then publishes it atomically. It applies and removes
+tombstones without blocking append for the whole build phase:
 
 ~~~elixir
 SpectreMnemonic.Persistence.Manager.compact(mode: :physical)
@@ -199,17 +245,19 @@ bounded selection into SpectreMnemonic.Persistence.Compact.Adapter.compact/2.
 
 ## Background maintenance
 
-The supervised scheduler is disabled by default:
+Each Engine has one supervised scheduler, disabled by default:
 
 ~~~elixir
-config :spectre_mnemonic,
-  consolidation_scheduler: [
+{SpectreMnemonic.Engine,
+ # identity options omitted
+ scheduler: [
     enabled: true,
     interval_ms: 300_000,
+    deadline_ms: 60_000,
     mode: :all,
     min_attention: 1.0,
     stale_after_ms: 30 * 24 * 60 * 60 * 1_000
-  ]
+  ]}
 ~~~
 
 Depending on its mode, each tick can:
@@ -220,16 +268,39 @@ Depending on its mode, each tick can:
 - compact durable storage;
 - rebuild the derived durable index.
 
-Maintenance enumerates every known `{namespace, scope}` partition instead of
+Maintenance enumerates every known `{engine, namespace, scope}` partition instead of
 running only against the unscoped partition. Semantic compaction is a no-op
 when no semantic adapter is configured, so an `:all` tick does not create an
-unbounded stream of empty semantic job records.
+unbounded stream of empty semantic job records. Overlapping ticks coalesce and
+heavy work runs under the Engine's TaskSupervisor with a deadline.
 
 Inspect status:
 
 ~~~elixir
-SpectreMnemonic.ConsolidationScheduler.status()
+SpectreMnemonic.health(MyApp.Memory)
 ~~~
+
+## Telemetry and diagnostics
+
+Telemetry integration is optional. A host that wants events declares
+`{:telemetry, "~> 1.3"}` itself; Mnemonic performs no event dispatch when that
+module is absent. Public operation spans use `:start`, `:stop`, and
+`:exception` suffixes where applicable.
+
+The event families are:
+
+- `[:spectre_mnemonic, :signal | :remember | :recall, suffix]`;
+- `[:spectre_mnemonic, :embedding, suffix]` and
+  `[:spectre_mnemonic, :vector, :query, suffix]`;
+- active and durable candidate collection or full-scan fallback;
+- partition/store wait, primary commit, replica write, and repair attempt;
+- replay, durable rebuild, compaction, erasure, maintenance, and secret reveal.
+
+Measurements contain durations and bounded counts. Metadata may contain an
+Engine reference, operation ID, store/family identifier, trigger, and outcome;
+it never contains the remembered input, recall cue, plaintext, ciphertext, or
+memory payload. Use `SpectreMnemonic.health/1` for a content-free current
+snapshot and `packet.diagnostics` for per-recall source completeness.
 
 ## Logical forgetting and retention
 
@@ -272,13 +343,13 @@ exports, and processor-held copies.
 
 ## Physical partition erasure
 
-erase_partition/1 requires both namespace and scope. It never interprets a
-missing scope as a wildcard:
+erase_partition/1 requires an Engine (or legacy namespace) and an explicit
+scope. It never interprets a missing scope as a wildcard:
 
 ~~~elixir
 {:ok, report} =
   SpectreMnemonic.erase_partition(
-    namespace: "my_app_memory",
+    engine: MyApp.Memory,
     scope: {:subject, "alice"},
     sealed: true
   )
@@ -335,7 +406,9 @@ partition-native adapter.
 ### Crypto-shredding boundary
 
 The built-in AES-GCM secret adapter does not derive or destroy per-partition
-keys, so report.crypto_shred is :unsupported by default.
+keys, so `report.crypto_shred` is
+`%{supported?: false, performed?: false}` by default. It never claims key
+destruction that did not occur.
 
 Applications using envelope encryption can implement
 SpectreMnemonic.Secrets.Crypto.Adapter.shred/2 to destroy partition key
@@ -349,6 +422,11 @@ optional crypto result.
 | forget/2 | selected id, task, stream, or predicate | hidden | may remain until compaction | allowed |
 | sweep_expired/1 | expired moments | hidden | may remain until compaction | allowed |
 | erase_partition/1 | entire explicit partition | absent | verified removal for supported stores | optional sealing |
+
+For Spectre-owned Engines, use `Spectre.Mnemonic.erasure_plan/2` and
+`erase_instance/2` with the stable `%Spectre.Instance.Ref{}` and named Stack
+Runtime. These functions resolve the same core partition and never place the
+runtime handle in durable data.
 
 ## Export a partition
 

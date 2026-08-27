@@ -7,14 +7,19 @@ defmodule SpectreMnemonic.MemoryCase do
   @moduledoc """
   Shared test setup for memory scenarios.
 
-  The library keeps live state in named ETS tables and writes to disk by
+  The library keeps live state in Engine-owned ETS tables and writes to disk by
   default, so tests use this helper to start each scenario from a clean memory.
   """
 
   use ExUnit.CaseTemplate
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
+  alias SpectreMnemonic.Embedding.Model2VecStatic
+  alias SpectreMnemonic.Engine.Projection
+  alias SpectreMnemonic.Knowledge.Projection, as: KnowledgeProjection
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Persistence.RepairQueue
   alias SpectreMnemonic.Recall.Index
 
   @tables [
@@ -25,6 +30,8 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_moments_by_scope,
     :mnemonic_moments_by_signal,
     :mnemonic_moment_counts,
+    :mnemonic_moment_sizes,
+    :mnemonic_hot_bytes,
     :mnemonic_moment_eviction,
     :mnemonic_moment_eviction_keys,
     :mnemonic_status,
@@ -36,6 +43,7 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_episodes_by_scope,
     :mnemonic_atlas_dirty,
     :mnemonic_erasure_markers,
+    :mnemonic_batch_commits,
     :mnemonic_attention,
     :mnemonic_artifacts,
     :mnemonic_action_recipes,
@@ -45,13 +53,7 @@ defmodule SpectreMnemonic.MemoryCase do
     :mnemonic_mental_models_by_scope,
     :mnemonic_governance_states,
     :mnemonic_governance_states_by_scope,
-    :mnemonic_governance_facts,
-    :mnemonic_embedding_index,
-    :mnemonic_vettore_collections,
-    :mnemonic_embedding_labels,
-    :mnemonic_durable_records,
-    :mnemonic_model_cache,
-    :mnemonic_framed_log_counters
+    :mnemonic_governance_facts
   ]
 
   using do
@@ -80,6 +82,7 @@ defmodule SpectreMnemonic.MemoryCase do
     Application.delete_env(:spectre_mnemonic, :max_frame_bytes)
     reset_disk_root()
     Manager.reset_dedupe()
+    RepairQueue.reset()
     clear_memory()
 
     on_exit(fn ->
@@ -101,29 +104,29 @@ defmodule SpectreMnemonic.MemoryCase do
       Application.delete_env(:spectre_mnemonic, :hot_memory)
       Application.delete_env(:spectre_mnemonic, :max_frame_bytes)
       clear_memory()
-      File.rm_rf!("mnemonic_data")
-      File.rm_rf!("mnemonic_data_secondary")
+      _removed = File.rm_rf("mnemonic_data")
+      _removed = File.rm_rf("mnemonic_data_secondary")
     end)
 
     :ok
   end
 
-  @doc "Deletes all rows from known mnemonic ETS tables."
+  @doc "Deletes all rows from the default Engine's hot tables."
   @spec clear_memory :: :ok
   def clear_memory do
     Enum.each(@tables, fn table ->
-      if :ets.whereis(table) != :undefined do
-        :ets.delete_all_objects(table)
-      end
+      ETS.delete_all_objects(table)
     end)
 
-    if Process.whereis(Index) do
-      Index.reset()
-    end
+    Model2VecStatic.reset_cache()
+    Index.reset()
 
-    if Process.whereis(DurableIndex) do
-      DurableIndex.reset()
-    end
+    DurableIndex.reset()
+
+    Projection.reset(SpectreMnemonic.DefaultEngine)
+    KnowledgeProjection.reset(SpectreMnemonic.DefaultEngine)
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc "Recreates the default disk folders used by the already-started disk process."
@@ -134,5 +137,25 @@ defmodule SpectreMnemonic.MemoryCase do
     File.mkdir_p!(Path.join(["mnemonic_data", "snapshots"]))
     File.mkdir_p!(Path.join(["mnemonic_data", "artifacts"]))
     File.mkdir_p!(Path.join(["mnemonic_data", "knowledge"]))
+  end
+
+  @doc false
+  @spec engine_child_pid(module(), term()) :: pid() | nil
+  def engine_child_pid(module, engine \\ SpectreMnemonic.DefaultEngine) do
+    case SpectreMnemonic.Engine.resolve(engine) do
+      {:ok, runtime} -> find_engine_child(runtime, module)
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp find_engine_child(runtime, module) do
+    child_id = {module, runtime.config.ref}
+
+    runtime.engine_pid
+    |> Supervisor.which_children()
+    |> Enum.find_value(fn
+      {^child_id, pid, _type, _modules} when is_pid(pid) -> pid
+      _other -> nil
+    end)
   end
 end

@@ -12,6 +12,8 @@ Hex package is published.
   internal development-milestone headings.
 - Confirm the public API additions, removals, deprecations, storage changes,
   and `.mnemonic` format compatibility.
+- Confirm the v1 persistence reader against production-shaped 0.1.x fixtures;
+  the 0.2 writer must emit only v2 records and framed snapshots.
 - Record any required host migration for JSON, embeddings, persistence,
   privacy, or GPU configuration.
 
@@ -58,6 +60,11 @@ At minimum, test these host-owned configurations:
 | Model2Vec fallback | no `tokenizers` | bounded lexical fallback works without loading a Tokenizers NIF |
 | Tensor interop | `{:nx, "~> 0.11"}` | Vettore `to_nx` and tensor normalization compatibility work |
 | No Nx | none | list and f32-binary vector paths work; tensor helpers return `:nx_not_available` |
+| Telemetry | `{:telemetry, "~> 1.3"}` | content-free lifecycle spans and events are delivered |
+| No Telemetry | none | every memory and persistence operation works with event dispatch disabled |
+| Standalone | no `:spectre` in the dependency graph | application and all core modules compile; explicit Engine works |
+| Legacy default | global `namespace:` | DefaultEngine reads the old data-root layout and old facade calls work |
+| No default | no global `namespace:` | application starts; calls without `engine:` return `:mnemonic_engine_required` |
 
 Do not rely on Jason being pulled transitively by Spectre. The application that
 selects a third-party JSON library must declare it directly.
@@ -108,8 +115,10 @@ Review failures rather than weakening a strict gate for the release.
 
 - Build ExDoc with warnings as errors and inspect all extra pages and links.
 - Run the demo with the built-in `JSON` adapter.
-- Verify README installation snippets contain `namespace` and
-  `json_library`.
+- Verify README installation snippets show an explicit Engine, optional
+  Spectre, legacy DefaultEngine behavior, and host-owned `json_library`.
+- Review the 0.2 migration guide and the single-node one-writer deployment
+  fence.
 - Confirm CPU/GPU guidance distinguishes Flat search, HNSW traversal, exact
   reranking, thresholds, fallback, mutation invalidation, and GPU memory cost.
 - Confirm public functions are either listed in `docs/PUBLIC_API.md` or

@@ -6,7 +6,7 @@ defmodule SpectreMnemonic.Erasure.Report do
             knowledge_events: 0,
             compaction: :pending,
             marker_id: nil,
-            crypto_shred: :unsupported,
+            crypto_shred: %{supported?: false, performed?: false},
             already_erased?: false
 
   @type t :: %__MODULE__{

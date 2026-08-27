@@ -6,7 +6,7 @@ defmodule SpectreMnemonic.Persistence.FramedLog do
   alias SpectreMnemonic.Persistence.Store.FileFrame
 
   @type sync_mode :: :always | :data | :none
-  @counter_table :mnemonic_framed_log_counters
+  @counter_key {__MODULE__, :counter}
 
   @spec recover_tail(Path.t(), keyword()) ::
           {:ok, FileFrame.scan_result()} | {:error, term()}
@@ -121,18 +121,16 @@ defmodule SpectreMnemonic.Persistence.FramedLog do
   @spec sequence_counter(term(), Path.t(), keyword()) ::
           {:ok, :atomics.atomics_ref()} | {:error, term()}
   def sequence_counter(key, path, opts \\ []) do
-    ensure_counter_table()
-
     case take_legacy_sequence(key) do
       {:ok, minimum_sequence} ->
         recover_and_install_counter(key, path, opts, minimum_sequence)
 
       :missing ->
-        case :ets.lookup(@counter_table, key) do
-          [{^key, counter}] ->
+        case :persistent_term.get(counter_key(key), :missing) do
+          {:atomics, counter} ->
             ensure_counter_matches_file(key, path, counter, opts)
 
-          [] ->
+          :missing ->
             recover_and_install_counter(key, path, opts, 0)
         end
     end
@@ -141,8 +139,7 @@ defmodule SpectreMnemonic.Persistence.FramedLog do
   @doc false
   @spec reset_sequence_counter(term()) :: :ok
   def reset_sequence_counter(key) do
-    ensure_counter_table()
-    :ets.delete(@counter_table, key)
+    :persistent_term.erase(counter_key(key))
     :persistent_term.erase(key)
     :ok
   end
@@ -196,7 +193,7 @@ defmodule SpectreMnemonic.Persistence.FramedLog do
       counter = :atomics.new(2, signed: false)
       :ok = :atomics.put(counter, 1, max(scan.last_sequence, minimum_sequence))
       :ok = :atomics.put(counter, 2, scan.valid_bytes)
-      :ets.insert(@counter_table, {key, counter})
+      :persistent_term.put(counter_key(key), {:atomics, counter})
       {:ok, counter}
     end
   end
@@ -213,28 +210,8 @@ defmodule SpectreMnemonic.Persistence.FramedLog do
     end
   end
 
-  @spec ensure_counter_table :: :ok
-  defp ensure_counter_table do
-    case :ets.whereis(@counter_table) do
-      :undefined ->
-        try do
-          :ets.new(@counter_table, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true,
-            write_concurrency: true
-          ])
-
-          :ok
-        rescue
-          ArgumentError -> :ok
-        end
-
-      _table ->
-        :ok
-    end
-  end
+  @spec counter_key(term()) :: tuple()
+  defp counter_key(key), do: {@counter_key, key}
 
   @spec file_size(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   defp file_size(path) do

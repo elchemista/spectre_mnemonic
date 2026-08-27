@@ -8,6 +8,7 @@ defmodule SpectreMnemonic.MentalModels do
   reflection packets.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
@@ -65,16 +66,16 @@ defmodule SpectreMnemonic.MentalModels do
 
   @spec store_model(MentalModel.t()) :: {:ok, MentalModel.t()}
   defp store_model(model) do
-    case :ets.lookup(@mental_model_table, model.id) do
+    case ETS.lookup(@mental_model_table, model.id) do
       [{_id, existing}] ->
-        :ets.delete_object(@mental_model_scope_table, {Scope.partition(existing), model.id})
+        ETS.delete_object(@mental_model_scope_table, {Scope.partition(existing), model.id})
 
       [] ->
         :ok
     end
 
-    :ets.insert(@mental_model_table, {model.id, model})
-    :ets.insert(@mental_model_scope_table, {Scope.partition(model), model.id})
+    ETS.insert(@mental_model_table, {model.id, model})
+    ETS.insert(@mental_model_scope_table, {Scope.partition(model), model.id})
     {:ok, model}
   end
 
@@ -111,9 +112,9 @@ defmodule SpectreMnemonic.MentalModels do
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
 
     @mental_model_scope_table
-    |> :ets.lookup(partition)
+    |> ETS.lookup(partition)
     |> Enum.flat_map(fn {^partition, id} ->
-      case :ets.lookup(@mental_model_table, id) do
+      case ETS.lookup(@mental_model_table, id) do
         [{^id, model}] -> [model]
         [] -> []
       end

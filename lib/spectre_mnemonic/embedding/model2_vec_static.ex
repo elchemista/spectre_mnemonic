@@ -9,12 +9,12 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   """
 
   alias SpectreMnemonic.Embedding.BinaryQuantizer
+  alias SpectreMnemonic.Embedding.ModelCache
   alias SpectreMnemonic.Embedding.ModelDownloader
   alias SpectreMnemonic.Embedding.Vector
 
   @tokenizer_module Module.concat(["Tokenizers", "Tokenizer"])
   @encoding_module Module.concat(["Tokenizers", "Encoding"])
-  @cache_table :mnemonic_model_cache
   @model_files ["config.json", "tokenizer.json", "model.safetensors"]
   @model_option_keys [
     :model_dir,
@@ -69,13 +69,7 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
 
   @doc "Clears cached model artifacts so the next embedding reloads them from disk."
   @spec reset_cache :: :ok
-  def reset_cache do
-    if :ets.whereis(@cache_table) != :undefined do
-      :ets.delete_all_objects(@cache_table)
-    end
-
-    :ok
-  end
+  def reset_cache, do: ModelCache.reset()
 
   @spec artifacts(keyword()) :: {:ok, map()} | {:error, term()}
   defp artifacts(opts) do
@@ -167,22 +161,10 @@ defmodule SpectreMnemonic.Embedding.Model2VecStatic do
   end
 
   @spec cache_lookup(term()) :: term() | nil
-  defp cache_lookup(key) do
-    case :ets.lookup(@cache_table, key) do
-      [{^key, value}] -> value
-      [] -> nil
-    end
-  rescue
-    ArgumentError -> nil
-  end
+  defp cache_lookup(key), do: ModelCache.get(key)
 
   @spec cache_put(term(), term()) :: :ok
-  defp cache_put(key, value) do
-    :ets.insert(@cache_table, {key, value})
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
+  defp cache_put(key, value), do: ModelCache.put(key, value)
 
   @spec load_json(Path.t()) :: {:ok, map()} | {:error, term()}
   defp load_json(path) do

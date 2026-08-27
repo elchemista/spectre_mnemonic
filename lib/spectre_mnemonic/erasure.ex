@@ -7,9 +7,12 @@ defmodule SpectreMnemonic.Erasure do
   compaction with no retained previous snapshot or rotated segment.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
+  alias SpectreMnemonic.Engine.PartitionExecutor
   alias SpectreMnemonic.Erasure.Report
+  alias SpectreMnemonic.FailureInjection
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Knowledge.SMEM
   alias SpectreMnemonic.Memory.{Scope, Temporal}
@@ -17,14 +20,30 @@ defmodule SpectreMnemonic.Erasure do
   alias SpectreMnemonic.Persistence.Store.Record
   alias SpectreMnemonic.Recall.Index, as: RecallIndex
   alias SpectreMnemonic.Secrets
+  alias SpectreMnemonic.Telemetry
 
   @internal_families [:tombstones, :erasure_markers]
 
   @doc "Physically erases exactly one explicitly named partition."
   @spec erase_partition(keyword()) :: {:ok, Report.t()} | {:error, term()}
   def erase_partition(opts) do
+    Telemetry.span([:erasure], Telemetry.metadata(opts), fn -> request_erasure(opts) end)
+  end
+
+  defp request_erasure(opts) do
     with :ok <- validate_explicit_partition(opts),
-         {:ok, opts} <- Identity.put_namespace(opts),
+         {:ok, opts} <- Identity.put_namespace(opts) do
+      PartitionExecutor.trans(
+        PartitionExecutor.key(opts),
+        fn -> do_erase_partition(opts) end,
+        opts
+      )
+    end
+  end
+
+  @spec do_erase_partition(keyword()) :: {:ok, Report.t()} | {:error, term()}
+  defp do_erase_partition(opts) do
+    with :ok <- FailureInjection.checkpoint(:erasure_begin, opts),
          :ok <- Manager.ensure_erasure_supported(opts),
          {:ok, records} <- Manager.replay(opts),
          marker = latest_marker(records),
@@ -33,8 +52,9 @@ defmodule SpectreMnemonic.Erasure do
          :ok <- write_tombstones(targets, :partition_erasure, opts),
          {:ok, knowledge_events} <- erase_knowledge(opts),
          {:ok, initial_hot} <- Focus.purge_partition(opts),
-         {:ok, crypto_shred} <- Secrets.shred(Scope.from_opts(opts), opts),
+         {:ok, crypto_shred} <- Secrets.shred_report(Scope.from_opts(opts), opts),
          {:ok, marker_record} <- install_marker(marker, opts),
+         :ok <- FailureInjection.checkpoint(:erasure_sealed, opts),
          {:ok, raced_hot} <- Focus.purge_partition(opts),
          {:ok, compaction} <-
            Manager.compact(
@@ -190,6 +210,36 @@ defmodule SpectreMnemonic.Erasure do
   end
 
   @doc false
+  @spec ensure_commit_allowed(Record.t(), keyword()) ::
+          :ok | {:error, :partition_erased | :stale_erasure_generation | term()}
+  def ensure_commit_allowed(%Record{} = record, opts) do
+    if record.family in @internal_families or Keyword.get(opts, :erasure_internal?, false) do
+      :ok
+    else
+      partition = {record.namespace, record.scope}
+      record_generation = map_value(record.metadata, :erasure_generation)
+
+      case ETS.lookup(:mnemonic_erasure_markers, partition) do
+        [{^partition, :none}] when is_nil(record_generation) -> :ok
+        [{^partition, :none}] -> {:error, :stale_erasure_generation}
+        [{^partition, marker}] -> validate_commit_marker(marker, record_generation)
+        [] -> {:error, {:erasure_guard_unavailable, :marker_not_cached}}
+      end
+    end
+  rescue
+    ArgumentError -> {:error, {:erasure_guard_unavailable, :marker_table_unavailable}}
+  end
+
+  @spec validate_commit_marker(map(), term()) :: :ok | {:error, atom()}
+  defp validate_commit_marker(marker, record_generation) do
+    cond do
+      map_value(marker, :sealed?) == true -> {:error, :partition_erased}
+      marker_generation(marker) == record_generation -> :ok
+      true -> {:error, :stale_erasure_generation}
+    end
+  end
+
+  @doc false
   @spec generation(keyword()) :: binary() | nil
   def generation(opts) do
     with {:ok, opts} <- Identity.put_namespace(opts),
@@ -218,7 +268,7 @@ defmodule SpectreMnemonic.Erasure do
 
   @spec checked_marker_for(tuple(), keyword()) :: {:ok, map() | nil} | {:error, term()}
   defp checked_marker_for(partition, opts) do
-    case :ets.lookup(:mnemonic_erasure_markers, partition) do
+    case ETS.lookup(:mnemonic_erasure_markers, partition) do
       [{^partition, :none}] -> {:ok, nil}
       [{^partition, marker}] -> {:ok, marker}
       [] -> load_marker(partition, opts)
@@ -235,11 +285,11 @@ defmodule SpectreMnemonic.Erasure do
         |> latest_marker()
         |> case do
           %Record{payload: marker} ->
-            :ets.insert(:mnemonic_erasure_markers, {partition, marker})
+            ETS.insert(:mnemonic_erasure_markers, {partition, marker})
             {:ok, marker}
 
           nil ->
-            :ets.insert(:mnemonic_erasure_markers, {partition, :none})
+            ETS.insert(:mnemonic_erasure_markers, {partition, :none})
             {:ok, nil}
         end
 
@@ -324,7 +374,7 @@ defmodule SpectreMnemonic.Erasure do
   defp validate_compaction(other), do: {:error, {:erasure_compaction_failed, other}}
 
   @spec install_marker(Record.t() | nil, keyword()) :: {:ok, Record.t()} | {:error, term()}
-  defp install_marker(existing, opts) do
+  defp install_marker(_existing, opts) do
     now = DateTime.utc_now()
     namespace = Identity.namespace!(opts)
     scope = Scope.from_opts(opts)
@@ -337,7 +387,7 @@ defmodule SpectreMnemonic.Erasure do
       scope: scope,
       scope_digest: scope_digest(namespace, scope),
       erased_at: now,
-      sealed?: Keyword.get(opts, :sealed, marker_sealed?(existing))
+      sealed?: Keyword.get(opts, :sealed, true)
     }
 
     internal_opts =
@@ -346,7 +396,7 @@ defmodule SpectreMnemonic.Erasure do
       |> Keyword.put(:record_id, id)
 
     with {:ok, %{record: record}} <- Manager.append(:erasure_markers, payload, internal_opts) do
-      :ets.insert(:mnemonic_erasure_markers, {{namespace, scope}, payload})
+      ETS.insert(:mnemonic_erasure_markers, {{namespace, scope}, payload})
       {:ok, record}
     end
   end
@@ -375,13 +425,6 @@ defmodule SpectreMnemonic.Erasure do
     do: DateTime.to_unix(inserted_at, :microsecond)
 
   defp record_time(_record), do: 0
-
-  @spec marker_sealed?(Record.t() | nil) :: boolean()
-  defp marker_sealed?(%Record{payload: payload}) when is_map(payload) do
-    Map.get(payload, :sealed?, Map.get(payload, "sealed?", false))
-  end
-
-  defp marker_sealed?(_marker), do: false
 
   @spec marker_generation(term()) :: binary() | nil
   defp marker_generation(marker) when is_map(marker) do

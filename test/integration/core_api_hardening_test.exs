@@ -261,19 +261,20 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
   end
 
   test "search limits cannot crash durable or derived search paths" do
-    manager = Process.whereis(Manager)
+    manager = engine_child_pid(SpectreMnemonic.Persistence.Runtime)
+    assert is_pid(manager)
 
     assert {:ok, []} = Manager.search("missing", limit: :invalid)
     assert {:ok, []} = Observations.search("missing", limit: :invalid)
     assert {:ok, []} = MentalModels.search("missing", limit: :invalid)
     assert {:ok, []} = SpectreMnemonic.search_knowledge("missing", limit: :invalid)
 
-    assert Process.whereis(Manager) == manager
     assert Process.alive?(manager)
   end
 
   test "malformed persistent-memory configuration falls back without crashing manager" do
-    manager = Process.whereis(Manager)
+    manager = engine_child_pid(SpectreMnemonic.Persistence.Runtime)
+    assert is_pid(manager)
 
     Application.put_env(:spectre_mnemonic, :persistent_memory, :invalid)
     assert [default_store] = Keyword.fetch!(Manager.config(), :stores)
@@ -285,7 +286,6 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert {:ok, %{stores: [%{store: :local_file}]}} =
              Manager.append(:knowledge, %{id: "config-fallback"})
 
-    assert Process.whereis(Manager) == manager
     assert Process.alive?(manager)
   end
 
@@ -310,7 +310,8 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
   end
 
   test "governance lifecycle defaults, invalid transitions, and string scopes are deterministic" do
-    governance = Process.whereis(Governance)
+    governance = engine_child_pid(Governance)
+    assert is_pid(governance)
 
     assert :forgotten in Governance.states()
     assert Governance.observe_moment(:invalid) == :ok
@@ -329,7 +330,6 @@ defmodule SpectreMnemonic.Integration.CoreAPIHardeningTest do
     assert {:error, {:invalid_governance_metadata, :invalid}} =
              Governance.append_state("invalid-metadata", :candidate, :test, [], :invalid)
 
-    assert Process.whereis(Governance) == governance
     assert Process.alive?(governance)
 
     provenance = Governance.with_provenance(%{}, source_ids: [nil, "source"])

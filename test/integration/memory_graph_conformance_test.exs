@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.MemoryGraphConformanceTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Embedding.Service
@@ -442,7 +443,7 @@ defmodule SpectreMnemonic.MemoryGraphConformanceTest do
   end
 
   defp association(id) do
-    [{^id, association}] = :ets.lookup(:mnemonic_associations, id)
+    [{^id, association}] = ActiveETS.lookup(:mnemonic_associations, id)
     association
   end
 end

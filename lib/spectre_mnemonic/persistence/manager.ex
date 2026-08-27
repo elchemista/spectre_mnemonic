@@ -28,18 +28,27 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   use GenServer
 
-  require Logger
-
   alias SpectreMnemonic.Durable.Index, as: DurableIndex
+  alias SpectreMnemonic.Engine
+  alias SpectreMnemonic.Engine.Ref
   alias SpectreMnemonic.Erasure
+  alias SpectreMnemonic.FailureInjection
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
-  alias SpectreMnemonic.Persistence.Family
-  alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
+  alias SpectreMnemonic.Persistence.Compaction
+  alias SpectreMnemonic.Persistence.Config
+  alias SpectreMnemonic.Persistence.Dedupe
+  alias SpectreMnemonic.Persistence.PrimaryWriter
+  alias SpectreMnemonic.Persistence.Receipt
+  alias SpectreMnemonic.Persistence.RecordBuilder
+  alias SpectreMnemonic.Persistence.Repair
+  alias SpectreMnemonic.Persistence.Replay
+  alias SpectreMnemonic.Persistence.Runtime, as: PersistenceRuntime
   alias SpectreMnemonic.Persistence.Store.Record
+  alias SpectreMnemonic.Persistence.Writer
   alias SpectreMnemonic.SearchResult
+  alias SpectreMnemonic.Telemetry
 
-  @default_store_id :local_file
   @type store :: %{
           id: atom() | binary(),
           adapter: module(),
@@ -49,11 +58,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
           opts: keyword()
         }
   @type config :: keyword()
-  @type write_result :: %{store: term(), role: term(), result: :ok | {:error, term()}}
+  @type write_result :: %{
+          store: term(),
+          role: term(),
+          result: :ok | :pending | {:error, term()}
+        }
   @type compact_mode :: :physical | :semantic | :all | :erase
-  @type replay_state :: %{position: non_neg_integer(), records: map()}
-  @type manager_state :: %{dedupe: map(), replay_cache: MapSet.t(binary())}
-  @cache_table :mnemonic_durable_records
+  @typep manager_state :: Dedupe.state()
 
   @doc "Starts the persistent memory manager."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -77,10 +88,18 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec append(atom(), term(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
   def append(family, payload, opts \\ []) do
-    with {:ok, opts} <- Identity.put_namespace(opts),
-         :ok <- Erasure.ensure_durable_write(family, opts) do
-      opts = put_erasure_generation(opts)
-      manager_call({:append, family, payload, opts}, operation_timeout(opts, :write_timeout))
+    with {:ok, opts} <- Identity.put_namespace(opts) do
+      opts = Keyword.put(opts, :scope, RecordBuilder.context_scope(payload, opts))
+
+      with :ok <- Erasure.ensure_durable_write(family, opts) do
+        opts = RecordBuilder.put_erasure_generation(opts)
+
+        write_call(
+          {:append, family, payload, opts},
+          opts,
+          operation_timeout(opts, :write_timeout)
+        )
+      end
     end
   end
 
@@ -109,8 +128,8 @@ defmodule SpectreMnemonic.Persistence.Manager do
   def put(%Record{} = record, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          :ok <- Erasure.ensure_durable_write(record.family, opts) do
-      opts = put_erasure_generation(opts)
-      manager_call({:put, record, opts}, operation_timeout(opts, :write_timeout))
+      opts = RecordBuilder.put_erasure_generation(opts)
+      write_call({:put, record, opts}, opts, operation_timeout(opts, :write_timeout))
     end
   end
 
@@ -129,7 +148,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec replay(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def replay(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:replay, opts}, operation_timeout(opts, :replay_timeout))
+      manager_call({:replay, opts}, opts, operation_timeout(opts, :replay_timeout))
     end
   end
 
@@ -139,7 +158,11 @@ defmodule SpectreMnemonic.Persistence.Manager do
         when acc: term()
   def replay_fold(opts \\ [], acc, fun) when is_function(fun, 2) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:replay_fold, opts, acc, fun}, operation_timeout(opts, :replay_timeout))
+      manager_call(
+        {:replay_fold, opts, acc, fun},
+        opts,
+        operation_timeout(opts, :replay_timeout)
+      )
     end
   end
 
@@ -147,7 +170,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec replay_all(keyword()) :: {:ok, [Record.t()]} | {:error, term()}
   def replay_all(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:replay_all, opts}, operation_timeout(opts, :replay_timeout))
+      manager_call({:replay_all, opts}, opts, operation_timeout(opts, :replay_timeout))
     end
   end
 
@@ -165,7 +188,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec get(atom(), binary(), keyword()) :: {:ok, term()} | {:error, term()}
   def get(family, id, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:get, family, id, opts}, operation_timeout(opts, :read_timeout))
+      manager_call({:get, family, id, opts}, opts, operation_timeout(opts, :read_timeout))
     end
   end
 
@@ -183,8 +206,19 @@ defmodule SpectreMnemonic.Persistence.Manager do
   """
   @spec search(term(), keyword()) :: {:ok, [SearchResult.t()]} | {:error, term()}
   def search(cue, opts \\ []) do
+    case search_with_diagnostics(cue, opts) do
+      {:ok, results, _diagnostics} -> {:ok, results}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec search_with_diagnostics(term(), keyword()) ::
+          {:ok, [SearchResult.t()], map()} | {:error, term()}
+  def search_with_diagnostics(cue, opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      {:ok, search_records(cue, opts)}
+      {results, diagnostics} = search_records_with_diagnostics(cue, opts)
+      {:ok, results, diagnostics}
     end
   end
 
@@ -213,7 +247,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
           | {:error, term()}
   def compact(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:compact, opts}, operation_timeout(opts, :compact_timeout))
+      manager_call({:compact, opts}, opts, operation_timeout(opts, :compact_timeout))
     end
   end
 
@@ -223,6 +257,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       manager_call(
         {:ensure_erasure_supported, opts},
+        opts,
         operation_timeout(opts, :erasure_timeout)
       )
     end
@@ -234,6 +269,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     with {:ok, opts} <- Identity.put_namespace(opts) do
       manager_call(
         {:verify_erased, MapSet.new(targets), opts},
+        opts,
         operation_timeout(opts, :erasure_timeout)
       )
     end
@@ -243,7 +279,11 @@ defmodule SpectreMnemonic.Persistence.Manager do
   @spec evict_dedupe(keyword()) :: :ok | {:error, term()}
   def evict_dedupe(opts) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      manager_call({:evict_dedupe, opts}, operation_timeout(opts, :erasure_timeout))
+      manager_call(
+        {:evict_dedupe, opts},
+        opts,
+        operation_timeout(opts, :erasure_timeout)
+      )
     end
   end
 
@@ -262,119 +302,98 @@ defmodule SpectreMnemonic.Persistence.Manager do
   """
   @spec config :: config()
   def config do
-    configured =
-      :spectre_mnemonic
-      |> Application.get_env(:persistent_memory, [])
-      |> normalize_keyword_config()
-
-    defaults()
-    |> Keyword.merge(configured, fn
-      :stores, _default, configured -> configured
-      _key, _default, configured -> configured
-    end)
-    |> ensure_stores()
+    Config.load()
   end
 
   @doc false
   @spec reset_dedupe :: :ok
   def reset_dedupe do
-    GenServer.call(__MODULE__, :reset_dedupe)
+    :ok = PrimaryWriter.reset_all()
+    :ok = PersistenceRuntime.reset_all()
+    :ok
   end
+
+  @doc false
+  @spec empty_state :: manager_state()
+  def empty_state, do: Dedupe.new()
+
+  @doc false
+  @spec reset_state(manager_state()) :: manager_state()
+  def reset_state(state), do: Dedupe.reset(state)
 
   @impl GenServer
   @spec init(keyword()) :: {:ok, manager_state()}
-  def init(_opts), do: {:ok, %{dedupe: %{}, replay_cache: MapSet.new()}}
+  def init(_opts), do: {:ok, empty_state()}
 
   @impl GenServer
   @spec handle_call(term(), GenServer.from(), manager_state()) ::
           {:reply, term(), manager_state()}
-  def handle_call({:append, family, payload, opts}, _from, state) do
-    case prepare_payload_context(payload, opts) do
-      {:ok, payload} ->
-        record = build_record(family, :put, payload, opts)
-        {reply, state} = persist_once(record, opts, state)
-        {:reply, reply, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:put, record, opts}, _from, state) do
-    case normalize_record_context(record, opts) do
-      {:ok, record} ->
-        {reply, state} = persist_once(record, opts, state)
-        {:reply, reply, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:replay, opts}, _from, state) do
-    {reply, state} = cached_records(opts, state, &Scope.match?(&1, opts))
+  def handle_call(request, _from, state) do
+    {reply, state} = execute_request(request, state)
     {:reply, reply, state}
   end
 
-  def handle_call({:replay_fold, opts, acc, fun}, _from, state) do
-    {reply, state} = cached_records(opts, state, fn _record -> true end)
+  @doc false
+  @spec execute_request(term(), manager_state()) :: {term(), manager_state()}
+  def execute_request({:append, family, payload, opts}, state),
+    do: execute_write({:append, family, payload, opts}, state)
 
-    reply =
-      case reply do
-        {:ok, records} -> fold_visible_records(records, opts, acc, fun)
-        {:error, _reason} = error -> error
-      end
+  def execute_request({:put, record, opts}, state),
+    do: execute_write({:put, record, opts}, state)
 
-    {:reply, reply, state}
+  def execute_request({:replay, opts}, state) do
+    Telemetry.span([:replay], Telemetry.metadata(opts), fn ->
+      Dedupe.cached_records(opts, state, &Scope.match?(&1, opts))
+    end)
   end
 
-  def handle_call({:replay_all, opts}, _from, state) do
-    {reply, state} = cached_records(opts, state, &Scope.match_namespace?(&1, opts))
-    {:reply, reply, state}
+  def execute_request({:replay_fold, opts, acc, fun}, state) do
+    Telemetry.span([:replay], Telemetry.metadata(opts), fn ->
+      {reply, state} = Dedupe.cached_records(opts, state, fn _record -> true end)
+
+      reply =
+        case reply do
+          {:ok, records} -> Replay.fold_visible(records, opts, acc, fun)
+          {:error, _reason} = error -> error
+        end
+
+      {reply, state}
+    end)
   end
 
-  def handle_call({:get, family, id, opts}, _from, state) do
+  def execute_request({:replay_all, opts}, state) do
+    Telemetry.span([:replay], Telemetry.metadata(opts), fn ->
+      Dedupe.cached_records(opts, state, &Scope.match_namespace?(&1, opts))
+    end)
+  end
+
+  def execute_request({:get, family, id, opts}, state) do
     result =
       opts
       |> effective_config()
-      |> lookup_stores()
+      |> Config.lookup_stores()
       |> find_record(family, id, opts)
 
-    {:reply, result, state}
+    {result, state}
   end
 
-  def handle_call({:search, cue, opts}, _from, state) do
-    {:reply, {:ok, search_records(cue, opts)}, state}
-  end
+  def execute_request({:search, cue, opts}, state),
+    do: {{:ok, search_records(cue, opts)}, state}
 
-  def handle_call({:compact, opts}, _from, state) do
+  def execute_request({:compact, opts}, state) do
     cfg = effective_config(opts)
 
     reply =
-      case compact_mode(opts, cfg) do
-        :physical ->
-          {:ok, physical_compact(cfg, opts)}
-
-        :semantic ->
-          {:ok, semantic_compact(cfg, opts)}
-
-        :all ->
-          semantic = semantic_compact(cfg, opts)
-          physical = physical_compact(cfg, opts)
-          {:ok, %{mode: :all, semantic: semantic, physical: physical}}
-
-        :erase ->
-          {:ok, physical_erase(cfg, opts)}
-
-        mode ->
-          {:error, {:invalid_compact_mode, mode}}
+      case Compaction.mode(opts, cfg) do
+        :erase -> {:ok, physical_erase(cfg, opts)}
+        _mode -> Compaction.run(cfg, opts)
       end
 
-    state = %{invalidate_replay_cache(state) | dedupe: %{}}
-    {:reply, reply, state}
+    state = Dedupe.invalidate_all(state)
+    {reply, state}
   end
 
-  def handle_call({:ensure_erasure_supported, opts}, _from, state) do
+  def execute_request({:ensure_erasure_supported, opts}, state) do
     failures = opts |> effective_config() |> erasure_support_failures()
 
     reply =
@@ -382,35 +401,112 @@ defmodule SpectreMnemonic.Persistence.Manager do
         do: :ok,
         else: {:error, {:erasure_unsupported_stores, failures}}
 
-    {:reply, reply, state}
+    {reply, state}
   end
 
-  def handle_call({:verify_erased, targets, opts}, _from, state) do
+  def execute_request({:verify_erased, targets, opts}, state) do
     namespace = Identity.namespace!(opts)
     scope = Scope.from_opts(opts)
 
     failures = opts |> effective_config() |> verify_erased_stores(namespace, scope, targets, opts)
 
     reply = if failures == [], do: :ok, else: {:error, {:erasure_verification_failed, failures}}
-    {:reply, reply, state}
+    {reply, state}
   end
 
-  def handle_call({:evict_dedupe, opts}, _from, state) do
+  def execute_request({:evict_dedupe, opts}, state) do
     _partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
-    {:reply, :ok, %{invalidate_replay_cache(state) | dedupe: %{}}}
+    {:ok, Dedupe.invalidate_all(state)}
   end
 
-  def handle_call(:reset_dedupe, _from, _state) do
-    :ets.delete_all_objects(@cache_table)
-    {:reply, :ok, %{dedupe: %{}, replay_cache: MapSet.new()}}
+  def execute_request(:reset_dedupe, state), do: {:ok, reset_state(state)}
+
+  @doc false
+  @spec invalidate_state(manager_state()) :: manager_state()
+  def invalidate_state(state), do: Dedupe.invalidate(state)
+
+  @doc false
+  @spec execute_write(term(), manager_state()) :: {term(), manager_state()}
+  def execute_write({:append, family, payload, opts}, state) do
+    case RecordBuilder.prepare_payload_context(payload, opts) do
+      {:ok, payload} ->
+        record = RecordBuilder.build(family, :put, payload, opts)
+        persist_once(record, opts, state)
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
   end
 
-  @spec manager_call(term(), timeout()) :: term()
-  defp manager_call(request, timeout) do
-    GenServer.call(__MODULE__, request, timeout)
+  def execute_write({:put, record, opts}, state) do
+    case RecordBuilder.normalize(record, opts) do
+      {:ok, record} ->
+        persist_once(record, opts, state)
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  @spec manager_call(term(), keyword(), timeout()) :: term()
+  defp manager_call(request, opts, timeout) do
+    case resolve_engine_ref(opts) do
+      {:ok, ref} -> PersistenceRuntime.call(ref, request, timeout)
+      {:error, _reason} = error -> error
+    end
   catch
     :exit, {:timeout, _call} -> {:error, {:persistent_memory_timeout, timeout}}
     :exit, reason -> {:error, {:persistent_memory_manager_unavailable, reason}}
+  end
+
+  @spec write_call(term(), keyword(), timeout()) :: term()
+  defp write_call(request, opts, timeout) do
+    case resolve_engine_ref(opts) do
+      {:ok, ref} -> PrimaryWriter.call(ref, request, timeout, opts)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec resolve_engine_ref(keyword()) :: {:ok, Ref.t()} | {:error, term()}
+  defp resolve_engine_ref(opts) do
+    case Keyword.get(opts, :engine_ref) || Keyword.get(opts, :engine) do
+      %Ref{} = ref ->
+        {:ok, ref}
+
+      reference when not is_nil(reference) ->
+        resolve_reference(reference)
+
+      _missing ->
+        resolve_from_namespace(opts)
+    end
+  end
+
+  @spec resolve_reference(term()) :: {:ok, Ref.t()} | {:error, term()}
+  defp resolve_reference(reference) do
+    case Engine.resolve(reference) do
+      {:ok, runtime} -> {:ok, runtime.config.ref}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec resolve_from_namespace(keyword()) :: {:ok, Ref.t()} | {:error, term()}
+  defp resolve_from_namespace(opts) do
+    result =
+      case Keyword.get(opts, :namespace) do
+        namespace when is_binary(namespace) ->
+          case Engine.resolve_internal_namespace(namespace) do
+            {:ok, _runtime} = found -> found
+            {:error, _reason} -> Engine.resolve(SpectreMnemonic.DefaultEngine)
+          end
+
+        _missing ->
+          Engine.resolve(SpectreMnemonic.DefaultEngine)
+      end
+
+    case result do
+      {:ok, runtime} -> {:ok, runtime.config.ref}
+      {:error, _reason} = error -> error
+    end
   end
 
   @spec operation_timeout(keyword(), atom()) :: timeout()
@@ -426,637 +522,176 @@ defmodule SpectreMnemonic.Persistence.Manager do
           {{:ok, map()} | {:error, term()}, manager_state()}
   defp persist_once(record, opts, state) do
     cfg = effective_config(opts)
-    config_key = config_key(cfg, record.namespace)
-    digest = record_digest(record)
+    config_key = Dedupe.key(cfg, record.namespace)
+    digest = RecordBuilder.digest(record)
 
-    case dedupe_for(config_key, cfg, record.namespace, state) do
+    case Dedupe.fetch(config_key, cfg, record.namespace, state) do
       {:ok, dedupe, state} ->
-        persist_deduped(record, cfg, config_key, digest, dedupe, state)
+        persist_deduped(record, cfg, config_key, digest, dedupe, state, opts)
 
       {:error, failures} ->
         {{:error, {:persistent_memory_replay_failed, failures}}, state}
     end
   end
 
-  @spec persist_deduped(Record.t(), config(), binary(), binary(), map(), manager_state()) ::
+  @spec persist_deduped(
+          Record.t(),
+          config(),
+          binary(),
+          binary(),
+          map(),
+          manager_state(),
+          keyword()
+        ) ::
           {{:ok, map()} | {:error, term()}, manager_state()}
-  defp persist_deduped(record, cfg, config_key, digest, dedupe, state) do
+  defp persist_deduped(record, cfg, config_key, digest, dedupe, state, opts) do
     case Map.get(dedupe, record.dedupe_key) do
       {^digest, _dedupe_reference} ->
-        previous_record = cache_lookup(config_key, record.dedupe_key) || record
-        reply = {:ok, %{record: previous_record, stores: [], idempotent?: true}}
+        previous_record = Dedupe.lookup(state, config_key, record.dedupe_key) || record
+        reply = {:ok, Receipt.build(previous_record, [], true)}
         {reply, state}
 
+      {_different_digest, _dedupe_reference} when is_binary(record.dedupe_key) ->
+        if String.starts_with?(record.dedupe_key, "op:"),
+          do: {{:error, {:operation_id_conflict, record.operation_id}}, state},
+          else: persist_and_remember(record, cfg, config_key, digest, dedupe, state, opts)
+
       _missing_or_changed ->
-        persist_and_remember(record, cfg, config_key, digest, dedupe, state)
+        persist_and_remember(record, cfg, config_key, digest, dedupe, state, opts)
     end
   end
 
-  @spec persist_and_remember(Record.t(), config(), binary(), binary(), map(), manager_state()) ::
+  @spec persist_and_remember(
+          Record.t(),
+          config(),
+          binary(),
+          binary(),
+          map(),
+          manager_state(),
+          keyword()
+        ) ::
           {{:ok, map()} | {:error, term()}, manager_state()}
-  defp persist_and_remember(record, cfg, config_key, digest, dedupe, state) do
-    case persist(record, cfg) do
+  defp persist_and_remember(record, cfg, config_key, digest, dedupe, state, opts) do
+    case persist(record, cfg, opts) do
       {:ok, _result} = reply ->
-        dedupe = Map.put(dedupe, record.dedupe_key, {digest, record.dedupe_key})
-        state = put_in(state, [:dedupe, config_key], dedupe)
-        {reply, cache_record_if_loaded(state, config_key, record)}
+        {reply, Dedupe.remember(state, config_key, record, digest, dedupe)}
 
       {:error, _reason} = error ->
         {error, state}
     end
   end
 
-  @spec persist(Record.t(), config()) ::
+  @spec persist(Record.t(), config(), keyword()) ::
           {:ok, %{record: Record.t(), stores: [write_result()]}} | {:error, term()}
-  defp persist(record, cfg) do
+  # The write boundary keeps commit sequencing visible in one place.
+  # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+  defp persist(record, cfg, opts) do
     # This is the write boundary. Domain code hands us one envelope; stores get
     # fan-out, telemetry, and blame labels. Future cleanup: partial failure
     # policy is still a little too ceremonial.
-    stores = selected_stores(cfg, record)
-    results = Enum.map(stores, &write_store(&1, record))
+    with :ok <- Erasure.ensure_commit_allowed(record, opts) do
+      stores = selected_stores(cfg, record)
+      {primary_stores, replica_stores} = Enum.split_with(stores, &(&1.role == :primary))
 
-    case evaluate_results(cfg, stores, results) do
-      :ok ->
-        DurableIndex.upsert(record)
-        {:ok, %{record: record, stores: results}}
+      with :ok <-
+             FailureInjection.checkpoint(:before_primary_commit, opts, %{
+               operation_id: record.operation_id,
+               commit_id: record.commit_id
+             }),
+           primary_results = Enum.map(primary_stores, &Writer.write(&1, record)),
+           :ok <- Writer.evaluate(cfg, primary_stores, primary_results) do
+        :ok =
+          observe_after_primary_commit(opts, %{
+            operation_id: record.operation_id,
+            commit_id: record.commit_id
+          })
 
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
+        replica_results = Repair.dispatch(replica_stores, primary_stores, record, opts)
+        results = primary_results ++ replica_results
 
-  @spec search_records(term(), keyword()) :: [SearchResult.t()]
-  defp search_records(cue, opts) do
-    # Query work is independent of the write coordinator. Running this in the
-    # caller prevents one slow adapter search from blocking every append.
-    adapter_results =
-      opts
-      |> effective_config()
-      |> searchable_stores()
-      |> Enum.flat_map(&search_store(&1, cue, opts))
+        if Enum.all?(primary_results, &(&1.result == :ok)) do
+          # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+          if is_nil(record.batch_id) and
+               record.family not in [:batch_begins, :batch_commits, :repair_jobs] do
+            DurableIndex.upsert(record)
+          end
 
-    durable_index_results(cue, opts)
-    |> merge_search_results(adapter_results)
-    |> Enum.take(search_limit(opts))
-  end
-
-  @spec build_record(atom(), atom(), term(), keyword()) :: Record.t()
-  defp build_record(family, operation, payload, opts) do
-    now = DateTime.utc_now()
-    namespace = Identity.namespace!(opts)
-    scope = context_scope(payload, opts)
-    id = Keyword.get(opts, :record_id) || Identity.generate("pmem", opts)
-    payload_id = payload_id(payload)
-    source_event_id = Keyword.get(opts, :source_event_id) || payload_id || id
-    dedupe_source = dedupe_source(family, payload, source_event_id)
-
-    dedupe_key =
-      Keyword.get(opts, :dedupe_key) ||
-        "#{namespace}:#{scope_key(scope)}:#{family}:#{operation}:#{dedupe_source}"
-
-    %Record{
-      id: id,
-      namespace: namespace,
-      scope: scope,
-      family: family,
-      operation: operation,
-      payload: payload,
-      dedupe_key: dedupe_key,
-      inserted_at: now,
-      source_event_id: source_event_id,
-      metadata:
-        opts
-        |> Keyword.get(:metadata, %{})
-        |> Map.new()
-        |> Identity.put_context(Keyword.put(opts, :scope, scope))
-        |> maybe_put_erasure_generation(opts)
-    }
-  end
-
-  @spec prepare_payload_context(term(), keyword()) :: {:ok, term()} | {:error, term()}
-  defp prepare_payload_context(payload, opts) do
-    namespace = Identity.namespace!(opts)
-    scope = context_scope(payload, opts)
-
-    with :ok <- Scope.validate_assignable_context(payload, namespace, scope) do
-      {:ok, put_payload_context(payload, namespace, scope)}
-    end
-  end
-
-  @spec normalize_record_context(Record.t(), keyword()) :: {:ok, Record.t()} | {:error, term()}
-  defp normalize_record_context(%Record{} = record, opts) do
-    expected = Identity.namespace!(opts)
-
-    with :ok <- validate_record_namespace(record, expected),
-         {:ok, scope} <- record_scope(record, opts),
-         :ok <- Scope.validate_assignable_context(record.metadata, expected, scope),
-         :ok <- Scope.validate_assignable_context(record.payload, expected, scope) do
-      payload = put_payload_context(record.payload, expected, scope)
-      source_event_id = record.source_event_id || payload_id(record.payload) || record.id
-      dedupe_source = dedupe_source(record.family, payload, source_event_id)
-
-      dedupe_key =
-        record.dedupe_key ||
-          "#{expected}:#{scope_key(scope)}:#{record.family}:#{record.operation}:#{dedupe_source}"
-
-      metadata =
-        record.metadata
-        |> Map.new()
-        |> Identity.put_context(Keyword.put(opts, :scope, scope))
-        |> maybe_put_erasure_generation(opts)
-
-      {:ok,
-       %{
-         record
-         | namespace: expected,
-           scope: scope,
-           payload: payload,
-           source_event_id: source_event_id,
-           dedupe_key: dedupe_key,
-           metadata: metadata
-       }}
-    end
-  end
-
-  @spec put_erasure_generation(keyword()) :: keyword()
-  defp put_erasure_generation(opts) do
-    case Erasure.generation(opts) do
-      generation when is_binary(generation) -> Keyword.put(opts, :erasure_generation, generation)
-      _missing -> Keyword.delete(opts, :erasure_generation)
-    end
-  end
-
-  @spec maybe_put_erasure_generation(map(), keyword()) :: map()
-  defp maybe_put_erasure_generation(metadata, opts) do
-    case Keyword.get(opts, :erasure_generation) do
-      generation when is_binary(generation) -> Map.put(metadata, :erasure_generation, generation)
-      _missing -> metadata
-    end
-  end
-
-  @spec validate_record_namespace(Record.t(), binary()) :: :ok | {:error, term()}
-  defp validate_record_namespace(%Record{namespace: namespace}, expected)
-       when namespace in [nil, expected],
-       do: :ok
-
-  defp validate_record_namespace(%Record{namespace: namespace}, expected),
-    do: {:error, {:namespace_mismatch, expected, namespace}}
-
-  @spec record_scope(Record.t(), keyword()) :: {:ok, term()} | {:error, term()}
-  defp record_scope(record, opts) do
-    requested = Keyword.get(opts, :scope)
-
-    cond do
-      Keyword.has_key?(opts, :scope) and not is_nil(record.scope) and record.scope != requested ->
-        {:error, {:scope_mismatch, requested, record.scope}}
-
-      Keyword.has_key?(opts, :scope) ->
-        {:ok, requested}
-
-      not is_nil(record.scope) ->
-        {:ok, record.scope}
-
-      true ->
-        {:ok, Scope.scope(record.payload)}
-    end
-  end
-
-  @spec put_payload_context(term(), binary(), term()) :: term()
-  defp put_payload_context(payload, namespace, scope) when is_map(payload) do
-    payload
-    |> put_context_field(:namespace, namespace)
-    |> put_context_field(:scope, scope)
-  end
-
-  defp put_payload_context(payload, _namespace, _scope), do: payload
-
-  @spec put_context_field(map(), atom(), term()) :: map()
-  defp put_context_field(payload, key, value) do
-    if is_struct(payload) and not Map.has_key?(payload, key),
-      do: payload,
-      else: Map.put(payload, key, value)
-  end
-
-  @spec context_scope(term(), keyword()) :: term()
-  defp context_scope(payload, opts) do
-    if Keyword.has_key?(opts, :scope), do: Keyword.get(opts, :scope), else: Scope.scope(payload)
-  end
-
-  @spec dedupe_source(atom(), term(), term()) :: binary()
-  defp dedupe_source(:tombstones, payload, source_event_id) do
-    case tombstone_target(payload) do
-      {:ok, {family, id}} -> "#{family}:#{id}"
-      :error -> to_string(source_event_id)
-    end
-  end
-
-  defp dedupe_source(_family, _payload, source_event_id), do: to_string(source_event_id)
-
-  @spec scope_key(term()) :: binary()
-  defp scope_key(scope) do
-    scope
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-    |> binary_part(0, 16)
-  end
-
-  @spec config_key(config(), binary()) :: binary()
-  defp config_key(cfg, namespace) do
-    stores = Keyword.fetch!(cfg, :stores)
-
-    {namespace, stores}
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
-  end
-
-  @spec cached_records(keyword(), manager_state(), (Record.t() -> boolean())) ::
-          {{:ok, [Record.t()]} | {:error, term()}, manager_state()}
-  defp cached_records(opts, state, filter) do
-    cfg = effective_config(opts)
-    namespace = Identity.namespace!(opts)
-    key = config_key(cfg, namespace)
-
-    case ensure_replay_cache(key, cfg, namespace, state) do
-      {:ok, state} ->
-        records = key |> cache_records() |> Enum.filter(filter)
-        {{:ok, records}, state}
-
-      {:error, failures} ->
-        {{:error, {:persistent_memory_replay_failed, failures}}, state}
-    end
-  end
-
-  @spec ensure_replay_cache(binary(), config(), binary(), manager_state()) ::
-          {:ok, manager_state()} | {:error, list()}
-  defp ensure_replay_cache(key, cfg, namespace, state) do
-    if MapSet.member?(state.replay_cache, key) and cache_loaded?(key) do
-      {:ok, state}
-    else
-      case cfg |> replayable_stores() |> replay_records_checked() do
-        {:ok, records} ->
-          visible = Enum.filter(records, &(&1.namespace in [nil, namespace]))
-          cache_replace(key, visible)
-          {:ok, %{state | replay_cache: MapSet.put(state.replay_cache, key)}}
-
-        {:error, failures} ->
-          {:error, failures}
+          {:ok, Receipt.build(record, results, false)}
+        else
+          {:error, {:primary_persistent_memory_failed, primary_results}}
+        end
       end
     end
   end
 
-  @spec cache_replace(binary(), [Record.t()]) :: :ok
-  defp cache_replace(key, records) do
-    :ets.match_delete(@cache_table, {{key, :_}, :_})
-    :ets.insert(@cache_table, {{key, :__loaded__}, true})
+  @spec observe_after_primary_commit(keyword(), map()) :: :ok
+  defp observe_after_primary_commit(opts, context) do
+    if Keyword.has_key?(opts, :failure_injector) do
+      try do
+        task =
+          Task.Supervisor.async_nolink(SpectreMnemonic.SharedTaskSupervisor, fn ->
+            FailureInjection.checkpoint(:after_primary_commit, opts, context)
+          end)
 
-    Enum.each(records, fn record ->
-      :ets.insert(@cache_table, {{key, cache_record_key(record)}, record})
-    end)
-
-    :ok
-  end
-
-  @spec cache_records(binary()) :: [Record.t()]
-  defp cache_records(key) do
-    @cache_table
-    |> :ets.match_object({{key, :_}, :_})
-    |> Enum.flat_map(fn
-      {_key, %Record{} = record} -> [record]
-      _marker -> []
-    end)
-    |> Enum.sort_by(fn record ->
-      {record_timestamp(record), record.id, record.dedupe_key || ""}
-    end)
-  rescue
-    ArgumentError -> []
-  end
-
-  @spec cache_loaded?(binary()) :: boolean()
-  defp cache_loaded?(key) do
-    :ets.lookup(@cache_table, {key, :__loaded__}) == [{{key, :__loaded__}, true}]
-  rescue
-    ArgumentError -> false
-  end
-
-  @spec cache_lookup(binary(), binary()) :: Record.t() | nil
-  defp cache_lookup(key, dedupe_key) do
-    case :ets.lookup(@cache_table, {key, dedupe_key}) do
-      [{{^key, ^dedupe_key}, record}] -> record
-      [] -> nil
-    end
-  rescue
-    ArgumentError -> nil
-  end
-
-  @spec cache_record_key(Record.t()) :: binary()
-  defp cache_record_key(record), do: record.dedupe_key || record.id
-
-  @spec record_timestamp(Record.t()) :: integer()
-  defp record_timestamp(%Record{inserted_at: %DateTime{} = inserted_at}),
-    do: DateTime.to_unix(inserted_at, :microsecond)
-
-  defp record_timestamp(_record), do: 0
-
-  @spec cache_record_if_loaded(manager_state(), binary(), Record.t()) :: manager_state()
-  defp cache_record_if_loaded(state, key, record) do
-    if MapSet.member?(state.replay_cache, key) do
-      :ets.insert(@cache_table, {{key, cache_record_key(record)}, record})
-      apply_cache_lifecycle(key, record)
-    end
-
-    state
-  end
-
-  @spec apply_cache_lifecycle(binary(), Record.t()) :: :ok
-  defp apply_cache_lifecycle(key, %Record{family: :tombstones, payload: payload} = tombstone) do
-    case tombstone_target(payload) do
-      {:ok, {family, id}} ->
-        key
-        |> cache_records()
-        |> Enum.each(&maybe_delete_tombstoned_cache(key, &1, tombstone, family, id))
-
-      :error ->
-        :ok
+        _diagnostic =
+          Task.yield(task, Keyword.get(opts, :failure_injection_timeout, 1_000)) ||
+            Task.shutdown(task, :brutal_kill)
+      catch
+        _kind, _reason -> :ok
+      end
     end
 
     :ok
   end
 
-  defp apply_cache_lifecycle(key, %Record{family: :erasure_markers}) do
-    visible = key |> cache_records() |> apply_erasure_markers()
-    cache_replace(key, visible)
+  @spec search_records(term(), keyword()) :: [SearchResult.t()]
+  defp search_records(cue, opts) do
+    {results, _diagnostics} = search_records_with_diagnostics(cue, opts)
+    results
   end
 
-  defp apply_cache_lifecycle(_key, _record), do: :ok
+  @spec search_records_with_diagnostics(term(), keyword()) :: {[SearchResult.t()], map()}
+  defp search_records_with_diagnostics(cue, opts) do
+    # Query work is independent of the write coordinator. Running this in the
+    # caller prevents one slow adapter search from blocking every append.
+    cfg = effective_config(opts)
 
-  @spec tombstoned_cache_record?(Record.t(), Record.t(), atom(), binary()) :: boolean()
-  defp tombstoned_cache_record?(record, tombstone, family, id) do
-    record.namespace == tombstone.namespace and record.scope == tombstone.scope and
-      record.family == family and payload_id(record.payload) == id
-  end
+    {adapter_results, store_statuses} =
+      cfg
+      |> Config.searchable_stores()
+      |> Enum.map(&search_store_with_diagnostics(&1, cue, opts))
+      |> Enum.reduce({[], %{}}, fn {store_id, results, status}, {all, statuses} ->
+        {results ++ all, Map.put(statuses, store_id, status)}
+      end)
 
-  @spec maybe_delete_tombstoned_cache(binary(), Record.t(), Record.t(), atom(), binary()) ::
-          true | :ok
-  defp maybe_delete_tombstoned_cache(key, record, tombstone, family, id) do
-    if tombstoned_cache_record?(record, tombstone, family, id),
-      do: :ets.delete(@cache_table, {key, cache_record_key(record)}),
-      else: :ok
-  end
+    {index_results, index_status} = durable_index_results_with_diagnostics(cue, opts)
+    primary = cfg |> Keyword.fetch!(:stores) |> Enum.find(&(&1.role == :primary))
 
-  @spec invalidate_replay_cache(manager_state()) :: manager_state()
-  defp invalidate_replay_cache(state) do
-    :ets.delete_all_objects(@cache_table)
-    %{state | replay_cache: MapSet.new()}
-  end
+    primary_status =
+      case primary do
+        nil -> {:error, :primary_store_missing}
+        store -> Map.get(store_statuses, store.id, :not_requested)
+      end
 
-  @spec dedupe_for(binary(), config(), binary(), manager_state()) ::
-          {:ok, map(), manager_state()} | {:error, list()}
-  defp dedupe_for(config_key, cfg, namespace, state) do
-    case Map.fetch(state.dedupe, config_key) do
-      {:ok, dedupe} ->
-        {:ok, dedupe, state}
+    results =
+      index_results
+      |> merge_search_results(adapter_results)
+      |> Enum.take(search_limit(opts))
 
-      :error ->
-        if MapSet.member?(state.replay_cache, config_key) and cache_loaded?(config_key) do
-          dedupe = dedupe_from_records(cache_records(config_key))
-          {:ok, dedupe, put_in(state, [:dedupe, config_key], dedupe)}
-        else
-          load_dedupe(config_key, cfg, namespace, state)
-        end
-    end
-  end
-
-  @spec load_dedupe(binary(), config(), binary(), manager_state()) ::
-          {:ok, map(), manager_state()} | {:error, list()}
-  defp load_dedupe(config_key, cfg, namespace, state) do
-    case cfg |> replayable_stores() |> replay_records_checked() do
-      {:ok, records} ->
-        visible = Enum.filter(records, &(&1.namespace in [nil, namespace]))
-        dedupe = dedupe_from_records(visible)
-        cache_replace(config_key, visible)
-
-        state =
-          state
-          |> put_in([:dedupe, config_key], dedupe)
-          |> Map.update!(:replay_cache, &MapSet.put(&1, config_key))
-
-        {:ok, dedupe, state}
-
-      {:error, failures} ->
-        {:error, failures}
-    end
-  end
-
-  @spec dedupe_from_records([Record.t()]) :: map()
-  defp dedupe_from_records(records) do
-    Map.new(records, fn record ->
-      {record.dedupe_key, {record_digest(record), record.dedupe_key}}
-    end)
-  end
-
-  @spec record_digest(Record.t()) :: binary()
-  defp record_digest(%Record{family: :tombstones, payload: payload} = record)
-       when is_map(payload) do
-    digest_record(record, Map.drop(payload, [:forgotten_at, "forgotten_at"]))
-  end
-
-  defp record_digest(record), do: digest_record(record, record.payload)
-
-  @spec digest_record(Record.t(), term()) :: binary()
-  defp digest_record(record, payload) do
-    {
-      record.namespace,
-      record.scope,
-      record.family,
-      record.operation,
-      record.source_event_id,
-      payload
+    diagnostics = %{
+      durable_index: index_status,
+      primary_store: primary_status,
+      stores: store_statuses
     }
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
+
+    {results, diagnostics}
   end
 
   @spec effective_config(keyword()) :: config()
-  defp effective_config(opts) do
-    override = opts |> Keyword.get(:persistent_memory, []) |> normalize_keyword_config()
-
-    config()
-    |> Keyword.merge(override, fn
-      :stores, _base, configured -> configured
-      _key, _base, configured -> configured
-    end)
-    |> ensure_stores()
-    |> normalize_config()
-  end
-
-  @spec defaults :: config()
-  defp defaults do
-    [
-      write_mode: :all,
-      read_mode: :smart,
-      failure_mode: :strict,
-      compact_mode: :physical,
-      semantic_compact_families: [
-        :moments,
-        :knowledge,
-        :observations,
-        :mental_models,
-        :summaries,
-        :categories,
-        :associations,
-        :memory_states
-      ],
-      semantic_compact_limit: 1_000,
-      stores: [
-        [
-          id: @default_store_id,
-          adapter: StoreFile,
-          role: :primary,
-          duplicate: true,
-          opts: [data_root: StoreFile.data_root()]
-        ]
-      ]
-    ]
-  end
-
-  @spec ensure_stores(config()) :: config()
-  defp ensure_stores(config) do
-    case Keyword.get(config, :stores, []) do
-      stores when is_list(stores) and stores != [] ->
-        if Enum.all?(stores, &(is_map(&1) or is_list(&1))),
-          do: config,
-          else: Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
-
-      _invalid ->
-        Keyword.put(config, :stores, Keyword.fetch!(defaults(), :stores))
-    end
-  end
-
-  @spec normalize_config(config()) :: config()
-  defp normalize_config(config) do
-    stores =
-      config
-      |> Keyword.get(:stores, [])
-      |> Enum.map(&normalize_store/1)
-      |> Enum.reject(&is_nil/1)
-      |> default_stores_if_empty()
-      |> ensure_primary_store()
-
-    Keyword.put(config, :stores, stores)
-  end
-
-  @spec normalize_store(keyword() | map() | term()) :: store() | nil
-  defp normalize_store(store) do
-    store = normalize_keyword_config(store)
-
-    with {:ok, id} <- Keyword.fetch(store, :id),
-         {:ok, adapter} when is_atom(adapter) <- Keyword.fetch(store, :adapter) do
-      %{
-        id: id,
-        adapter: adapter,
-        role: Keyword.get(store, :role),
-        duplicate: Keyword.get(store, :duplicate, true),
-        families: Keyword.get(store, :families, :all),
-        opts: normalize_keyword_config(Keyword.get(store, :opts, []))
-      }
-    else
-      _invalid -> nil
-    end
-  end
-
-  @spec default_stores_if_empty([store()]) :: [store()]
-  defp default_stores_if_empty([]) do
-    defaults()
-    |> Keyword.fetch!(:stores)
-    |> Enum.map(&normalize_store/1)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp default_stores_if_empty(stores), do: stores
-
-  @spec normalize_keyword_config(term()) :: keyword()
-  defp normalize_keyword_config(config) when is_map(config), do: Map.to_list(config)
-
-  defp normalize_keyword_config(config) when is_list(config) do
-    if Keyword.keyword?(config), do: config, else: []
-  end
-
-  defp normalize_keyword_config(_config), do: []
-
-  @spec ensure_primary_store([store()]) :: [store()]
-  defp ensure_primary_store([]), do: []
-
-  defp ensure_primary_store(stores) do
-    if Enum.any?(stores, &(&1.role == :primary)) do
-      stores
-    else
-      [first | rest] = stores
-      [%{first | role: :primary} | rest]
-    end
-  end
+  defp effective_config(opts), do: Config.effective(opts)
 
   @spec selected_stores(config(), Record.t()) :: [store()]
-  defp selected_stores(config, record) do
-    stores = Keyword.fetch!(config, :stores)
-
-    config
-    |> Keyword.get(:write_mode, :all)
-    |> do_selected_stores(stores, record)
-    |> Enum.uniq_by(& &1.id)
-  end
-
-  @spec do_selected_stores(term(), [store()], Record.t()) :: [store()]
-  defp do_selected_stores(:all, stores, record) do
-    Enum.filter(stores, fn store ->
-      store.role == :primary or (store.duplicate and handles_family?(store, record.family))
-    end)
-  end
-
-  defp do_selected_stores(:primary_only, stores, _record),
-    do: Enum.filter(stores, &(&1.role == :primary))
-
-  defp do_selected_stores({:families, rules}, stores, record) do
-    routed_ids =
-      rules
-      |> Keyword.get(record.family, [])
-      |> List.wrap()
-      |> MapSet.new()
-
-    Enum.filter(stores, fn store ->
-      store.role == :primary or MapSet.member?(routed_ids, store.id)
-    end)
-  end
-
-  defp do_selected_stores(_unknown, stores, record), do: do_selected_stores(:all, stores, record)
-
-  @spec compact_mode(keyword(), config()) :: compact_mode() | term()
-  defp compact_mode(opts, cfg) do
-    Keyword.get(opts, :mode) || Keyword.get(cfg, :compact_mode, :physical)
-  end
-
-  @spec physical_compact(config(), keyword()) :: [{term(), {:ok, Path.t()} | {:error, term()}}]
-  defp physical_compact(cfg, opts) do
-    cfg
-    |> replayable_stores()
-    |> Enum.filter(&(&1.adapter == StoreFile))
-    |> Enum.map(fn store ->
-      compact_opts =
-        Keyword.merge(
-          store.opts,
-          Keyword.take(opts, [:retain_compacted_segments, :erase?])
-        )
-
-      result =
-        case replay_records_checked([store]) do
-          {:ok, records} -> StoreFile.compact(compact_opts, records)
-          {:error, failures} -> {:error, {:persistent_memory_replay_failed, failures}}
-        end
-
-      {store.id, result}
-    end)
-  end
+  defp selected_stores(config, record), do: Config.selected_stores(config, record)
 
   @spec physical_erase(config(), keyword()) :: [{term(), {:ok, term()} | {:error, term()}}]
   defp physical_erase(cfg, opts) do
@@ -1083,7 +718,7 @@ defmodule SpectreMnemonic.Persistence.Manager do
     cfg
     |> Keyword.fetch!(:stores)
     |> Enum.flat_map(fn store ->
-      capabilities = safe_capabilities(store)
+      capabilities = Config.safe_capabilities(store)
 
       missing =
         []
@@ -1135,440 +770,12 @@ defmodule SpectreMnemonic.Persistence.Manager do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  @spec semantic_compact(config(), keyword()) :: map()
-  defp semantic_compact(cfg, opts) do
-    # Semantic compaction is adapter-shaped because deciding what to compress is
-    # policy. Writing replacement records and tombstones is runtime work. That
-    # division keeps the model out of the forklift.
-    results =
-      cfg
-      |> Keyword.fetch!(:stores)
-      |> Enum.map(&semantic_compact_store(&1, cfg, opts))
-
-    %{
-      mode: :semantic,
-      results: results,
-      written: sum_result(results, :written),
-      tombstones: sum_result(results, :tombstones)
-    }
-  end
-
-  @spec semantic_compact_store(store(), config(), keyword()) :: {term(), map() | tuple()}
-  defp semantic_compact_store(store, cfg, opts) do
-    capabilities = safe_capabilities(store)
-
-    cond do
-      :semantic_compact in capabilities and
-          function_exported?(store.adapter, :semantic_compact, 2) ->
-        {store.id, native_semantic_compact(store, cfg, opts)}
-
-      replay_supported?(store, capabilities) and not is_nil(semantic_adapter(cfg, opts)) ->
-        {store.id, replay_semantic_compact(store, cfg, opts)}
-
-      replay_supported?(store, capabilities) ->
-        {store.id, {:skipped, :semantic_adapter_not_configured}}
-
-      true ->
-        {store.id, {:skipped, :semantic_compact_not_supported}}
-    end
-  end
-
-  @spec native_semantic_compact(store(), config(), keyword()) :: map() | {:error, term()}
-  defp native_semantic_compact(store, cfg, opts) do
-    input = semantic_input(store, [], cfg, opts)
-
-    case store.adapter.semantic_compact(input, store.opts) do
-      {:ok, result} when is_map(result) ->
-        result
-        |> Map.put_new(:mode, :semantic)
-        |> Map.put_new(:strategy, :native)
-        |> Map.put_new(:written, 0)
-        |> Map.put_new(:tombstones, 0)
-
-      {:ok, other} ->
-        %{mode: :semantic, strategy: :native, result: other, written: 0, tombstones: 0}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  @spec replay_semantic_compact(store(), config(), keyword()) :: map() | {:error, term()}
-  defp replay_semantic_compact(store, cfg, opts) do
-    with records <- replay_records([store]),
-         selected <- select_semantic_records(records, cfg, opts),
-         input <- semantic_input(store, selected, cfg, opts),
-         {:ok, output} <- run_semantic_adapter(input, cfg, opts),
-         {:ok, plan} <- normalize_semantic_output(output, selected, opts),
-         {:ok, write_summary} <- write_semantic_plan(store, plan) do
-      %{
-        mode: :semantic,
-        strategy: plan.strategy,
-        input: length(selected),
-        written: write_summary.written,
-        tombstones: write_summary.tombstones,
-        skipped: write_summary.skipped
-      }
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  @spec semantic_input(store(), [Record.t()], config(), keyword()) :: map()
-  defp semantic_input(store, records, cfg, opts) do
-    families = semantic_families(cfg, opts)
-
-    %{
-      store: %{id: store.id, role: store.role, adapter: store.adapter, families: store.families},
-      records: records,
-      records_by_family: Enum.group_by(records, & &1.family),
-      families: families,
-      limit: semantic_limit(cfg, opts),
-      opts: opts
-    }
-  end
-
-  @spec select_semantic_records([Record.t()], config(), keyword()) :: [Record.t()]
-  defp select_semantic_records(records, cfg, opts) do
-    families = semantic_families(cfg, opts)
-    limit = semantic_limit(cfg, opts)
-
-    records
-    |> Enum.filter(&(&1.family in families and Scope.match?(&1, opts)))
-    |> Enum.sort_by(&{-record_priority(&1), DateTime.to_unix(&1.inserted_at, :microsecond)})
-    |> Enum.take(limit)
-  end
-
-  @spec run_semantic_adapter(map(), config(), keyword()) :: {:ok, term()} | {:error, term()}
-  defp run_semantic_adapter(input, cfg, opts) do
-    semantic_with_adapter(semantic_adapter(cfg, opts), input, opts)
-  end
-
-  @spec semantic_adapter(config(), keyword()) :: term()
-  defp semantic_adapter(cfg, opts) do
-    Keyword.get(opts, :semantic_compact_adapter) ||
-      Keyword.get(cfg, :semantic_compact_adapter)
-  end
-
-  @spec semantic_with_adapter(term(), map(), keyword()) :: {:ok, term()} | {:error, term()}
-  defp semantic_with_adapter(module, input, opts) do
-    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :compact, 2) do
-      module.compact(input, opts) |> normalize_semantic_adapter_result()
-    else
-      {:error, {:invalid_semantic_compact_adapter, module}}
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  @spec normalize_semantic_adapter_result(term()) :: {:ok, term()} | {:error, term()}
-  defp normalize_semantic_adapter_result({:ok, output}), do: {:ok, output}
-  defp normalize_semantic_adapter_result({:error, reason}), do: {:error, reason}
-
-  defp normalize_semantic_adapter_result(other),
-    do: {:error, {:unexpected_semantic_compact_result, other}}
-
-  @spec normalize_semantic_output(term(), [Record.t()], keyword()) ::
-          {:ok, map()} | {:error, term()}
-  defp normalize_semantic_output(output, selected, opts) when is_list(output),
-    do: normalize_semantic_output(%{records: output}, selected, opts)
-
-  defp normalize_semantic_output(output, selected, opts) when is_map(output) do
-    # Adapters can be generous with shapes, so normalize here and nowhere else.
-    # I dont want every store adapter learning three dialects of tombstone.
-    strategy = Map.get(output, :strategy, Map.get(output, "strategy", :custom))
-
-    with {:ok, records} <-
-           normalize_semantic_values(
-             semantic_values(output, :records),
-             &semantic_record(&1, opts)
-           ),
-         {:ok, tombstones} <-
-           normalize_semantic_values(
-             List.flatten([
-               semantic_values(output, :tombstones),
-               replace_id_tombstones(output, selected)
-             ]),
-             &semantic_tombstone(&1, opts)
-           ) do
-      {:ok, %{strategy: strategy, records: records, tombstones: tombstones}}
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  defp normalize_semantic_output(other, _selected, _opts),
-    do: {:error, {:invalid_semantic_compact_output, other}}
-
-  @spec normalize_semantic_values([term()], (term() ->
-                                               {:ok, Record.t()} | :skip | {:error, term()})) ::
-          {:ok, [Record.t()]} | {:error, term()}
-  defp normalize_semantic_values(values, normalizer) do
-    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, records} ->
-      case normalizer.(value) do
-        {:ok, record} -> {:cont, {:ok, [record | records]}}
-        :skip -> {:cont, {:ok, records}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, records} -> {:ok, Enum.reverse(records)}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  @spec write_semantic_plan(store(), map()) :: {:ok, map()} | {:error, term()}
-  defp write_semantic_plan(store, plan) do
-    compact_records = List.flatten([plan.records, plan.tombstones])
-
-    summary =
-      Enum.reduce_while(compact_records, %{written: 0, tombstones: 0, skipped: 0}, fn record,
-                                                                                      acc ->
-        case write_store(store, record) do
-          %{result: :ok} ->
-            DurableIndex.upsert(record)
-            {:cont, semantic_write_summary(acc, record)}
-
-          %{result: {:error, reason}} ->
-            {:halt, {:error, reason}}
-        end
-      end)
-
-    case summary do
-      {:error, reason} -> {:error, reason}
-      summary -> {:ok, summary}
-    end
-  end
-
-  @spec semantic_write_summary(map(), Record.t()) :: map()
-  defp semantic_write_summary(acc, %{family: :tombstones}),
-    do: %{acc | written: acc.written + 1, tombstones: acc.tombstones + 1}
-
-  defp semantic_write_summary(acc, _record), do: %{acc | written: acc.written + 1}
-
-  @spec semantic_values(map(), atom()) :: [term()]
-  defp semantic_values(output, key) do
-    output
-    |> Map.get(key, Map.get(output, Atom.to_string(key), []))
-    |> List.wrap()
-  end
-
-  @spec semantic_record(term(), keyword()) :: {:ok, Record.t()} | :skip | {:error, term()}
-  defp semantic_record(%Record{} = record, opts), do: normalize_record_context(record, opts)
-
-  defp semantic_record({family, payload}, opts) when is_atom(family) do
-    with {:ok, payload} <- prepare_payload_context(payload, opts) do
-      {:ok,
-       build_record(
-         family,
-         :put,
-         payload,
-         Keyword.put(opts, :metadata, %{semantic_compacted?: true})
-       )}
-    end
-  end
-
-  defp semantic_record(%{family: family, payload: payload}, opts) when is_atom(family),
-    do: semantic_record({family, payload}, opts)
-
-  defp semantic_record(%{"family" => family, "payload" => payload}, opts)
-       when is_binary(family) do
-    case Family.from_string(family) do
-      {:ok, family} -> semantic_record({family, payload}, opts)
-      :error -> :skip
-    end
-  end
-
-  defp semantic_record(_other, _opts), do: :skip
-
-  @spec semantic_tombstone(term(), keyword()) :: {:ok, Record.t()} | :skip | {:error, term()}
-  defp semantic_tombstone(%Record{} = record, opts) do
-    case semantic_record(record, opts) do
-      {:ok, %Record{family: :tombstones} = record} -> {:ok, record}
-      {:ok, %Record{family: family}} -> {:error, {:invalid_tombstone_family, family}}
-      other -> other
-    end
-  end
-
-  defp semantic_tombstone({family, id}, opts) when is_atom(family) and is_binary(id) do
-    semantic_record(
-      {:tombstones, %{family: family, id: id, forgotten_at: DateTime.utc_now()}},
-      opts
-    )
-  end
-
-  defp semantic_tombstone(%{family: family, id: id}, opts)
-       when is_atom(family) and is_binary(id),
-       do: semantic_tombstone({family, id}, opts)
-
-  defp semantic_tombstone(%{"family" => family, "id" => id}, opts)
-       when is_binary(family) and is_binary(id) do
-    case Family.from_string(family) do
-      {:ok, family} -> semantic_tombstone({family, id}, opts)
-      :error -> :skip
-    end
-  end
-
-  defp semantic_tombstone(_other, _opts), do: :skip
-
-  @spec replace_id_tombstones(map(), [Record.t()]) :: [term()]
-  defp replace_id_tombstones(output, selected) do
-    selected_by_id = Map.new(selected, fn record -> {record.id, record} end)
-
-    output
-    |> semantic_values(:replace_ids)
-    |> Enum.flat_map(fn id ->
-      case Map.fetch(selected_by_id, id) do
-        {:ok, record} -> [{record.family, payload_id(record.payload) || record.source_event_id}]
-        :error -> []
-      end
-    end)
-    |> Enum.reject(fn {_family, id} -> is_nil(id) end)
-  end
-
-  @spec semantic_families(config(), keyword()) :: [atom()]
-  defp semantic_families(cfg, opts) do
-    opts
-    |> Keyword.get(:semantic_compact_families, Keyword.get(cfg, :semantic_compact_families, []))
-    |> List.wrap()
-  end
-
-  @spec semantic_limit(config(), keyword()) :: non_neg_integer()
-  defp semantic_limit(cfg, opts) do
-    case Keyword.get(
-           opts,
-           :semantic_compact_limit,
-           Keyword.get(cfg, :semantic_compact_limit, 1_000)
-         ) do
-      limit when is_integer(limit) and limit >= 0 -> limit
-      _invalid -> 1_000
-    end
-  end
-
   @spec search_limit(keyword()) :: non_neg_integer()
   defp search_limit(opts) do
     case Keyword.get(opts, :limit, 10) do
       limit when is_integer(limit) and limit >= 0 -> limit
       _invalid -> 10
     end
-  end
-
-  @spec record_priority(Record.t()) :: number()
-  defp record_priority(%Record{payload: %{attention: attention}}) when is_number(attention),
-    do: attention
-
-  defp record_priority(%Record{payload: %{metadata: %{confidence: confidence}}})
-       when is_number(confidence),
-       do: confidence
-
-  defp record_priority(_record), do: 0
-
-  @spec sum_result([{term(), map() | tuple()}], atom()) :: non_neg_integer()
-  defp sum_result(results, key) do
-    Enum.reduce(results, 0, fn
-      {_id, result}, acc when is_map(result) -> acc + Map.get(result, key, 0)
-      _other, acc -> acc
-    end)
-  end
-
-  @spec handles_family?(store(), atom()) :: boolean()
-  defp handles_family?(%{families: :all}, _family), do: true
-  defp handles_family?(%{families: families}, family), do: family in List.wrap(families)
-
-  @spec write_store(store(), Record.t()) :: write_result()
-  defp write_store(store, record) do
-    started = System.monotonic_time()
-
-    result =
-      try do
-        normalize_write_result(store.adapter.put(record, store.opts))
-      rescue
-        exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-      catch
-        kind, reason -> {:error, {kind, reason}}
-      end
-
-    duration = System.monotonic_time() - started
-    emit_write_event(store, record, result, duration)
-    %{store: store.id, role: store.role, result: result}
-  end
-
-  @spec normalize_write_result(term()) :: :ok | {:error, term()}
-  defp normalize_write_result(:ok), do: :ok
-  defp normalize_write_result({:ok, _value}), do: :ok
-  defp normalize_write_result({:error, reason}), do: {:error, reason}
-  defp normalize_write_result(other), do: {:error, {:unexpected_adapter_result, other}}
-
-  @spec evaluate_results(config(), [store()], [write_result()]) :: :ok | {:error, term()}
-  defp evaluate_results(config, stores, results) do
-    failure_mode = Keyword.get(config, :failure_mode, :best_effort)
-
-    primary_ids =
-      stores |> Enum.filter(&(&1.role == :primary)) |> Enum.map(& &1.id) |> MapSet.new()
-
-    failed =
-      Enum.filter(results, fn %{result: result} ->
-        match?({:error, _reason}, result)
-      end)
-
-    primary_failed =
-      Enum.any?(failed, fn %{store: store_id} ->
-        MapSet.member?(primary_ids, store_id)
-      end)
-
-    cond do
-      failed == [] ->
-        :ok
-
-      failure_mode == :strict ->
-        {:error, {:persistent_memory_failed, failed}}
-
-      primary_failed ->
-        {:error, {:primary_persistent_memory_failed, failed}}
-
-      true ->
-        Logger.warning("secondary persistent memory write failed: #{inspect(failed)}")
-        :ok
-    end
-  end
-
-  @spec replayable_stores(config()) :: [store()]
-  defp replayable_stores(config) do
-    config
-    |> Keyword.fetch!(:stores)
-    |> Enum.filter(fn store ->
-      replay_supported?(store, safe_capabilities(store))
-    end)
-  end
-
-  @spec lookup_stores(config()) :: [store()]
-  defp lookup_stores(config) do
-    config
-    |> Keyword.fetch!(:stores)
-    |> Enum.filter(fn store ->
-      :lookup in safe_capabilities(store)
-    end)
-  end
-
-  @spec searchable_stores(config()) :: [store()]
-  defp searchable_stores(config) do
-    config
-    |> Keyword.fetch!(:stores)
-    |> Enum.filter(fn store ->
-      capabilities = safe_capabilities(store)
-
-      Enum.any?([:search, :vector_search, :fulltext_search], &(&1 in capabilities))
-    end)
   end
 
   @spec find_record([store()], atom(), binary(), keyword()) ::
@@ -1604,212 +811,34 @@ defmodule SpectreMnemonic.Persistence.Manager do
   defp find_record_result(_error, rest, family, id, opts),
     do: find_record(rest, family, id, opts)
 
-  @spec replay_supported?(store(), [SpectreMnemonic.Persistence.Store.Adapter.capability()]) ::
-          boolean()
-  defp replay_supported?(store, capabilities) do
-    (:replay_fold in capabilities and function_exported?(store.adapter, :replay_fold, 3)) or
-      (:replay in capabilities and function_exported?(store.adapter, :replay, 1))
-  end
-
-  @spec replay_records([store()]) :: [Record.t()]
-  defp replay_records(stores) do
-    # Replay is boring recovery: fold every store, keep latest dedupe key, apply
-    # tombstones. If an index disagrees, replay wins and the index can apologize.
-    stores
-    |> Enum.reduce(replay_state(), &replay_store_into/2)
-    |> replay_state_records()
-    |> apply_tombstones()
-    |> apply_erasure_markers()
-  end
-
-  @spec replay_records_checked([store()]) :: {:ok, [Record.t()]} | {:error, [map()]}
-  defp replay_records_checked(stores) do
-    stores
-    |> Enum.reduce_while({:ok, replay_state()}, fn store, {:ok, state} ->
-      case replay_store_into_checked(store, state) do
-        {:ok, state} -> {:cont, {:ok, state}}
-        {:error, reason} -> {:halt, {:error, [replay_failure(store, reason)]}}
-      end
-    end)
-    |> case do
-      {:ok, state} ->
-        records = state |> replay_state_records() |> apply_tombstones() |> apply_erasure_markers()
-        {:ok, records}
-
-      {:error, failures} ->
-        {:error, failures}
-    end
-  end
-
-  @spec fold_visible_records(
-          [Record.t()],
-          keyword(),
-          acc,
-          (Record.t(), acc -> {:cont, acc} | {:halt, acc})
-        ) :: {:ok, acc}
-        when acc: term()
-  defp fold_visible_records(records, opts, acc, fun) do
-    records
-    |> Enum.filter(&Scope.match?(&1, opts))
-    |> Enum.reduce_while(acc, fn record, acc ->
-      case fun.(record, acc) do
-        {:cont, acc} -> {:cont, acc}
-        {:halt, acc} -> {:halt, acc}
-      end
-    end)
-    |> then(&{:ok, &1})
-  end
-
-  @spec replay_store_into_checked(store(), replay_state()) ::
-          {:ok, replay_state()} | {:error, term()}
-  defp replay_store_into_checked(store, state) do
-    capabilities = safe_capabilities(store)
-
-    cond do
-      replay_fold_supported?(store, capabilities) -> replay_store_fold_checked(store, state)
-      replay_list_supported?(store, capabilities) -> replay_store_list_checked(store, state)
-      true -> {:error, :replay_capability_unavailable}
-    end
-  end
-
-  @spec replay_store_fold_checked(store(), replay_state()) ::
-          {:ok, replay_state()} | {:error, term()}
-  defp replay_store_fold_checked(store, state) do
-    case store.adapter.replay_fold(store.opts, state, fn frame, acc ->
-           {:cont, absorb_frame(frame, acc)}
-         end) do
-      {:ok, state} -> {:ok, state}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_replay_result, other}}
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  @spec replay_store_list_checked(store(), replay_state()) ::
-          {:ok, replay_state()} | {:error, term()}
-  defp replay_store_list_checked(store, state) do
-    case store.adapter.replay(store.opts) do
-      {:ok, frames} when is_list(frames) -> {:ok, Enum.reduce(frames, state, &absorb_frame/2)}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_replay_result, other}}
-    end
-  rescue
-    exception -> {:error, {exception.__struct__, Exception.message(exception)}}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
-
-  @spec replay_failure(store(), term()) :: map()
-  defp replay_failure(store, reason),
-    do: %{store: store.id, role: store.role, reason: reason}
-
-  @spec replay_state :: replay_state()
-  defp replay_state, do: %{position: 0, records: %{}}
-
-  @spec replay_store_into(store(), replay_state()) :: replay_state()
-  defp replay_store_into(store, state) do
-    capabilities = safe_capabilities(store)
-
-    cond do
-      replay_fold_supported?(store, capabilities) ->
-        replay_store_fold(store, state)
-
-      replay_list_supported?(store, capabilities) ->
-        replay_store_list(store, state)
-
-      true ->
-        state
-    end
-  end
-
-  @spec replay_fold_supported?(
-          store(),
-          [SpectreMnemonic.Persistence.Store.Adapter.capability()]
-        ) :: boolean()
-  defp replay_fold_supported?(store, capabilities) do
-    :replay_fold in capabilities and function_exported?(store.adapter, :replay_fold, 3)
-  end
-
-  @spec replay_list_supported?(store(), [SpectreMnemonic.Persistence.Store.Adapter.capability()]) ::
-          boolean()
-  defp replay_list_supported?(store, capabilities) do
-    :replay in capabilities and function_exported?(store.adapter, :replay, 1)
-  end
-
-  @spec replay_store_fold(store(), replay_state()) :: replay_state()
-  defp replay_store_fold(store, state) do
-    case store.adapter.replay_fold(store.opts, state, fn frame, acc ->
-           {:cont, absorb_frame(frame, acc)}
-         end) do
-      {:ok, state} -> state
-      {:error, _reason} -> state
-    end
-  rescue
-    _exception -> state
-  catch
-    _kind, _reason -> state
-  end
-
-  @spec replay_store_list(store(), replay_state()) :: replay_state()
-  defp replay_store_list(store, state) do
-    case store.adapter.replay(store.opts) do
-      {:ok, frames} -> Enum.reduce(frames, state, &absorb_frame/2)
-      {:error, _reason} -> state
-    end
-  rescue
-    _exception -> state
-  catch
-    _kind, _reason -> state
-  end
-
-  @spec absorb_frame(term(), replay_state()) :: replay_state()
-  defp absorb_frame(frame, state) do
-    case frame_record(frame) do
-      %Record{} = record ->
-        position = state.position + 1
-
-        %{
-          position: position,
-          records: Map.put(state.records, record.dedupe_key, {position, record})
-        }
-
-      _other ->
-        state
-    end
-  end
-
-  @spec replay_state_records(replay_state()) :: [Record.t()]
-  defp replay_state_records(state) do
-    state.records
-    |> Map.values()
-    |> Enum.sort_by(fn {position, _record} -> position end)
-    |> Enum.map(fn {_position, record} -> record end)
-  end
-
-  @spec search_store(store(), term(), keyword()) :: [SearchResult.t()]
-  defp search_store(store, cue, opts) do
+  @spec search_store_with_diagnostics(store(), term(), keyword()) ::
+          {term(), [SearchResult.t()], :ok | {:error, term()}}
+  defp search_store_with_diagnostics(store, cue, opts) do
     if function_exported?(store.adapter, :search, 2) do
       search_opts = Keyword.merge(store.opts, opts)
 
       case store.adapter.search(cue, search_opts) do
         {:ok, results} ->
-          results
-          |> Enum.map(&tag_search_result(&1, store.id))
-          |> Enum.filter(&search_result_visible?(&1, opts))
+          visible =
+            results
+            |> Enum.map(&tag_search_result(&1, store.id))
+            |> Enum.filter(&search_result_visible?(&1, opts))
 
-        {:error, _reason} ->
-          []
+          {store.id, visible, :ok}
+
+        {:error, reason} ->
+          {store.id, [], {:error, reason}}
+
+        other ->
+          {store.id, [], {:error, {:unexpected_adapter_result, other}}}
       end
     else
-      []
+      {store.id, [], {:error, :search_not_supported}}
     end
   rescue
-    _exception -> []
+    exception -> {store.id, [], {:error, {exception.__struct__, Exception.message(exception)}}}
   catch
-    _kind, _reason -> []
+    kind, reason -> {store.id, [], {:error, {kind, reason}}}
   end
 
   @spec search_result_visible?(map(), keyword()) :: boolean()
@@ -1818,14 +847,13 @@ defmodule SpectreMnemonic.Persistence.Manager do
     Scope.match?(memory, opts)
   end
 
-  @spec durable_index_results(term(), keyword()) :: [SearchResult.t()]
-  defp durable_index_results(cue, opts) do
-    {:ok, results} = DurableIndex.search(cue, opts)
-    results
-  rescue
-    _exception -> []
-  catch
-    _kind, _reason -> []
+  @spec durable_index_results_with_diagnostics(term(), keyword()) ::
+          {[SearchResult.t()], :ok | {:error, term()}}
+  defp durable_index_results_with_diagnostics(cue, opts) do
+    case DurableIndex.search_diagnosed(cue, opts) do
+      {:ok, results} -> {results, :ok}
+      {:error, reason} -> {[], {:error, reason}}
+    end
   end
 
   @spec merge_search_results([SearchResult.t()], [SearchResult.t()]) :: [SearchResult.t()]
@@ -1845,144 +873,4 @@ defmodule SpectreMnemonic.Persistence.Manager do
 
   defp tag_search_result(result, store_id),
     do: SearchResult.new(result, source: :persistent, store: store_id)
-
-  @spec frame_record(term()) :: Record.t() | term()
-  defp frame_record({_seq, _timestamp, %Record{} = record}), do: record
-
-  defp frame_record({_seq, _timestamp, {family, payload}}),
-    do: build_record(family, :put, payload, [])
-
-  defp frame_record(%Record{} = record), do: record
-  defp frame_record(other), do: other
-
-  @spec apply_tombstones([Record.t()]) :: [Record.t()]
-  defp apply_tombstones(records) do
-    forgotten =
-      records
-      |> Enum.filter(&(&1.family == :tombstones))
-      |> Enum.flat_map(fn record ->
-        case tombstone_target(record.payload) do
-          {:ok, {family, id}} -> [{record.namespace, record.scope, family, id}]
-          :error -> []
-        end
-      end)
-      |> MapSet.new()
-
-    Enum.reject(records, fn record ->
-      payload_id = payload_id(record.payload)
-
-      record.family == :tombstones or
-        MapSet.member?(forgotten, {record.namespace, record.scope, record.family, payload_id})
-    end)
-  end
-
-  @spec apply_erasure_markers([Record.t()]) :: [Record.t()]
-  defp apply_erasure_markers(records) do
-    markers =
-      records
-      |> Enum.filter(&(&1.family == :erasure_markers))
-      |> Enum.reduce(%{}, &put_latest_erasure_marker/2)
-
-    Enum.reject(records, &erased_record?(&1, markers))
-  end
-
-  @spec put_latest_erasure_marker(Record.t(), map()) :: map()
-  defp put_latest_erasure_marker(marker, markers) do
-    key = {marker.namespace, marker.scope}
-
-    case Map.fetch(markers, key) do
-      :error -> Map.put(markers, key, marker)
-      {:ok, current} -> Map.put(markers, key, latest_record(marker, current))
-    end
-  end
-
-  @spec latest_record(Record.t(), Record.t()) :: Record.t()
-  defp latest_record(candidate, current) do
-    if record_time(candidate) >= record_time(current), do: candidate, else: current
-  end
-
-  @spec erased_record?(Record.t(), map()) :: boolean()
-  defp erased_record?(record, markers) do
-    marker = Map.get(markers, {record.namespace, record.scope})
-
-    not is_nil(marker) and record.family != :erasure_markers and erased_by_marker?(record, marker)
-  end
-
-  @spec erased_by_marker?(Record.t(), Record.t()) :: boolean()
-  defp erased_by_marker?(record, marker) do
-    case map_value(marker.payload, :generation) do
-      generation when is_binary(generation) ->
-        map_value(record.metadata, :erasure_generation) != generation
-
-      _legacy_marker ->
-        record_time(record) <= record_time(marker)
-    end
-  end
-
-  @spec record_time(Record.t()) :: integer()
-  defp record_time(%Record{inserted_at: %DateTime{} = inserted_at}),
-    do: DateTime.to_unix(inserted_at, :microsecond)
-
-  defp record_time(_record), do: 0
-
-  @spec safe_capabilities(store()) :: [SpectreMnemonic.Persistence.Store.Adapter.capability()]
-  defp safe_capabilities(store) do
-    case store.adapter.capabilities(store.opts) do
-      capabilities when is_list(capabilities) -> capabilities
-      _invalid -> []
-    end
-  rescue
-    _exception -> []
-  catch
-    _kind, _reason -> []
-  end
-
-  @spec emit_write_event(store(), Record.t(), term(), integer()) :: :ok | term()
-  defp emit_write_event(store, record, result, duration) do
-    if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
-      # Telemetry remains optional after removing its former transitive source.
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(:telemetry, :execute, [
-        [:spectre_mnemonic, :persistent_memory, :write],
-        %{duration: duration},
-        %{store: store.id, family: record.family, result: result}
-      ])
-    end
-  end
-
-  @spec payload_id(term()) :: binary() | nil
-  defp payload_id(payload) when is_map(payload) do
-    case map_value(payload, :id) do
-      id when is_binary(id) -> id
-      id when is_atom(id) -> Atom.to_string(id)
-      _other -> nil
-    end
-  end
-
-  defp payload_id(_payload), do: nil
-
-  @spec tombstone_target(term()) :: {:ok, {atom(), binary()}} | :error
-  defp tombstone_target(payload) when is_map(payload) do
-    with {:ok, family} <- normalize_family(map_value(payload, :family)),
-         id when is_binary(id) <- payload_id(payload) do
-      {:ok, {family, id}}
-    else
-      _invalid -> :error
-    end
-  end
-
-  defp tombstone_target(_payload), do: :error
-
-  @spec normalize_family(term()) :: {:ok, atom()} | :error
-  defp normalize_family(family) when is_atom(family), do: {:ok, family}
-  defp normalize_family(family) when is_binary(family), do: Family.from_string(family)
-  defp normalize_family(_family), do: :error
-
-  @spec map_value(map(), atom()) :: term()
-  defp map_value(map, key) do
-    case Map.fetch(map, key) do
-      {:ok, value} -> value
-      :error -> Map.get(map, Atom.to_string(key))
-    end
-  end
 end

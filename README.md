@@ -5,6 +5,12 @@ keeps recent memory in ETS, links related moments into a graph, persists durable
 records through append-only stores, and retrieves context with text ranking,
 graph expansion, optional embeddings, and hybrid durable search.
 
+Version 0.2.0 has one core, `SpectreMnemonic.Engine`: applications can supervise
+it directly, while Spectre can supervise the same Engine as a Stack resource.
+Multiple independent Engines may run in one BEAM VM. The runtime is explicitly
+single-node; a deployment must never activate the same `storage_id` on two
+nodes at once.
+
 It is a memory layer, not an application database. Use it to remember events,
 preferences, decisions, facts, documents, and tool output; then retrieve the
 evidence an application or agent needs for its next action.
@@ -49,24 +55,50 @@ SpectreMnemonic is distributed from GitHub:
 ```elixir
 def deps do
   [
-    {:spectre, "~> 0.3.3"},
     {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"}
   ]
 end
 ```
 
-Configure a stable namespace and choose the JSON implementation owned by the
-host application. Elixir's built-in `JSON` module requires no extra
+Spectre is optional. Add `{:spectre, "~> 0.3.3"}` only when using the Stack
+integration.
+
+Telemetry is also optional. Add `{:telemetry, "~> 1.3"}` in the host when it
+needs Mnemonic lifecycle events; the standalone core remains functional when
+Telemetry is absent.
+
+Supervise an Engine with stable storage identity and an application namespace:
+
+```elixir
+children = [
+  {SpectreMnemonic.Engine,
+   name: MyApp.Memory,
+   storage_id: "my-app-memory",
+   namespace: "my_app",
+   data_root: "data/memory"}
+]
+```
+
+Address it with the existing option-based API:
+
+```elixir
+SpectreMnemonic.remember("Alice prefers email",
+  engine: MyApp.Memory,
+  scope: {:customer, "alice"}
+)
+
+SpectreMnemonic.recall("How should I contact Alice?",
+  engine: MyApp.Memory,
+  scope: {:customer, "alice"}
+)
+```
+
+JSON remains host-owned. Elixir's built-in `JSON` module requires no extra
 dependency:
 
 ```elixir
 config :spectre_mnemonic,
-  namespace: "my_app_memory",
-  json_library: JSON,
-  hot_memory: [
-    max_moments_per_scope: 1_000,
-    max_moments_per_namespace: 10_000
-  ]
+  json_library: JSON
 ```
 
 `json_library` is required only by JSON-backed features: `.mnemonic`
@@ -75,10 +107,14 @@ memory engine starts and runs without a JSON package. To use Jason instead, add
 `{:jason, "~> 1.4"}` to the host application's dependencies and configure
 `json_library: Jason`. Do not rely on a transitive JSON dependency.
 
-The OTP application starts only state owners and coordinators: ETS, local path
-locks, durable writers and indexes, governance, and scheduled maintenance.
-Routing, focus mutation, recall scoring, and consolidation execute in the
-caller; there is no per-stream process and no VM-wide recall GenServer.
+For 0.1.x compatibility, a configured global `namespace:` starts
+`SpectreMnemonic.DefaultEngine`, so calls without `engine:` keep working. When
+that legacy configuration is absent, the application still starts and such a
+call returns `{:error, :mnemonic_engine_required}`.
+
+The OTP application owns only shared registries and bounded support
+infrastructure. Each Engine owns its configuration, persistence pipeline,
+indexes, projection shards, queues, embedding space, scheduler, and lifecycle.
 
 See [Getting started](docs/GETTING_STARTED.md) for supervision, scopes,
 configuration, and a complete first workflow.
@@ -166,22 +202,26 @@ Install Mnemonic in a Spectre Stack:
 
 ```elixir
 defmodule MyApp.AI do
-  use Spectre.Stack, id: :my_app
+  use Spectre.Stack
 
   install Spectre.Mnemonic do
-    store MyApp.MemoryStore
-    isolate_by [:agent, :subject, :conversation]
+    isolate_by [:instance]
   end
 end
 
-defmodule MyApp.Agent do
-  use Spectre.Agent, stack: MyApp.AI
-end
+children = [
+  {Spectre.Stack.Runtime,
+   stack: MyApp.AI,
+   name: MyApp.AIRuntime,
+   packages: [mnemonic: [data_root: "data/memory"]]},
+  {Spectre.Supervisor, name: MyApp.SpectreSupervisor}
+]
 ```
 
-Spectre then calls Mnemonic through its normal memory lifecycle. Subject
-isolation requires an explicit canonical `%Spectre.Subject{}`; channel sender
-ids are never treated as cross-channel identity.
+Spectre resolves the Engine resource through the named Stack Runtime and calls
+Mnemonic through its normal memory lifecycle. `isolate_by: []` remains the
+historical shared-memory default; `[:instance]` is the recommended opt-in and
+fails closed when no `%Spectre.Instance.Ref{}` is available.
 
 The full setup, isolation behavior, and direct adapter calls are documented in
 [Getting started](docs/GETTING_STARTED.md#spectre-agent-integration).
@@ -197,7 +237,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
   and indexed through Vettore 0.3.5, with native CPU/GPU execution and no Nx
   requirement.
 - BM25-style durable search with text, entity, vector, binary-signature, and
-  lifecycle signals.
+  lifecycle signals, backed by protected per-Engine ETS indexes rather than
+  corpus copies or hot-path replay.
 - Evidence-grounded observations, curated mental models, and structured
   reflection packets.
 - Governance states, contradiction tracking, provenance, freshness decay, and
@@ -206,6 +247,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
   `knowledge.smem`.
 - Encrypted secret memory with explicit authorization before reveal.
 - Verified `.mnemonic` exports and durable-first physical partition erasure.
+- Content-free health, recall diagnostics, and optional Telemetry events for
+  memory, persistence, repair, maintenance, and erasure operations.
 - Plugs and adapters for extraction, embeddings, persistence, compaction,
   labels, secrets, and action runtimes.
 
@@ -220,6 +263,8 @@ The full setup, isolation behavior, and direct adapter calls are documented in
   knowledge.
 - [Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md) — stores,
   compaction, scheduler, export, erasure, evaluation, and operational limits.
+- [Migrating to 0.2.0](docs/MIGRATING_TO_0_2.md) — DefaultEngine compatibility,
+  explicit Engine adoption, scope identity, adapter, and deployment changes.
 - [Privacy, data protection, and GDPR operations](docs/PRIVACY_AND_GDPR.md) —
   responsibility boundaries, minimisation, retention, subject requests, and
   verified erasure.
@@ -235,6 +280,10 @@ The full setup, isolation behavior, and direct adapter calls are documented in
 
 - Every operation addresses exactly one `{namespace, scope}` partition.
   Omitting `scope:` selects only the unscoped partition.
+- Engine identity and durable `storage_id` are separate. An Engine name or PID
+  may be used for one call; runtime handles are never persisted.
+- The same `storage_id` must have exactly one active writer across all nodes.
+  Registry protection covers duplicate Engines only inside the current VM.
 - `recall/2` and `reflect/2` return evidence, not generated prose.
 - `forget/2` hides memory logically; `erase_partition/1` performs verified
   physical erasure for supported stores.

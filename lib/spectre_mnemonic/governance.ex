@@ -10,6 +10,12 @@ defmodule SpectreMnemonic.Governance do
 
   use GenServer
 
+  alias SpectreMnemonic.Active.ETS
+  alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Engine
+  alias SpectreMnemonic.Engine.Config
+  alias SpectreMnemonic.Engine.Context
+  alias SpectreMnemonic.Engine.Ref
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Persistence.Manager
@@ -22,6 +28,7 @@ defmodule SpectreMnemonic.Governance do
   @fact_attributes ~w(email phone age status birthday deadline owner)
   @default_stale_after_ms 30 * 24 * 60 * 60 * 1_000
   @repeatable_reasons [:fact_verified, :observation_verified, :manual_verification]
+  @registry SpectreMnemonic.Engine.Registry
 
   @transitions %{
     candidate: [:short_term, :promoted, :pinned, :stale, :contradicted, :forgotten],
@@ -37,8 +44,17 @@ defmodule SpectreMnemonic.Governance do
           :candidate | :short_term | :promoted | :pinned | :stale | :contradicted | :forgotten
 
   @doc false
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  @spec start_link(Config.t()) :: GenServer.on_start()
+  def start_link(%Config{} = config), do: GenServer.start_link(__MODULE__, config)
+
+  @doc false
+  @spec child_spec(Config.t()) :: Supervisor.child_spec()
+  def child_spec(%Config{} = config) do
+    %{
+      id: {__MODULE__, config.ref},
+      start: {__MODULE__, :start_link, [config]}
+    }
+  end
 
   @doc "Returns known lifecycle states."
   @spec states() :: [state()]
@@ -241,8 +257,9 @@ defmodule SpectreMnemonic.Governance do
   @spec append_state(binary(), state(), atom(), keyword(), map()) :: :ok | {:error, term()}
   def append_state(memory_id, state, reason, opts \\ [], metadata \\ %{}) do
     with {:ok, opts} <- Identity.put_namespace(opts),
-         {:ok, metadata} <- normalize_metadata(metadata) do
-      GenServer.call(__MODULE__, {:append_state, memory_id, state, reason, opts, metadata})
+         {:ok, metadata} <- normalize_metadata(metadata),
+         {:ok, server} <- server(opts) do
+      GenServer.call(server, {:append_state, memory_id, state, reason, opts, metadata})
     end
   end
 
@@ -254,10 +271,17 @@ defmodule SpectreMnemonic.Governance do
   def fact_claim(moment), do: from_text(moment)
 
   @impl GenServer
-  def init(_opts) do
-    case rebuild_materialized() do
-      :ok -> {:ok, %{}}
-      {:error, reason} -> {:stop, reason}
+  def init(%Config{} = config) do
+    with :ok <- ETS.attach(config.ref),
+         {:ok, _owner} <- Registry.register(@registry, {:governance, config.ref}, nil),
+         :ok <- rebuild_materialized(config) do
+      {:ok, %{config: config}}
+    else
+      {:error, {:already_registered, pid}} ->
+        {:stop, {:governance_already_started, config.ref, pid}}
+
+      {:error, reason} ->
+        {:stop, reason}
     end
   end
 
@@ -281,20 +305,7 @@ defmodule SpectreMnemonic.Governance do
               transition_metadata(current, metadata, target)
             )
 
-          case Manager.append(
-                 :memory_states,
-                 event,
-                 opts
-                 |> Keyword.put(:record_id, event.id)
-                 |> Keyword.put(:scope, event.scope)
-               ) do
-            {:ok, _result} ->
-              materialize(event)
-              :ok
-
-            {:error, reason} ->
-              {:error, reason}
-          end
+          append_transition(event, memory_id, target, opts)
 
         true ->
           {:error, {:invalid_memory_transition, current_state(current), target}}
@@ -309,13 +320,29 @@ defmodule SpectreMnemonic.Governance do
     kind, reason -> {:reply, {:error, {:governance_failed, kind, reason}}, server_state}
   end
 
-  @spec rebuild_materialized() :: :ok | {:error, term()}
-  defp rebuild_materialized do
-    :ets.delete_all_objects(@state_table)
-    :ets.delete_all_objects(@state_scope_table)
-    :ets.delete_all_objects(@fact_table)
+  @spec append_transition(map(), binary(), atom(), keyword()) :: :ok | {:error, term()}
+  defp append_transition(event, memory_id, target, opts) do
+    with :ok <- Focus.validate_pinned_transition(memory_id, target, opts),
+         {:ok, _result} <- Manager.append(:memory_states, event, transition_opts(event, opts)) do
+      materialize(event)
+      Focus.sync_pinned_accounting(memory_id, target, opts)
+    end
+  end
 
-    case Manager.replay_all() do
+  @spec transition_opts(map(), keyword()) :: keyword()
+  defp transition_opts(event, opts) do
+    opts
+    |> Keyword.put(:record_id, event.id)
+    |> Keyword.put(:scope, event.scope)
+  end
+
+  @spec rebuild_materialized(Config.t()) :: :ok | {:error, term()}
+  defp rebuild_materialized(config) do
+    ETS.delete_all_objects(@state_table)
+    ETS.delete_all_objects(@state_scope_table)
+    ETS.delete_all_objects(@fact_table)
+
+    case Manager.replay_all(engine_options(config)) do
       {:ok, records} ->
         records
         |> Enum.filter(&(&1.family == :memory_states))
@@ -344,8 +371,8 @@ defmodule SpectreMnemonic.Governance do
   @spec materialize(map()) :: :ok
   defp materialize(event) do
     key = state_key(event.namespace, event.scope, event.memory_id)
-    :ets.insert(@state_table, {key, event})
-    :ets.insert(@state_scope_table, {{event.namespace, event.scope}, event.memory_id})
+    ETS.insert(@state_table, {key, event})
+    ETS.insert(@state_scope_table, {{event.namespace, event.scope}, event.memory_id})
     materialize_fact(event)
     :ok
   end
@@ -358,7 +385,7 @@ defmodule SpectreMnemonic.Governance do
       event.state in @terminal_states ->
         case safe_lookup(@fact_table, key) do
           [{^key, %{memory_id: memory_id}}] when memory_id == event.memory_id ->
-            :ets.delete(@fact_table, key)
+            ETS.delete(@fact_table, key)
 
           _other ->
             :ok
@@ -368,7 +395,7 @@ defmodule SpectreMnemonic.Governance do
         :ok
 
       true ->
-        :ets.insert(@fact_table, {key, event})
+        ETS.insert(@fact_table, {key, event})
     end
 
     :ok
@@ -635,7 +662,7 @@ defmodule SpectreMnemonic.Governance do
 
   @spec safe_lookup(atom(), term()) :: list()
   defp safe_lookup(table, key) do
-    :ets.lookup(table, key)
+    ETS.lookup(table, key)
   rescue
     ArgumentError -> []
   end
@@ -645,16 +672,68 @@ defmodule SpectreMnemonic.Governance do
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
 
     @state_scope_table
-    |> :ets.lookup(partition)
+    |> ETS.lookup(partition)
     |> Enum.flat_map(fn {^partition, memory_id} ->
       key = state_key(elem(partition, 0), elem(partition, 1), memory_id)
 
-      case :ets.lookup(@state_table, key) do
+      case ETS.lookup(@state_table, key) do
         [{^key, event}] -> [event]
         [] -> []
       end
     end)
   rescue
     ArgumentError -> []
+  end
+
+  @spec server(keyword()) :: {:ok, pid()} | {:error, term()}
+  defp server(opts) do
+    with {:ok, ref} <- engine_ref(opts) do
+      case Registry.lookup(@registry, {:governance, ref}) do
+        [{pid, _value}] -> {:ok, pid}
+        [] -> {:error, :mnemonic_governance_unavailable}
+      end
+    end
+  rescue
+    ArgumentError -> {:error, :mnemonic_governance_unavailable}
+  end
+
+  @spec engine_ref(keyword()) :: {:ok, Ref.t()} | {:error, term()}
+  defp engine_ref(opts) do
+    case Keyword.get(opts, :engine_ref) do
+      %Ref{} = ref ->
+        {:ok, ref}
+
+      _missing ->
+        case Context.current() do
+          %{config: %{ref: %Ref{} = ref}} -> {:ok, ref}
+          _missing -> resolve_engine_ref(opts)
+        end
+    end
+  end
+
+  @spec resolve_engine_ref(keyword()) :: {:ok, Ref.t()} | {:error, term()}
+  defp resolve_engine_ref(opts) do
+    result =
+      case Keyword.get(opts, :namespace) do
+        namespace when is_binary(namespace) -> Engine.resolve_internal_namespace(namespace)
+        _missing -> Engine.resolve(SpectreMnemonic.DefaultEngine)
+      end
+
+    case result do
+      {:ok, runtime} -> {:ok, runtime.config.ref}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec engine_options(Config.t()) :: keyword()
+  defp engine_options(config) do
+    [
+      engine_ref: config.ref,
+      engine_internal?: true,
+      namespace: config.internal_namespace,
+      storage_id: config.storage_id,
+      data_root: config.data_root,
+      persistent_memory: config.persistent_memory
+    ]
   end
 end

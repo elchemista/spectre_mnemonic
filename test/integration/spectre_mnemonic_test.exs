@@ -12,6 +12,8 @@ defmodule SpectreMnemonic.IntegrationTest do
     Vector
   }
 
+  alias SpectreMnemonic.Embedding.ModelCache
+
   alias SpectreMnemonic.Intake.Packet
   alias SpectreMnemonic.Knowledge.Consolidation
   alias SpectreMnemonic.Knowledge.Record
@@ -717,7 +719,7 @@ defmodule SpectreMnemonic.IntegrationTest do
     assert_in_delta y, 0.447_214, 1.0e-5
 
     cache_key = {:artifacts, Path.expand(model_dir)}
-    assert [{^cache_key, %{model: %{data: data}}}] = :ets.lookup(:mnemonic_model_cache, cache_key)
+    assert %{model: %{data: data}} = ModelCache.get(cache_key)
     assert is_binary(data)
   after
     if model_dir = Process.get(:model_dir), do: File.rm_rf!(model_dir)

@@ -6,6 +6,7 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   `inserted_at`; the active ETS table is the materialized latest value.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Identity
   alias SpectreMnemonic.Memory.Association
@@ -59,7 +60,7 @@ defmodule SpectreMnemonic.Graph.Plasticity do
 
       partitions =
         :mnemonic_associations_by_scope
-        |> :ets.match({{namespace, :"$1"}, :_})
+        |> ETS.match({{namespace, :"$1"}, :_})
         |> Enum.map(fn [scope] -> {namespace, scope} end)
         |> Enum.uniq()
 
@@ -94,7 +95,7 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   @spec reweight_id(binary(), non_neg_integer(), keyword(), (float() -> float()), boolean()) ::
           {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, term()}}
   defp reweight_id(id, count, opts, fun, activated?) do
-    case :ets.lookup(:mnemonic_associations, id) do
+    case ETS.lookup(:mnemonic_associations, id) do
       [{^id, %Association{} = association}]
       when activated? and association.relation in @protected_relations ->
         {:cont, {:ok, count}}

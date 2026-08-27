@@ -12,6 +12,7 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Active.Router
   alias SpectreMnemonic.Atlas
+  alias SpectreMnemonic.Engine.Context, as: EngineContext
   alias SpectreMnemonic.Erasure
   alias SpectreMnemonic.Export
   alias SpectreMnemonic.Governance
@@ -34,6 +35,7 @@ defmodule SpectreMnemonic do
   alias SpectreMnemonic.Reflection
   alias SpectreMnemonic.SearchResult
   alias SpectreMnemonic.Secrets
+  alias SpectreMnemonic.Telemetry
 
   @doc """
   Records a new signal and routes it into a stream.
@@ -67,7 +69,9 @@ defmodule SpectreMnemonic do
           {:ok, Focus.record_result()}
           | {:error, term()}
   def signal(input, opts \\ []) do
-    Router.signal(input, opts)
+    Telemetry.span([:signal], Telemetry.metadata(opts), fn ->
+      EngineContext.with(opts, &Router.signal(input, &1))
+    end)
   end
 
   @doc """
@@ -109,7 +113,9 @@ defmodule SpectreMnemonic do
   @spec remember(input :: term(), opts :: keyword()) ::
           {:ok, Intake.Packet.t()} | {:error, term()}
   def remember(input, opts \\ []) do
-    Intake.remember(input, opts)
+    Telemetry.span([:remember], Telemetry.metadata(opts), fn ->
+      EngineContext.with(opts, &Intake.remember(input, &1))
+    end)
   end
 
   @doc """
@@ -132,8 +138,19 @@ defmodule SpectreMnemonic do
   @spec recall(cue :: term(), opts :: keyword()) ::
           {:ok, Packet.t()} | {:error, term()}
   def recall(cue, opts \\ []) do
-    Engine.recall(cue, opts)
+    Telemetry.span([:recall], Telemetry.metadata(opts), fn ->
+      EngineContext.with(opts, &Engine.recall(cue, &1))
+    end)
   end
+
+  @doc "Returns content-free health information for one Engine."
+  @spec health(
+          pid()
+          | atom()
+          | {:via, module(), term()}
+          | SpectreMnemonic.Engine.Ref.t()
+        ) :: {:ok, map()} | {:error, term()}
+  def health(engine), do: SpectreMnemonic.Engine.health(engine)
 
   @doc """
   Reveals a locked secret returned by recall.
@@ -155,7 +172,7 @@ defmodule SpectreMnemonic do
   """
   @spec reveal(Secret.t(), keyword()) :: {:ok, Secret.t()} | {:error, term()}
   def reveal(secret, opts \\ []) do
-    Secrets.reveal(secret, opts)
+    EngineContext.with(opts, &Secrets.reveal(secret, &1))
   end
 
   @doc """
@@ -176,6 +193,11 @@ defmodule SpectreMnemonic do
   @spec search(cue :: term(), opts :: keyword()) ::
           {:ok, [SearchResult.t()]} | {:error, term()}
   def search(cue, opts \\ []) do
+    EngineContext.with(opts, &do_search(cue, &1))
+  end
+
+  @spec do_search(term(), keyword()) :: {:ok, [SearchResult.t()]} | {:error, term()}
+  defp do_search(cue, opts) do
     # Search is the flat "give me candidates" door. Recall is richer, durable
     # search is wider, and this function glues them without pretending it wrote
     # the final answer. The model can do prose. The runtime brings receipts.
@@ -291,7 +313,7 @@ defmodule SpectreMnemonic do
   @spec consolidate_observations(keyword()) ::
           {:ok, [SpectreMnemonic.Memory.Observation.t()]} | {:error, term()}
   def consolidate_observations(opts \\ []) do
-    Observations.consolidate(opts)
+    EngineContext.with(opts, &Observations.consolidate/1)
   end
 
   @doc """
@@ -309,7 +331,7 @@ defmodule SpectreMnemonic do
   @spec search_observations(term(), keyword()) ::
           {:ok, [SpectreMnemonic.Memory.Observation.t() | map()]} | {:error, term()}
   def search_observations(cue, opts \\ []) do
-    Observations.search(cue, opts)
+    EngineContext.with(opts, &Observations.search(cue, &1))
   end
 
   @doc """
@@ -327,7 +349,7 @@ defmodule SpectreMnemonic do
   @spec verify_observation(binary() | SpectreMnemonic.Memory.Observation.t(), keyword()) ::
           {:ok, SpectreMnemonic.Memory.Observation.t()} | {:error, term()}
   def verify_observation(observation_or_id, opts \\ []) do
-    Observations.verify(observation_or_id, opts)
+    EngineContext.with(opts, &Observations.verify(observation_or_id, &1))
   end
 
   @doc """
@@ -348,7 +370,7 @@ defmodule SpectreMnemonic do
   @spec put_mental_model(term(), keyword()) ::
           {:ok, SpectreMnemonic.Memory.MentalModel.t()} | {:error, term()}
   def put_mental_model(input, opts \\ []) do
-    MentalModels.put(input, opts)
+    EngineContext.with(opts, &MentalModels.put(input, &1))
   end
 
   @doc """
@@ -362,7 +384,7 @@ defmodule SpectreMnemonic do
   @spec search_mental_models(term(), keyword()) ::
           {:ok, [SpectreMnemonic.Memory.MentalModel.t() | map()]} | {:error, term()}
   def search_mental_models(cue, opts \\ []) do
-    MentalModels.search(cue, opts)
+    EngineContext.with(opts, &MentalModels.search(cue, &1))
   end
 
   @doc """
@@ -388,7 +410,7 @@ defmodule SpectreMnemonic do
   @spec reflect(term(), keyword()) ::
           {:ok, SpectreMnemonic.Reflection.Packet.t()} | {:error, term()}
   def reflect(query, opts \\ []) do
-    Reflection.reflect(query, opts)
+    EngineContext.with(opts, &Reflection.reflect(query, &1))
   end
 
   @doc """
@@ -405,7 +427,7 @@ defmodule SpectreMnemonic do
   """
   @spec knowledge(keyword()) :: {:ok, Record.t()}
   def knowledge(opts \\ []) do
-    Base.load(opts)
+    EngineContext.with(opts, &Base.load/1)
   end
 
   @doc """
@@ -434,7 +456,7 @@ defmodule SpectreMnemonic do
   """
   @spec search_knowledge(cue :: term(), opts :: keyword()) :: {:ok, [map()]}
   def search_knowledge(cue, opts \\ []) do
-    Base.search(cue, opts)
+    EngineContext.with(opts, &Base.search(cue, &1))
   end
 
   @doc """
@@ -456,7 +478,7 @@ defmodule SpectreMnemonic do
   @spec learn(input :: term(), opts :: keyword()) ::
           {:ok, %{event: map(), seq: pos_integer()}} | {:error, term()}
   def learn(input, opts \\ []) do
-    Learning.learn(input, opts)
+    EngineContext.with(opts, &Learning.learn(input, &1))
   end
 
   @doc """
@@ -474,7 +496,7 @@ defmodule SpectreMnemonic do
   @spec compact_knowledge(keyword()) ::
           {:ok, %{events: [map()], count: non_neg_integer()}} | {:error, term()}
   def compact_knowledge(opts \\ []) do
-    Compact.compact_knowledge(opts)
+    EngineContext.with(opts, &Compact.compact_knowledge/1)
   end
 
   @doc """
@@ -488,7 +510,7 @@ defmodule SpectreMnemonic do
   """
   @spec status(stream_or_task_id :: term(), keyword()) :: {:ok, map()} | {:error, term()}
   def status(stream_or_task_id, opts \\ []) do
-    Focus.status(stream_or_task_id, opts)
+    EngineContext.with(opts, &Focus.status(stream_or_task_id, &1))
   end
 
   @doc """
@@ -505,7 +527,7 @@ defmodule SpectreMnemonic do
   @spec consolidate(opts :: keyword()) ::
           {:ok, [Record.t()]} | {:error, term()}
   def consolidate(opts \\ []) do
-    Consolidator.consolidate(opts)
+    EngineContext.with(opts, &Consolidator.consolidate/1)
   end
 
   @doc """
@@ -521,7 +543,7 @@ defmodule SpectreMnemonic do
   """
   @spec link(binary(), atom(), binary(), keyword()) :: {:ok, Association.t()} | {:error, term()}
   def link(source_id, relation, target_id, opts \\ []) do
-    Focus.link(source_id, relation, target_id, opts)
+    EngineContext.with(opts, &Focus.link(source_id, relation, target_id, &1))
   end
 
   @doc """
@@ -534,18 +556,23 @@ defmodule SpectreMnemonic do
   @spec merge_entities(binary(), binary(), keyword()) ::
           {:ok, Association.t()} | {:error, term()}
   def merge_entities(winner_id, loser_id, opts \\ []) do
-    Resolver.merge_entities(winner_id, loser_id, opts)
+    EngineContext.with(opts, &Resolver.merge_entities(winner_id, loser_id, &1))
   end
 
   @doc "Reverses one append-only entity merge by tombstoning its `:same_as` edge."
   @spec unmerge_entities(binary(), binary(), keyword()) :: :ok | {:error, term()}
   def unmerge_entities(winner_id, loser_id, opts \\ []) do
-    Resolver.unmerge_entities(winner_id, loser_id, opts)
+    EngineContext.with(opts, &Resolver.unmerge_entities(winner_id, loser_id, &1))
   end
 
   @doc "Returns the deterministic mind-map projection for one partition."
   @spec atlas(keyword()) :: {:ok, Atlas.t()} | {:error, term()}
   def atlas(opts \\ []) do
+    EngineContext.with(opts, &do_atlas/1)
+  end
+
+  @spec do_atlas(keyword()) :: {:ok, Atlas.t()} | {:error, term()}
+  defp do_atlas(opts) do
     if Keyword.get(opts, :recluster, false) do
       with {:ok, _clusters} <- Atlas.materialize(opts), do: Atlas.build(opts)
     else
@@ -556,15 +583,21 @@ defmodule SpectreMnemonic do
   @doc "Physically erases one explicitly named namespace/scope partition."
   @spec erase_partition(keyword()) ::
           {:ok, SpectreMnemonic.Erasure.Report.t()} | {:error, term()}
-  def erase_partition(opts), do: Erasure.erase_partition(opts)
+  def erase_partition(opts) do
+    if Keyword.has_key?(opts, :engine) or Keyword.has_key?(opts, :namespace) do
+      EngineContext.with(opts, &Erasure.erase_partition/1)
+    else
+      Erasure.erase_partition(opts)
+    end
+  end
 
   @doc "Forgets active records in one partition whose validity window expired."
   @spec sweep_expired(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def sweep_expired(opts \\ []), do: Erasure.sweep_expired(opts)
+  def sweep_expired(opts \\ []), do: EngineContext.with(opts, &Erasure.sweep_expired/1)
 
   @doc "Writes one partition as a verified `.mnemonic` file."
   @spec export(Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def export(path, opts \\ []), do: Export.write(path, opts)
+  def export(path, opts \\ []), do: EngineContext.with(opts, &Export.write(path, &1))
 
   @doc """
   Stores an artifact reference or binary payload.
@@ -589,7 +622,7 @@ defmodule SpectreMnemonic do
              }}
           | {:error, term()}
   def artifact(path_or_binary, opts \\ []) do
-    Focus.artifact(path_or_binary, opts)
+    EngineContext.with(opts, &Focus.artifact(path_or_binary, &1))
   end
 
   @doc """
@@ -611,6 +644,6 @@ defmodule SpectreMnemonic do
   """
   @spec forget(Focus.selector(), keyword()) :: {:ok, non_neg_integer()}
   def forget(selector, opts \\ []) do
-    Focus.forget(selector, opts)
+    EngineContext.with(opts, &Focus.forget(selector, &1))
   end
 end

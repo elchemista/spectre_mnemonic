@@ -7,6 +7,7 @@ defmodule SpectreMnemonic.Atlas do
   titles, layout hints, and statistics without a model adapter.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
@@ -117,7 +118,7 @@ defmodule SpectreMnemonic.Atlas do
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
 
     :mnemonic_atlas_dirty
-    |> :ets.lookup(partition)
+    |> ETS.lookup(partition)
     |> Enum.map(fn {^partition, id} -> id end)
     |> Enum.uniq()
     |> Enum.sort()
@@ -201,14 +202,14 @@ defmodule SpectreMnemonic.Atlas do
     claimed = Enum.take(ids, limit)
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
 
-    Enum.each(claimed, &:ets.delete_object(:mnemonic_atlas_dirty, {partition, &1}))
+    Enum.each(claimed, &ETS.delete_object(:mnemonic_atlas_dirty, {partition, &1}))
     claimed
   end
 
   @spec restore_dirty([binary()], keyword()) :: :ok
   defp restore_dirty(ids, opts) do
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
-    Enum.each(ids, &:ets.insert(:mnemonic_atlas_dirty, {partition, &1}))
+    Enum.each(ids, &ETS.insert(:mnemonic_atlas_dirty, {partition, &1}))
   end
 
   @spec build_from_nodes([term()], keyword()) :: {:ok, t()} | {:error, term()}

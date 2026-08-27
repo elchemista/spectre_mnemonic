@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.MemoryLifecycleTest do
   use SpectreMnemonic.MemoryCase
 
+  alias SpectreMnemonic.Active.ETS, as: ActiveETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Atlas
   alias SpectreMnemonic.Embedding.Service
@@ -105,9 +106,17 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     assert Enum.any?(rest, &(&1.id == miss.id))
     refute Enum.any?([first | rest], &(&1.id == outside.id))
 
-    state = :sys.get_state(RecallIndex)
-    assert Map.has_key?(state.vettore, {@namespace, scope})
-    assert Map.has_key?(state.vettore, {@namespace, neighbor})
+    state = :sys.get_state(RecallIndex.server(@namespace))
+
+    assert Enum.any?(Map.keys(state.vettore), fn
+             {@namespace, ^scope, _space_id} -> true
+             _other -> false
+           end)
+
+    assert Enum.any?(Map.keys(state.vettore), fn
+             {@namespace, ^neighbor, _space_id} -> true
+             _other -> false
+           end)
   end
 
   test "active ANN is rebuilt from ETS after the index process restarts" do
@@ -123,12 +132,14 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     assert {:ok, [%{id: id} | _]} = RecallIndex.query(cue, scope: scope)
     assert id == moment.id
 
-    assert :ok = Supervisor.terminate_child(SpectreMnemonic.Supervisor, RecallIndex)
-    assert {:ok, _pid} = Supervisor.restart_child(SpectreMnemonic.Supervisor, RecallIndex)
+    {:ok, runtime} = SpectreMnemonic.Engine.resolve(SpectreMnemonic.DefaultEngine)
+    child_id = {RecallIndex, runtime.config.ref}
+    assert :ok = Supervisor.terminate_child(runtime.engine_pid, child_id)
+    assert {:ok, _pid} = Supervisor.restart_child(runtime.engine_pid, child_id)
 
     assert {:ok, [%{id: rebuilt_id} | _]} = RecallIndex.query(cue, scope: scope)
     assert rebuilt_id == moment.id
-    assert :ets.member(:mnemonic_embedding_index, moment.id)
+    assert :ets.member(RecallIndex.tables().index, moment.id)
   end
 
   test "semantic similarity creates a useful cross-memory graph edge" do
@@ -241,8 +252,14 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     refute Enum.any?(remaining, &(&1.id == match.id))
     assert Enum.any?(remaining, &(&1.id == other.id))
 
-    :ets.delete(:mnemonic_embedding_index, other.id)
-    assert {:ok, []} = RecallIndex.query(replacement, scope: scope, overfetch: 2)
+    tables = RecallIndex.tables()
+    assert :ets.info(tables.index, :protection) == :protected
+
+    assert_raise ArgumentError, fn ->
+      :ets.delete(tables.index, other.id)
+    end
+
+    assert {:ok, [_remaining]} = RecallIndex.query(replacement, scope: scope, overfetch: 2)
 
     fallback_scope = {:subject, "vettore-unavailable-index"}
 
@@ -341,12 +358,12 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     assert {:error, :entity_merge_cycle} =
              SpectreMnemonic.merge_entities(bob.id, alice.id, scope: scope)
 
-    :ets.delete_all_objects(:mnemonic_entity_registry)
+    ActiveETS.delete_all_objects(:mnemonic_entity_registry)
     assert {:ok, redirected} = Resolver.resolve("bob", [], scope: scope)
     assert redirected.id == alice.id
 
     assert :ok = SpectreMnemonic.unmerge_entities(alice.id, bob.id, scope: scope)
-    :ets.delete_all_objects(:mnemonic_entity_registry)
+    ActiveETS.delete_all_objects(:mnemonic_entity_registry)
     assert {:ok, restored_bob} = Resolver.resolve("bob", [], scope: scope)
     assert restored_bob.id == bob.id
 
@@ -405,9 +422,9 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     partition = {@namespace, scope}
 
     assert :miss = Resolver.resolve("Nobody", [], scope: scope)
-    :ets.insert(:mnemonic_entity_registry, {{partition, "ghost"}, "missing"})
+    ActiveETS.insert(:mnemonic_entity_registry, {{partition, "ghost"}, "missing"})
     assert :miss = Resolver.resolve("ghost", [], scope: scope)
-    assert :ets.lookup(:mnemonic_entity_registry, {partition, "ghost"}) == []
+    assert ActiveETS.lookup(:mnemonic_entity_registry, {partition, "ghost"}) == []
     assert {:error, :not_an_entity} = Resolver.register(%Moment{kind: :text})
     assert Resolver.signal_for(%Moment{signal_id: "missing"}) == nil
 
@@ -416,7 +433,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     alice =
       Enum.find(packet.moments, &(&1.kind == :memory_entity and &1.metadata.canonical == "alice"))
 
-    :ets.match_delete(:mnemonic_entity_registry, {{partition, :_}, :_})
+    ActiveETS.match_delete(:mnemonic_entity_registry, {{partition, :_}, :_})
     assert {:ok, seeded} = Resolver.resolve("alice", [], scope: scope)
     assert seeded.id == alice.id
 
@@ -807,7 +824,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
     {:ok, %{moment: old}} = SpectreMnemonic.signal("old history", scope: scope, persist?: true)
 
     assert {:ok, report} =
-             SpectreMnemonic.erase_partition(namespace: @namespace, scope: scope)
+             SpectreMnemonic.erase_partition(namespace: @namespace, scope: scope, sealed: false)
 
     refute report.already_erased?
 
@@ -875,7 +892,7 @@ defmodule SpectreMnemonic.MemoryLifecycleTest do
   end
 
   defp association(id) do
-    [{^id, association}] = :ets.lookup(:mnemonic_associations, id)
+    [{^id, association}] = ActiveETS.lookup(:mnemonic_associations, id)
     association
   end
 

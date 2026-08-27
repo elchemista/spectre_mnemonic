@@ -8,6 +8,7 @@ defmodule SpectreMnemonic.Observations do
   and lifecycle state.
   """
 
+  alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
   alias SpectreMnemonic.Embedding.Service
   alias SpectreMnemonic.Governance
@@ -116,7 +117,7 @@ defmodule SpectreMnemonic.Observations do
 
   def verify(id, opts) when is_binary(id) do
     with {:ok, opts} <- Identity.put_namespace(opts) do
-      case :ets.lookup(@observation_table, id) do
+      case ETS.lookup(@observation_table, id) do
         [{^id, observation}] -> verify(observation, opts)
         [] -> {:error, :not_found}
       end
@@ -215,23 +216,23 @@ defmodule SpectreMnemonic.Observations do
 
   @spec put_hot_observation(Observation.t()) :: true
   defp put_hot_observation(observation) do
-    case :ets.lookup(@observation_table, observation.id) do
+    case ETS.lookup(@observation_table, observation.id) do
       [{_id, existing}] ->
-        :ets.delete_object(@observation_scope_table, {Scope.partition(existing), observation.id})
+        ETS.delete_object(@observation_scope_table, {Scope.partition(existing), observation.id})
 
       [] ->
         :ok
     end
 
-    :ets.insert(@observation_table, {observation.id, observation})
-    :ets.insert(@observation_scope_table, {Scope.partition(observation), observation.id})
+    ETS.insert(@observation_table, {observation.id, observation})
+    ETS.insert(@observation_scope_table, {Scope.partition(observation), observation.id})
   end
 
   @spec scoped_observations(keyword()) :: [Observation.t()]
   defp scoped_observations(opts) do
     partition = {Identity.namespace!(opts), Keyword.get(opts, :scope)}
 
-    case :ets.lookup(@observation_scope_table, partition) do
+    case ETS.lookup(@observation_scope_table, partition) do
       [] -> legacy_scoped_observations(partition)
       rows -> scoped_observation_rows(rows, partition)
     end
@@ -242,7 +243,7 @@ defmodule SpectreMnemonic.Observations do
   @spec scoped_observation_rows(list(), tuple()) :: [Observation.t()]
   defp scoped_observation_rows(rows, partition) do
     Enum.flat_map(rows, fn {^partition, id} ->
-      case :ets.lookup(@observation_table, id) do
+      case ETS.lookup(@observation_table, id) do
         [{^id, observation}] -> [observation]
         [] -> []
       end
@@ -251,7 +252,7 @@ defmodule SpectreMnemonic.Observations do
 
   @spec legacy_scoped_observations(tuple()) :: [Observation.t()]
   defp legacy_scoped_observations(partition) do
-    :ets.foldl(
+    ETS.foldl(
       fn {_id, observation}, matches ->
         if Scope.partition(observation) == partition, do: [observation | matches], else: matches
       end,
@@ -384,7 +385,7 @@ defmodule SpectreMnemonic.Observations do
 
   @spec merge_manual_verification(Observation.t(), keyword()) :: Observation.t()
   defp merge_manual_verification(%Observation{} = fresh, opts) do
-    with [{_id, %Observation{} = existing}] <- :ets.lookup(@observation_table, fresh.id),
+    with [{_id, %Observation{} = existing}] <- ETS.lookup(@observation_table, fresh.id),
          true <- Scope.match?(existing, Keyword.put(opts, :scope, fresh.scope)),
          [_ | _] = manual <- Enum.filter(existing.evidence, &manual_verification?/1) do
       apply_manual_verification(fresh, manual)

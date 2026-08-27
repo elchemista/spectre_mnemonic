@@ -18,6 +18,7 @@ defmodule SpectreMnemonic.Recall.Packet do
           action_recipes: [SpectreMnemonic.Memory.ActionRecipe.t()],
           trace: %{optional(binary()) => map()} | nil,
           confidence: float(),
+          diagnostics: map(),
           usage: map()
         }
 
@@ -36,6 +37,7 @@ defmodule SpectreMnemonic.Recall.Packet do
     action_recipes: [],
     trace: nil,
     confidence: 0.0,
+    diagnostics: %{},
     usage: %{}
   ]
 end

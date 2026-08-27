@@ -14,13 +14,30 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   @algorithm :aes_256_gcm
   @iv_bytes 12
   @key_bytes 32
+  @crypto_version 1
+  @aad_version 2
   @aad_prefix "spectre-mnemonic-secret:v2:"
 
   @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def encrypt(plaintext, context, opts) when is_binary(plaintext) do
     # AES-GCM is intentionally boring here: random IV, AAD from stable ids, and
     # no homebrew crypto dance. La sicurezza non fa cabaret.
-    with {:ok, key} <- key(context, opts) do
+    key_id = key_id(opts)
+    key_version = positive_version(Keyword.get(opts, :key_version), 1)
+    crypto_version = positive_version(Keyword.get(opts, :crypto_version), @crypto_version)
+    aad_version = positive_version(Keyword.get(opts, :aad_version), @aad_version)
+
+    versioned_context =
+      Map.merge(context, %{
+        key_id: key_id,
+        key_version: key_version,
+        crypto_version: crypto_version,
+        aad_version: aad_version
+      })
+
+    with :ok <- supported_crypto_version(crypto_version),
+         :ok <- supported_aad_version(aad_version),
+         {:ok, key} <- key(versioned_context, opts) do
       iv = :crypto.strong_rand_bytes(@iv_bytes)
       aad = context_aad(context)
 
@@ -30,6 +47,10 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
       {:ok,
        %{
          algorithm: @algorithm,
+         key_id: key_id,
+         key_version: key_version,
+         crypto_version: crypto_version,
+         aad_version: aad_version,
          ciphertext: ciphertext,
          iv: iv,
          tag: tag,
@@ -46,9 +67,19 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
 
   @impl SpectreMnemonic.Secrets.Crypto.Adapter
   def decrypt(%Secret{} = secret, context, opts) do
+    versioned_context =
+      Map.merge(context, %{
+        key_id: secret.key_id || key_id(opts),
+        key_version: secret.key_version || positive_version(Keyword.get(opts, :key_version), 1),
+        crypto_version: secret.crypto_version || @crypto_version,
+        aad_version: secret.aad_version || aad_version(secret.aad)
+      })
+
     with :ok <- supported_algorithm(secret.algorithm),
+         :ok <- supported_crypto_version(secret.crypto_version),
+         :ok <- supported_aad_version(secret.aad_version),
          :ok <- matching_aad(secret.aad, context),
-         {:ok, key} <- key(context, opts) do
+         {:ok, key} <- key(versioned_context, opts) do
       case :crypto.crypto_one_time_aead(
              :aes_256_gcm,
              key,
@@ -99,6 +130,23 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   defp normalize_key(nil), do: {:error, :secret_key_not_configured}
   defp normalize_key(_other), do: {:error, {:invalid_secret_key, expected_bytes: @key_bytes}}
 
+  @spec key_id(keyword()) :: binary()
+  defp key_id(opts) do
+    case Keyword.get(opts, :key_id, "default") do
+      value when is_binary(value) and value != "" -> value
+      value when is_atom(value) and not is_nil(value) -> Atom.to_string(value)
+      _invalid -> "default"
+    end
+  end
+
+  @spec positive_version(term(), pos_integer()) :: pos_integer()
+  defp positive_version(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_version(_value, default), do: default
+
+  @spec aad_version(binary()) :: pos_integer()
+  defp aad_version(@aad_prefix <> _digest), do: @aad_version
+  defp aad_version(_legacy), do: 1
+
   @doc false
   @spec context_aad(map()) :: binary()
   def context_aad(context) do
@@ -123,6 +171,16 @@ defmodule SpectreMnemonic.Secrets.Crypto.AESGCM do
   @spec supported_algorithm(atom()) :: :ok | {:error, term()}
   defp supported_algorithm(@algorithm), do: :ok
   defp supported_algorithm(other), do: {:error, {:unsupported_secret_algorithm, other}}
+
+  @spec supported_crypto_version(term()) :: :ok | {:error, term()}
+  defp supported_crypto_version(version) when version in [nil, @crypto_version], do: :ok
+
+  defp supported_crypto_version(version),
+    do: {:error, {:unsupported_secret_crypto_version, version}}
+
+  @spec supported_aad_version(term()) :: :ok | {:error, term()}
+  defp supported_aad_version(version) when version in [nil, 1, @aad_version], do: :ok
+  defp supported_aad_version(version), do: {:error, {:unsupported_secret_aad_version, version}}
 
   @spec matching_aad(term(), map()) :: :ok | {:error, :secret_context_mismatch}
   defp matching_aad(stored, context) when is_binary(stored) do

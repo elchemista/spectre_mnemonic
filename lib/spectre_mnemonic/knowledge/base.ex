@@ -5,6 +5,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
   alias SpectreMnemonic.Governance
   alias SpectreMnemonic.Identity
+  alias SpectreMnemonic.Knowledge.Projection
   alias SpectreMnemonic.Knowledge.Record
   alias SpectreMnemonic.Knowledge.SMEM
   alias SpectreMnemonic.QueryContext
@@ -94,7 +95,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
   def events(opts \\ []) do
     with {:ok, opts} <- Identity.put_namespace(opts),
          cfg = config(opts),
-         {:ok, events} <- SMEM.replay(cfg) do
+         {:ok, events} <- projected_events(cfg) do
       {:ok, visible_events(events, cfg)}
     end
   end
@@ -115,7 +116,7 @@ defmodule SpectreMnemonic.Knowledge.Base do
 
   @spec load_enabled(keyword()) :: {:ok, Record.t()} | {:error, term()}
   defp load_enabled(cfg) do
-    with {:ok, events} <- SMEM.replay(cfg) do
+    with {:ok, events} <- projected_events(cfg) do
       {:ok, build_packet(visible_events(events, cfg), cfg)}
     end
   end
@@ -132,10 +133,11 @@ defmodule SpectreMnemonic.Knowledge.Base do
   @spec search_enabled(term(), keyword(), keyword()) ::
           {:ok, [SearchResult.t()]} | {:error, term()}
   defp search_enabled(cue, opts, cfg) do
-    with {:ok, events} <- SMEM.replay(cfg) do
+    query = cue_text(cue)
+    query_terms = query |> terms() |> MapSet.new()
+
+    with {:ok, events} <- projected_candidates(MapSet.to_list(query_terms), cfg) do
       limit = search_limit(opts)
-      query = cue_text(cue)
-      query_terms = query |> terms() |> MapSet.new()
 
       results =
         events
@@ -147,6 +149,22 @@ defmodule SpectreMnemonic.Knowledge.Base do
         |> Enum.take(limit)
 
       {:ok, results}
+    end
+  end
+
+  @spec projected_events(keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp projected_events(cfg) do
+    case Projection.events(cfg) do
+      {:ok, events, _metadata} -> {:ok, events}
+      {:error, _reason} -> SMEM.replay(cfg)
+    end
+  end
+
+  @spec projected_candidates([binary()], keyword()) :: {:ok, [map()]} | {:error, term()}
+  defp projected_candidates(terms, cfg) do
+    case Projection.candidates(terms, cfg) do
+      {:ok, events, _metadata} -> {:ok, events}
+      {:error, _reason} -> SMEM.replay(cfg)
     end
   end
 

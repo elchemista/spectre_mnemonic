@@ -3,7 +3,7 @@ defmodule SpectreMnemonic.MixProject do
 
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/elchemista/spectre_mnemonic"
 
   @spec project :: keyword()
@@ -27,6 +27,7 @@ defmodule SpectreMnemonic.MixProject do
           "docs/MEMORY_GUIDE.md",
           "docs/RETRIEVAL_AND_KNOWLEDGE.md",
           "docs/PERSISTENCE_AND_OPERATIONS.md",
+          "docs/MIGRATING_TO_0_2.md",
           "docs/PRIVACY_AND_GDPR.md",
           "docs/API_GUIDE.md",
           "docs/PUBLIC_API.md",
@@ -41,6 +42,7 @@ defmodule SpectreMnemonic.MixProject do
             "docs/MEMORY_GUIDE.md",
             "docs/RETRIEVAL_AND_KNOWLEDGE.md",
             "docs/PERSISTENCE_AND_OPERATIONS.md",
+            "docs/MIGRATING_TO_0_2.md",
             "docs/PRIVACY_AND_GDPR.md",
             "docs/API_GUIDE.md"
           ],
@@ -77,6 +79,7 @@ defmodule SpectreMnemonic.MixProject do
        only: :test,
        runtime: false},
       {:jason, "~> 1.4", optional: true},
+      {:telemetry, "~> 1.3", optional: true},
       {:tokenizers, "~> 0.5", optional: true},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
@@ -97,10 +100,10 @@ defmodule SpectreMnemonic.MixProject do
   defp spectre_dep do
     case System.get_env("SPECTRE_PATH") do
       path when is_binary(path) and path != "" ->
-        {:spectre, path: Path.expand(path, __DIR__), override: true}
+        {:spectre, path: Path.expand(path, __DIR__), override: true, optional: true}
 
       _unset ->
-        {:spectre, "~> 0.3.3"}
+        {:spectre, "~> 0.3.3", optional: true}
     end
   end
 end

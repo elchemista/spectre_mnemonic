@@ -21,7 +21,9 @@ defmodule SpectreMnemonic.Embedding.Service do
   """
 
   alias SpectreMnemonic.Embedding.BinaryQuantizer
+  alias SpectreMnemonic.Embedding.Space
   alias SpectreMnemonic.Embedding.Vector
+  alias SpectreMnemonic.Telemetry
 
   @doc """
   Normalizes a caller embedding or embeds input through a configured provider.
@@ -47,7 +49,7 @@ defmodule SpectreMnemonic.Embedding.Service do
   """
   @spec embed(input :: term(), opts :: keyword()) :: map()
   def embed(input, opts) do
-    do_embed(input, opts)
+    Telemetry.span([:embedding], Telemetry.metadata(opts), fn -> do_embed(input, opts) end)
   rescue
     exception -> failed(exception)
   catch
@@ -73,9 +75,14 @@ defmodule SpectreMnemonic.Embedding.Service do
   @spec direct_embedding(keyword()) :: {:ok, term()} | {:error, term()} | :missing
   defp direct_embedding(opts) do
     cond do
-      Keyword.has_key?(opts, :embedding) -> normalize_direct_embedding(opts[:embedding])
-      Keyword.has_key?(opts, :vector) -> normalize_direct_embedding(%{vector: opts[:vector]})
-      true -> :missing
+      Keyword.has_key?(opts, :embedding) ->
+        normalize_direct_embedding(opts[:embedding])
+
+      Keyword.has_key?(opts, :vector) ->
+        normalize_direct_embedding(%{vector: opts[:vector], metadata: %{provider: :caller}})
+
+      true ->
+        :missing
     end
   end
 
@@ -83,7 +90,17 @@ defmodule SpectreMnemonic.Embedding.Service do
   defp normalize_direct_embedding(vector) when is_list(vector) or is_binary(vector),
     do: {:ok, %{vector: vector, metadata: %{provider: :caller}}}
 
-  defp normalize_direct_embedding(%{} = embedding), do: {:ok, embedding}
+  defp normalize_direct_embedding(%{} = embedding) do
+    metadata =
+      case fetch_key(embedding, :metadata) do
+        value when is_map(value) -> value
+        _missing -> %{}
+      end
+
+    provider = fetch_key(embedding, :provider) || fetch_key(metadata, :provider) || :caller
+    {:ok, Map.put(embedding, :metadata, Map.put(metadata, :provider, provider))}
+  end
+
   defp normalize_direct_embedding(_embedding), do: {:error, :invalid_embedding}
 
   @spec normalize_direct_result(term(), keyword()) :: map()
@@ -91,7 +108,8 @@ defmodule SpectreMnemonic.Embedding.Service do
     case normalize_result(embedding, opts) do
       %{vector: vector, metadata: metadata} = normalized
       when is_binary(vector) and byte_size(vector) > 0 ->
-        %{normalized | metadata: Map.put_new(metadata, :provider, :caller)}
+        provider = Map.get(metadata, :provider) || :caller
+        %{normalized | metadata: Map.put(metadata, :provider, provider)}
 
       _invalid ->
         failed(:invalid_embedding)
@@ -100,11 +118,14 @@ defmodule SpectreMnemonic.Embedding.Service do
 
   @spec embed_with_configured_provider(term(), keyword()) :: map()
   defp embed_with_configured_provider(input, opts) do
-    adapter = Application.get_env(:spectre_mnemonic, :embedding_adapter)
+    config = configured_embedding(opts)
+
+    adapter =
+      Keyword.get(config, :adapter) || Application.get_env(:spectre_mnemonic, :embedding_adapter)
 
     cond do
       not is_nil(adapter) -> embed_with_adapter(adapter, input, opts)
-      fast_enabled?() -> embed_with_fast_provider(input, opts)
+      fast_enabled?(opts) -> embed_with_fast_provider(input, opts)
       true -> empty()
     end
   end
@@ -121,8 +142,10 @@ defmodule SpectreMnemonic.Embedding.Service do
 
   @spec embed_with_fast_provider(term(), keyword()) :: map()
   defp embed_with_fast_provider(input, opts) do
-    provider = Keyword.get(fast_config(), :provider, SpectreMnemonic.Embedding.Model2VecStatic)
-    provider_opts = Keyword.merge(fast_config(), opts)
+    provider =
+      Keyword.get(fast_config(opts), :provider, SpectreMnemonic.Embedding.Model2VecStatic)
+
+    provider_opts = Keyword.merge(fast_config(opts), opts)
 
     if provider_available?(provider),
       do: call_fast_provider(provider, input, provider_opts),
@@ -185,14 +208,18 @@ defmodule SpectreMnemonic.Embedding.Service do
       fetch_key(result, :binary_signature) ||
         BinaryQuantizer.quantize(normalized, bits: signature_bits)
 
-    metadata = metadata(result, dimensions, signature_bits, opts)
+    if dimensions > max_dimensions(opts) do
+      failed({:mnemonic_limit_exceeded, :max_vector_dimensions})
+    else
+      metadata = metadata(result, dimensions, signature_bits, opts)
 
-    %{
-      vector: normalized,
-      binary_signature: signature,
-      metadata: metadata,
-      error: fetch_key(result, :error)
-    }
+      %{
+        vector: normalized,
+        binary_signature: signature,
+        metadata: metadata,
+        error: fetch_key(result, :error)
+      }
+    end
   end
 
   defp normalize_result(vector, opts) when is_list(vector) do
@@ -221,30 +248,45 @@ defmodule SpectreMnemonic.Embedding.Service do
 
     result_metadata = normalize_metadata(fetch_key(result, :metadata))
 
-    %{
-      format: :f32_binary,
-      dimensions: dimensions,
-      model: fetch_key(result, :model) || Keyword.get(opts, :model_id),
-      normalized: true,
-      signature_bits: signature_bits
-    }
-    |> Map.merge(inline_metadata)
-    |> Map.merge(result_metadata)
+    metadata =
+      %{
+        format: :f32_binary,
+        dimensions: dimensions,
+        provider: fetch_key(result, :provider) || Keyword.get(opts, :provider),
+        model: fetch_key(result, :model) || Keyword.get(opts, :model_id),
+        revision: fetch_key(result, :revision) || Keyword.get(opts, :revision),
+        normalization: Keyword.get(opts, :normalization, :l2),
+        quantizer_version: Keyword.get(opts, :quantizer_version, 1),
+        normalized: true,
+        signature_bits: signature_bits
+      }
+      |> Map.merge(inline_metadata)
+      |> Map.merge(result_metadata)
+
+    Map.put(metadata, :space_id, Space.id(metadata, opts))
   end
 
-  @spec fast_enabled? :: boolean()
-  defp fast_enabled? do
-    fast_config()
+  @spec fast_enabled?(keyword()) :: boolean()
+  defp fast_enabled?(opts) do
+    fast_config(opts)
     |> Keyword.get(:enabled, false)
     |> Kernel.==(true)
   end
 
-  @spec fast_config :: keyword()
-  defp fast_config do
-    :spectre_mnemonic
-    |> Application.get_env(:embedding, [])
+  @spec fast_config(keyword()) :: keyword()
+  defp fast_config(opts) do
+    opts
+    |> configured_embedding()
     |> normalize_config()
-    |> Keyword.get(:fast, [])
+    |> then(fn config -> Keyword.get(config, :fast, config) end)
+    |> normalize_config()
+  end
+
+  @spec configured_embedding(keyword()) :: keyword()
+  defp configured_embedding(opts) do
+    Keyword.get_lazy(opts, :embedding_config, fn ->
+      Application.get_env(:spectre_mnemonic, :embedding, [])
+    end)
     |> normalize_config()
   end
 
@@ -271,5 +313,13 @@ defmodule SpectreMnemonic.Embedding.Service do
   @spec fetch_key(map(), atom()) :: term()
   defp fetch_key(map, key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  @spec max_dimensions(keyword()) :: pos_integer()
+  defp max_dimensions(opts) do
+    case Keyword.get(opts, :max_vector_dimensions, 16_384) do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> 16_384
+    end
   end
 end

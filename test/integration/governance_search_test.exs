@@ -190,11 +190,7 @@ defmodule SpectreMnemonic.Integration.GovernanceSearchTest do
   end
 
   defp restart_scheduler do
-    supervisor = SpectreMnemonic.Supervisor
-
-    :ok = Supervisor.terminate_child(supervisor, ConsolidationScheduler)
-    {:ok, _pid} = Supervisor.restart_child(supervisor, ConsolidationScheduler)
-    :ok
+    ConsolidationScheduler.reload()
   end
 
   defp eventually(fun, attempts \\ 50)

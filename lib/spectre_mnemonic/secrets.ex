@@ -15,6 +15,7 @@ defmodule SpectreMnemonic.Secrets do
   alias SpectreMnemonic.Memory.Scope
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Secrets.Crypto.AESGCM
+  alias SpectreMnemonic.Telemetry
 
   @doc """
   Encrypts plaintext with the configured crypto adapter.
@@ -111,6 +112,28 @@ defmodule SpectreMnemonic.Secrets do
 
   def maybe_reveal(moment, _opts), do: moment
 
+  @doc "Authorizes a secret and exposes plaintext only for the duration of a callback."
+  @spec with_revealed(Secret.t(), keyword(), (binary() -> result)) ::
+          {:ok, result} | {:error, term()}
+        when result: term()
+  def with_revealed(%Secret{} = secret, opts \\ [], fun) when is_function(fun, 1) do
+    started_at = System.monotonic_time()
+
+    result =
+      try do
+        with {:ok, revealed} <- reveal(secret, opts) do
+          {:ok, fun.(revealed.text)}
+        end
+      rescue
+        exception -> {:error, {exception.__struct__, Exception.message(exception)}}
+      catch
+        kind, reason -> {:error, {kind, reason}}
+      end
+
+    emit_secret_reveal(result, started_at, opts)
+    result
+  end
+
   @doc """
   Returns the standard public reveal instruction stored on locked secrets.
 
@@ -143,6 +166,14 @@ defmodule SpectreMnemonic.Secrets do
     kind, reason -> {:error, {:secret_crypto_failed, :shred, {kind, reason}}}
   end
 
+  @doc false
+  @spec shred_report(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def shred_report(scope, opts \\ []) do
+    with {:ok, result} <- shred(scope, opts) do
+      {:ok, normalize_shred_report(result)}
+    end
+  end
+
   @spec call_shred(term(), map(), keyword()) :: {:ok, term()} | {:error, term()}
   defp call_shred(adapter, context, opts) do
     if is_atom(adapter) and Code.ensure_loaded?(adapter) and
@@ -157,6 +188,17 @@ defmodule SpectreMnemonic.Secrets do
 
   defp normalize_shred_result(other),
     do: {:error, {:unexpected_secret_crypto_result, :shred, other}}
+
+  @spec normalize_shred_report(term()) :: map()
+  defp normalize_shred_report(:unsupported),
+    do: %{supported?: false, performed?: false}
+
+  defp normalize_shred_report(%{supported?: supported?, performed?: performed?} = report)
+       when is_boolean(supported?) and is_boolean(performed?),
+       do: report
+
+  defp normalize_shred_report(result),
+    do: %{supported?: true, performed?: true, result: result}
 
   @spec crypto_adapter(keyword(), :encrypt | :decrypt) :: {:ok, module()} | {:error, term()}
   defp crypto_adapter(opts, operation) do
@@ -205,6 +247,10 @@ defmodule SpectreMnemonic.Secrets do
       signal_id: secret.signal_id,
       label: secret.label,
       metadata: secret.metadata,
+      key_id: secret.key_id,
+      key_version: secret.key_version,
+      crypto_version: secret.crypto_version,
+      aad_version: secret.aad_version,
       authorization_context: Keyword.get(opts, :authorization_context)
     }
   end
@@ -299,6 +345,18 @@ defmodule SpectreMnemonic.Secrets do
         end)
 
     if valid?, do: :ok, else: {:error, :invalid_encrypted_secret}
+  end
+
+  @spec emit_secret_reveal(term(), integer(), keyword()) :: :ok
+  defp emit_secret_reveal(result, started_at, opts) do
+    Telemetry.emit(
+      [:secret, :reveal],
+      %{duration: System.monotonic_time() - started_at},
+      %{
+        engine_ref: Keyword.get(opts, :engine_ref),
+        outcome: if(match?({:ok, _value}, result), do: :ok, else: :error)
+      }
+    )
   end
 
   @spec adapter_failure(:encrypt | :decrypt, Exception.t()) :: {:error, term()}

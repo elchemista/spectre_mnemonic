@@ -1,6 +1,7 @@
 defmodule SpectreMnemonic.Memory.Scope do
   @moduledoc false
 
+  alias SpectreMnemonic.Active.BatchVisibility
   alias SpectreMnemonic.Identity
 
   @doc "Returns the scope option as-is so tuples, atoms, and binaries remain caller-owned."
@@ -34,7 +35,8 @@ defmodule SpectreMnemonic.Memory.Scope do
         requested_scope = from_opts(opts)
 
         validate_context(memory, namespace, requested_scope) == :ok and
-          namespace(memory) == namespace and scope(memory) == requested_scope
+          namespace(memory) == namespace and scope(memory) == requested_scope and
+          BatchVisibility.visible?(memory)
 
       {:error, _reason} ->
         false
@@ -47,7 +49,7 @@ defmodule SpectreMnemonic.Memory.Scope do
     case Identity.fetch_namespace(opts) do
       {:ok, namespace} ->
         validate_context(memory, namespace, scope(memory)) == :ok and
-          namespace(memory) == namespace
+          namespace(memory) == namespace and BatchVisibility.visible?(memory)
 
       {:error, _reason} ->
         false

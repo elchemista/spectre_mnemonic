@@ -5,12 +5,14 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   alias SpectreMnemonic.Memory.Secret
   alias SpectreMnemonic.Persistence.FramedLog
   alias SpectreMnemonic.Persistence.Manager
+  alias SpectreMnemonic.Persistence.RepairQueue
   alias SpectreMnemonic.Persistence.Store.Codec
   alias SpectreMnemonic.Persistence.Store.File, as: StoreFile
   alias SpectreMnemonic.Persistence.Store.Mongo
   alias SpectreMnemonic.Persistence.Store.Postgres
   alias SpectreMnemonic.Persistence.Store.Record
   alias SpectreMnemonic.Persistence.Store.S3
+  alias SpectreMnemonic.Persistence.WriteReceipt
 
   test "writes to primary and duplicate stores but skips duplicate false stores" do
     configure_stores([
@@ -62,11 +64,14 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       store(:secondary, fail: :secondary_down)
     ])
 
-    assert {:ok, %{stores: stores}} = Manager.append(:moments, %{id: "mom_1"})
-    assert Enum.any?(stores, &(&1.store == :secondary and &1.result == {:error, :secondary_down}))
+    assert {:ok, %WriteReceipt{} = receipt} = Manager.append(:moments, %{id: "mom_1"})
+    assert receipt.primary == :committed
+    assert receipt.replicas == %{secondary: :pending}
+    assert receipt.repair_required?
+    assert_receive {:fake_put, :secondary, %Record{family: :moments}}
   end
 
-  test "strict mode fails when any selected store fails" do
+  test "strict mode cannot turn a committed primary into an ambiguous error" do
     configure_stores(
       [
         store(:primary, role: :primary),
@@ -75,10 +80,27 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       failure_mode: :strict
     )
 
-    assert {:error, {:persistent_memory_failed, failures}} =
-             Manager.append(:moments, %{id: "mom_1"})
+    assert {:ok, %WriteReceipt{} = receipt} = Manager.append(:moments, %{id: "mom_1"})
+    assert receipt.status == :committed
+    assert receipt.primary == :committed
+    assert receipt.replicas.secondary == :pending
+  end
 
-    assert [%{store: :secondary, result: {:error, :secondary_down}}] = failures
+  test "a slow replica is dispatched after the primary receipt without blocking it" do
+    configure_stores([
+      store(:primary, role: :primary),
+      store(:slow_replica, delay: 250)
+    ])
+
+    assert {:ok, %WriteReceipt{} = receipt} =
+             Manager.append(:moments, %{id: "non-blocking-replica"})
+
+    assert receipt.primary == :committed
+    assert receipt.replicas == %{slow_replica: :pending}
+    refute_received {:fake_put, :slow_replica, %Record{family: :moments}}
+    assert_receive {:fake_put, :slow_replica, %Record{family: :moments}}, 1_000
+
+    assert eventually(fn -> RepairQueue.summary().completed == 1 end)
   end
 
   test "append rejects conflicting atom and string scope declarations" do
@@ -106,6 +128,110 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     assert {:ok, records} = Manager.replay()
 
     assert Enum.count(records, &(&1.dedupe_key == "moments:put:mom_1")) == 1
+  end
+
+  test "operation ids produce durable idempotent receipts and reject divergent retries" do
+    configure_file_store()
+    opts = [operation_id: "turn-42", scope: {:account, "alice"}]
+
+    assert {:ok, %WriteReceipt{} = first} =
+             Manager.append(:moments, %{id: "preference", text: "email"}, opts)
+
+    assert first.status == :committed
+    assert first.primary == :committed
+    assert first.operation_id == "turn-42"
+    assert first.record.schema_version == 2
+    assert first.record.operation_id == "turn-42"
+    assert is_binary(first.record.digest)
+
+    Manager.reset_dedupe()
+
+    assert {:ok, %WriteReceipt{} = retried} =
+             Manager.append(:moments, %{id: "preference", text: "email"}, opts)
+
+    assert retried.idempotent?
+    assert retried.commit_id == first.commit_id
+
+    assert {:error, {:operation_id_conflict, "turn-42"}} =
+             Manager.append(:moments, %{id: "preference", text: "phone"}, opts)
+  end
+
+  test "a post-primary worker crash cannot turn a durable commit into an error" do
+    configure_file_store()
+    parent = self()
+
+    injector = fn
+      :after_primary_commit, context ->
+        send(parent, {:after_primary_commit, context.commit_id, self()})
+        exit(:post_primary_worker_crashed)
+
+      _point, _context ->
+        :ok
+    end
+
+    assert {:ok, %WriteReceipt{} = receipt} =
+             Manager.append(
+               :moments,
+               %{id: "post-primary", text: "the primary already committed"},
+               operation_id: "post-primary-operation",
+               failure_injector: injector
+             )
+
+    assert receipt.status == :committed
+    assert_receive {:after_primary_commit, commit_id, worker}
+    assert commit_id == receipt.commit_id
+    refute Process.alive?(worker)
+
+    assert {:ok, records} = Manager.replay()
+    assert Enum.any?(records, &(&1.commit_id == receipt.commit_id))
+  end
+
+  test "replay keeps an incomplete batch invisible until its commit marker exists" do
+    configure_file_store()
+    scope = {:account, "batch-visibility"}
+
+    assert {:ok, _receipt} =
+             Manager.append(
+               :moments,
+               %{id: "batched-memory", text: "not visible yet"},
+               scope: scope,
+               operation_id: "batch-operation:record",
+               batch_id: "batch-operation"
+             )
+
+    assert {:ok, []} = Manager.replay(scope: scope)
+
+    assert {:ok, _receipt} =
+             Manager.append(
+               :batch_commits,
+               %{id: "batch-operation", batch_id: "batch-operation"},
+               scope: scope,
+               operation_id: "batch-operation:commit"
+             )
+
+    assert {:ok, [%Record{family: :moments, payload: %{id: "batched-memory"}}]} =
+             Manager.replay(scope: scope)
+  end
+
+  test "upgrades a 0.1 record shape without losing its payload" do
+    current = record(:moments, %{id: "legacy", text: "readable"})
+
+    legacy =
+      Map.drop(current, [
+        :schema_version,
+        :storage_id,
+        :operation_id,
+        :commit_id,
+        :batch_id,
+        :revision,
+        :digest
+      ])
+
+    upgraded = Record.upgrade(legacy)
+
+    assert upgraded.schema_version == 1
+    assert upgraded.payload == current.payload
+    assert is_nil(upgraded.operation_id)
   end
 
   test "manager replay prefers replay_fold when an adapter advertises it" do
@@ -519,7 +645,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     ])
 
     assert {:ok, %{id: "mom_safe"}} = Manager.get(:moments, "mom_safe")
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
   end
 
   test "invalid and throwing capability callbacks are treated as unsupported" do
@@ -541,7 +667,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert {:ok, []} = Manager.replay()
     assert {:ok, []} = Manager.search("unsupported adapters")
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
   end
 
   test "write adapter exceptions become store failures without crashing the manager" do
@@ -560,7 +686,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert failure.store == :crashing_write
     assert match?({:error, {RuntimeError, _message}}, failure.result)
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.PrimaryWriter))
   end
 
   test "manager search uses stores that advertise query capability" do
@@ -591,8 +717,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   end
 
   test "configuration fallback, automatic primary role, scalar payloads, and idempotency agree" do
-    assert {:error, {:already_started, pid}} = Manager.start_link()
-    assert is_pid(pid)
+    refute Process.whereis(Manager)
 
     Application.put_env(:spectre_mnemonic, :persistent_memory, stores: [])
     assert [default_store] = Keyword.fetch!(Manager.config(), :stores)
@@ -691,7 +816,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
                Manager.replay_all()
     end
 
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
   end
 
   test "lookup and search skip malformed, out-of-scope, and crashing adapters" do
@@ -741,7 +866,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     assert {:ok, []} = Manager.search("raw result")
 
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
   end
 
   test "write normalization handles ok values, unexpected values, throws, and exits" do
@@ -758,7 +883,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       assert match?({:error, _reason}, failure.result)
     end
 
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.PrimaryWriter))
   end
 
   test "semantic adapters and native compaction contain malformed and exceptional results" do
@@ -790,7 +915,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       assert {:ok, %{results: [{:chaos, _result}]}} = Manager.compact(mode: :semantic)
     end
 
-    assert Process.alive?(Process.whereis(Manager))
+    assert Process.alive?(engine_child_pid(SpectreMnemonic.Persistence.Runtime))
   end
 
   test "built-in adapter capabilities describe sql document and object styles" do
@@ -879,7 +1004,12 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
       adapter: __MODULE__.FakeAdapter,
       role: Keyword.get(opts, :role),
       duplicate: Keyword.get(opts, :duplicate, true),
-      opts: [send_to: self(), id: id, fail: Keyword.get(opts, :fail)]
+      opts: [
+        send_to: self(),
+        id: id,
+        fail: Keyword.get(opts, :fail),
+        delay: Keyword.get(opts, :delay, 0)
+      ]
     ]
   end
 
@@ -908,6 +1038,7 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
 
     @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(record, opts) do
+      Process.sleep(Keyword.get(opts, :delay, 0))
       send(Keyword.fetch!(opts, :send_to), {:fake_put, Keyword.fetch!(opts, :id), record})
 
       case Keyword.get(opts, :fail) do
@@ -1118,4 +1249,17 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
     @impl true
     def compact(_input, _opts), do: throw(:semantic_threw)
   end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 end

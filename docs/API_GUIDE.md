@@ -471,7 +471,23 @@ action_runtime_adapter. The explicit runtime surface is:
 The configured SpectreMnemonic.Actions.Runtime.Adapter implements analyze/2 and
 run/3.
 
-## Spectre integration calls
+## Engine and Spectre integration calls
+
+### SpectreMnemonic.Engine
+
+Start one independent memory runtime under your supervisor:
+
+~~~elixir
+{SpectreMnemonic.Engine,
+ name: MyApp.Memory,
+ storage_id: "my-app-memory",
+ namespace: "my_app",
+ data_root: "data/memory"}
+~~~
+
+Every facade call accepts `engine: MyApp.Memory`. Use
+`SpectreMnemonic.health/1` for content-free queue, projection, store, repair,
+index, compaction, and scheduler status.
 
 ### Spectre.Mnemonic.config/1
 
@@ -483,7 +499,8 @@ Returns the immutable Stack installation for an Agent.
 
 ### Spectre.Mnemonic.Memory.options/1 and options/2
 
-Resolves namespace, store, canonical identities, and isolation scope.
+Resolves the Stack Runtime Engine resource, canonical identities, operation ID,
+and isolation scope. The runtime handle is call-local.
 
 ~~~elixir
 {:ok, opts} =
@@ -491,7 +508,8 @@ Resolves namespace, store, canonical identities, and isolation scope.
     agent: MyApp.Agent,
     subject: Spectre.Subject.new(account.id),
     input: input,
-    state: state
+    state: state,
+    stack_runtime: MyApp.AIRuntime
   )
 ~~~
 
@@ -500,16 +518,24 @@ Resolves namespace, store, canonical identities, and isolation scope.
 Persists the compact logical projection of a committed Spectre turn. Spectre
 normally invokes this callback; application code rarely calls it directly.
 
+### Spectre.Mnemonic.erasure_plan/2 and erase_instance/2
+
+The package adapter maps a schema-versioned `%Spectre.Instance.Ref{}` to its
+Mnemonic partition, resolves the Engine through `stack_runtime:`, verifies
+store erasure support, and then performs sealed physical erasure. The plan is
+read-only and content-free.
+
 ## Operational calls
 
 These are public but lower-level than the facade:
 
 | Call | Use |
 | --- | --- |
+| SpectreMnemonic.health/1 | inspect one Engine without exposing memory content |
 | SpectreMnemonic.Persistence.Manager.replay/1 | replay live durable envelopes |
 | SpectreMnemonic.Persistence.Manager.compact/1 | physical, semantic, or combined compaction |
 | SpectreMnemonic.Durable.Index.rebuild/1 | rebuild the derived durable index |
-| SpectreMnemonic.ConsolidationScheduler.status/0 | inspect maintenance status |
+| SpectreMnemonic.ConsolidationScheduler.status/1 | compatibility view of one Engine scheduler |
 | SpectreMnemonic.Evaluation.run/1 | run deterministic retrieval evaluation |
 
 See [Persistence and operations](PERSISTENCE_AND_OPERATIONS.md) before using
