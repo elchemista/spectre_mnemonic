@@ -347,7 +347,9 @@ be generated, so an uncertain save still requires reconciliation.
 helpers, preventing implicit ingestion before an explicit save confirmation.
 The default `automatic: true` preserves the legacy integration.
 
-Returned packets contain portable data with timestamps as ISO strings. Runtime
+Returned packets expose an explicit allowlist for each supported record type,
+with timestamps as ISO strings. Unknown record types are rejected; new fields
+and generic record metadata do not automatically enter checkpoints. Runtime
 options, vectors and encryption material are excluded. Secret records remain
 locked in this projection, even when another caller obtained an authorized
 in-memory reveal. Automatic Server recall uses the same projection; standalone
@@ -361,3 +363,26 @@ packages: [mnemonic: [data_root: "var/memory", namespace: "support"]]` and pass
 `stack_runtime: MyApp.AIRuntime` in the AgentServer runtime options. Mnemonic
 resolves its Engine resource for each operation; no Engine PID enters `ctx`
 or a checkpoint. The 0.2 Engine implementation is retained on this branch.
+
+Explicit `mnemonic` tools require a named `stack_runtime`; they never silently
+fall back to the compatibility DefaultEngine. Direct legacy `Memory` calls
+retain their compatibility behavior. For per-user memory, declare
+`isolate_by([:subject])` inside the `install Spectre.Mnemonic do ... end`
+block. Recall uses the Server's trusted `identity.subject`.
+The host candidate factory must copy that authenticated subject into the
+candidate's consequence; the admitted executor reconstructs its context from
+that committed partition, for example:
+
+```elixir
+# `payload` is the admitted candidate consequence, produced by the host.
+# The model's `{:remember, observation}` request cannot choose this partition.
+Spectre.Mnemonic.ServerTool.execute(:remember,
+  %{observation: payload["observation"]},
+  %{agent: MyApp.Agent, command_id: act.ref,
+    identity: %{subject: Spectre.Subject.new(payload["subject"])},
+    options: [stack_runtime: MyApp.AIRuntime]})
+```
+
+For `:conversation` isolation, the host also commits and restores the matching
+conversation identifier. Missing isolation dimensions fail closed before any
+write. The Stack runtime is host configuration, not a model-supplied argument.

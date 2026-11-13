@@ -9,20 +9,6 @@ defmodule Spectre.Mnemonic.ServerTool do
   authority, create a Candidate or retry a write with an uncertain result.
   """
 
-  @private_fields [
-    :opts,
-    :input,
-    :vector,
-    :embedding,
-    :binary_signature,
-    :ciphertext,
-    :iv,
-    :tag,
-    :aad,
-    :authorization,
-    :reveal
-  ]
-
   def prepare(:recall, [cue], _trusted) when is_binary(cue) or is_map(cue),
     do: {:ok, %{cue: cue}}
 
@@ -33,21 +19,23 @@ defmodule Spectre.Mnemonic.ServerTool do
   def prepare(_operation, _payload, _trusted), do: {:error, :invalid_mnemonic_request}
 
   def invoke(:recall, %{cue: cue}, %{service_context: context}) do
-    Spectre.Mnemonic.Memory.recall(cue, options(context))
+    with {:ok, opts} <- options(context), do: Spectre.Mnemonic.Memory.recall(cue, opts)
   end
 
   @doc "Invokes a write only from the host's admitted GAM executor and projects its result."
   def execute(:remember, %{observation: observation}, context) do
-    result = Spectre.Mnemonic.Memory.remember(observation, options(context))
+    with {:ok, opts} <- options(context) do
+      result = Spectre.Mnemonic.Memory.remember(observation, opts)
 
-    case project(:remember, result) do
-      {:ok, projected} -> projected
-      {:error, reason} -> {:error, {:mnemonic_projection_failed, reason}}
+      case project(:remember, result) do
+        {:ok, projected} -> projected
+        {:error, reason} -> {:error, {:mnemonic_projection_failed, reason}}
+      end
     end
   end
 
   def project(operation, {:ok, packet}) when operation in [:recall, :remember] do
-    {:ok, {:ok, portable(packet)}}
+    {:ok, {:ok, Spectre.Mnemonic.ServerTool.Projection.to_data(packet)}}
   rescue
     ArgumentError -> {:error, :nonportable_mnemonic_result}
   end
@@ -69,10 +57,13 @@ defmodule Spectre.Mnemonic.ServerTool do
       ]
       |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
-    context
-    |> Map.get(:options, [])
-    |> Keyword.merge(scope)
-    |> put_operation_id(Map.get(context, :command_id))
+    opts = context |> Map.get(:options, [])
+
+    if Keyword.get(opts, :stack_runtime) do
+      {:ok, opts |> Keyword.merge(scope) |> put_operation_id(Map.get(context, :command_id))}
+    else
+      {:error, :mnemonic_stack_runtime_required}
+    end
   end
 
   # Preserve the admitted command's identity for durable correlation. Mnemonic
@@ -82,38 +73,4 @@ defmodule Spectre.Mnemonic.ServerTool do
     do: Keyword.put_new(opts, :operation_id, command_id)
 
   defp put_operation_id(opts, _command_id), do: opts
-
-  defp portable(%DateTime{} = value), do: DateTime.to_iso8601(value)
-  defp portable(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
-
-  # A generic recall must not serialize encryption material or an authorized
-  # in-memory reveal into the conversation's durable checkpoint.
-  defp portable(%SpectreMnemonic.Memory.Secret{} = value) do
-    value
-    |> Map.take([:id, :namespace, :secret_id, :label, :scope])
-    |> Map.merge(%{locked?: true, revealed?: false})
-    |> portable()
-  end
-
-  defp portable(%module{} = value) do
-    if String.starts_with?(Atom.to_string(module), "Elixir.SpectreMnemonic.") do
-      value |> Map.from_struct() |> Map.drop(@private_fields) |> portable()
-    else
-      raise ArgumentError, "unsupported memory record"
-    end
-  end
-
-  defp portable(value) when is_map(value),
-    do: Map.new(value, fn {key, item} -> {portable(key), portable(item)} end)
-
-  defp portable(value) when is_list(value), do: Enum.map(value, &portable/1)
-
-  defp portable(value) when is_tuple(value),
-    do: value |> Tuple.to_list() |> Enum.map(&portable/1) |> List.to_tuple()
-
-  defp portable(value)
-       when is_atom(value) or is_binary(value) or is_number(value),
-       do: value
-
-  defp portable(_value), do: raise(ArgumentError, "nonportable memory value")
 end

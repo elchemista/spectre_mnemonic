@@ -1,3 +1,7 @@
+defmodule SpectreMnemonic.UnreviewedServerToolRecord do
+  defstruct [:private_token]
+end
+
 defmodule Spectre.Mnemonic.ServerToolTest do
   use SpectreMnemonic.MemoryCase, async: false
 
@@ -7,11 +11,12 @@ defmodule Spectre.Mnemonic.ServerToolTest do
   defmodule Stack do
     use Spectre.Stack
 
-    install(Spectre.Mnemonic,
+    install Spectre.Mnemonic,
       namespace: :server_tool_test,
       automatic: false,
-      bind: [remember: :save_report]
-    )
+      bind: [remember: :save_report] do
+      isolate_by([:subject])
+    end
   end
 
   defmodule Agent do
@@ -22,6 +27,7 @@ defmodule Spectre.Mnemonic.ServerToolTest do
     assert %{recall: %{path: :cognitive}} = Spectre.Mnemonic.tools(%{}).mnemonic.operations
     refute Map.has_key?(Spectre.Mnemonic.tools(%{}).mnemonic.operations, :remember)
     config = Spectre.Stack.definition(Stack).installations |> hd() |> Map.fetch!(:config)
+    assert config.isolate_by == [:subject]
     tools = Spectre.Mnemonic.tools(config)
     assert %{path: :governed, operation: :save_report} = tools.mnemonic.operations.remember
     assert Spectre.Stack.Tools.validate!(tools) == tools
@@ -65,6 +71,38 @@ defmodule Spectre.Mnemonic.ServerToolTest do
              ServerTool.project(:recall, {:ok, %{runtime: self()}})
   end
 
+  test "explicit tools reject a missing Stack runtime instead of using DefaultEngine" do
+    context = %{agent: Agent, identity: %{subject: Spectre.Subject.new("alice")}, options: []}
+
+    assert {:error, :mnemonic_stack_runtime_required} =
+             ServerTool.invoke(:recall, %{cue: "Shopify"}, %{service_context: context})
+
+    assert {:error, :mnemonic_stack_runtime_required} =
+             ServerTool.execute(
+               :remember,
+               %{observation: "must not enter DefaultEngine"},
+               context
+             )
+  end
+
+  test "new fields and unreviewed Mnemonic record types cannot escape the projection" do
+    moment =
+      %Moment{id: "m1", text: "public", metadata: %{api_key: "META-SECRET"}}
+      |> Map.put(:future_private_field, "FUTURE-SECRET")
+
+    assert {:ok, {:ok, projected}} = ServerTool.project(:recall, {:ok, moment})
+    assert projected.text == "public"
+    refute Map.has_key?(projected, :future_private_field)
+    refute Map.has_key?(projected, :metadata)
+    refute inspect(projected) =~ "SECRET"
+
+    assert {:error, :nonportable_mnemonic_result} =
+             ServerTool.project(
+               :recall,
+               {:ok, %SpectreMnemonic.UnreviewedServerToolRecord{private_token: "NEW-SECRET"}}
+             )
+  end
+
   test "the executor adapter writes real memory and recall returns a portable packet" do
     root = Path.join(System.tmp_dir!(), "mnemonic-tools-#{System.unique_integer([:positive])}")
     runtime_name = __MODULE__.Runtime
@@ -81,7 +119,7 @@ defmodule Spectre.Mnemonic.ServerToolTest do
     context = %{
       agent: Agent,
       command_id: "admitted:save-report",
-      identity: %{},
+      identity: %{subject: Spectre.Subject.new("alice")},
       current_flow: :support,
       options: [stack_runtime: runtime_name],
       input: nil
@@ -91,6 +129,19 @@ defmodule Spectre.Mnemonic.ServerToolTest do
              ServerTool.execute(:remember, %{observation: "Luca uses Shopify"}, context)
 
     assert written.root.text == "Luca uses Shopify"
+
+    # The executor gets its partition from trusted admitted candidate data,
+    # never from the model-authored tool arguments.
+    missing_partition = %{context | identity: %{}}
+
+    assert {:error, :mnemonic_canonical_subject_required} =
+             ServerTool.execute(:remember, %{observation: "must not save"}, missing_partition)
+
+    bob = %{context | identity: %{subject: Spectre.Subject.new("bob")}}
+    bob_raw = ServerTool.invoke(:recall, %{cue: "Shopify"}, %{service_context: bob})
+    assert {:ok, {:ok, bob_memory}} = ServerTool.project(:recall, bob_raw)
+    refute Enum.any?(bob_memory.moments, &(&1.text == "Luca uses Shopify"))
+
     assert {:ok, request} = ServerTool.prepare(:recall, ["Shopify"], %{})
     raw = ServerTool.invoke(:recall, request, %{service_context: context})
     assert {:ok, {:ok, recalled}} = ServerTool.project(:recall, raw)
@@ -101,13 +152,18 @@ defmodule Spectre.Mnemonic.ServerToolTest do
              Spectre.Mnemonic.Memory.recall("Shopify",
                agent: Agent,
                stack_runtime: runtime_name,
+               subject: Spectre.Subject.new("alice"),
                spectre_server: true
              )
 
     refute is_struct(automatic)
     assert {:ok, _} = Spectre.GAM.Canonical.Value.encode(automatic)
 
-    assert {:ok, memory_opts} = Spectre.Mnemonic.Memory.options(Agent, context.options)
+    assert {:ok, memory_opts} =
+             Spectre.Mnemonic.Memory.options(
+               Agent,
+               Keyword.put(context.options, :subject, context.identity.subject)
+             )
 
     assert {:ok, records} =
              SpectreMnemonic.Engine.Context.with(
