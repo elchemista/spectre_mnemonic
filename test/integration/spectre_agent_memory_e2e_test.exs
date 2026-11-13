@@ -127,8 +127,8 @@ defmodule SpectreMnemonic.SpectreAgentMemoryE2ETest do
   @owner "Marta Bianchi"
   @embedding_model "Xenova/bge-small-en-v1.5"
 
-  test "a real Spectre 0.3.3 agent remembers facts, references and prior questions" do
-    assert Spectre.version() == "0.3.3"
+  test "a real Spectre 0.4.0 agent remembers facts, references and prior questions" do
+    assert Spectre.version() == "0.4.0"
 
     subject = Subject.new("alice-account")
     base_opts = [subject: subject, test_pid: self(), memory_persist_failure: :error]

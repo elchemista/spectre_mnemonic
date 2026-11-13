@@ -13,7 +13,7 @@ defmodule SpectreMnemonic.GitHubDistributionTest do
         assert opts[:optional]
 
       _unset ->
-        assert {:spectre, "~> 0.3.3", opts} = dependency
+        assert {:spectre, "~> 0.4.0", opts} = dependency
         assert opts[:optional]
     end
 

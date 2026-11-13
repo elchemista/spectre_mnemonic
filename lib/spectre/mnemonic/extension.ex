@@ -21,7 +21,11 @@ if Code.ensure_loaded?(Spectre.Extension) do
 
     @impl true
     def agent_config(config) when is_map(config) do
-      [mnemonic: config, memory: Spectre.Mnemonic.Memory]
+      case config |> Map.get(:options, []) |> Keyword.get(:automatic, true) do
+        true -> [mnemonic: config, memory: Spectre.Mnemonic.Memory]
+        false -> [mnemonic: config]
+        _other -> raise ArgumentError, "Mnemonic automatic must be a boolean"
+      end
     end
   end
 end

@@ -319,3 +319,45 @@ mix hex.audit
 The default test suite is offline. Real local embedding and Spectre Agent test
 commands are listed in
 [Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md#evaluation-and-development).
+
+## Spectre 0.4 Server tools
+
+```elixir
+install Spectre.Mnemonic,
+  automatic: false,
+  bind: [remember: :save_report]
+```
+
+`use Spectre.Server, tools: MyApp.AI` generates `mnemonic/3` from the Stack
+registration. `mnemonic(ctx, {:recall, cue}, on_result: :memories)` is cognitive.
+`mnemonic(ctx, {:remember, observation}, on_result: :saved)` becomes a governed
+`:save_report` proposal. The host must configure that GAM binding, its policy
+and executor. Without `bind:`, only recall is exposed. No helper is imported
+from this package and installation grants no write authority.
+
+An admitted host executor calls
+`Spectre.Mnemonic.ServerTool.execute(:remember, args, service_context)` and
+records its portable result before building GAM evidence. It must reconcile an
+uncertain write; this adapter does not claim provider idempotency. A trusted
+`service_context.command_id` is forwarded as the durable `operation_id` for
+correlation; an explicit host `operation_id` takes precedence. This identifier
+alone does not make the whole ingestion replay-safe: new memory/source IDs may
+be generated, so an uncertain save still requires reconciliation.
+`automatic: false` disables the automatic memory port while retaining explicit
+helpers, preventing implicit ingestion before an explicit save confirmation.
+The default `automatic: true` preserves the legacy integration.
+
+Returned packets contain portable data with timestamps as ISO strings. Runtime
+options, vectors and encryption material are excluded. Secret records remain
+locked in this projection, even when another caller obtained an authorized
+in-memory reveal. Automatic Server recall uses the same projection; standalone
+Mnemonic calls keep their native record contract.
+
+Run `SPECTRE_PATH=../spectre mix test` against the core 0.4 working branch.
+
+For an isolated Engine, supervise `Spectre.Stack.Runtime` with
+`stack: MyApp.AI, name: MyApp.AIRuntime,
+packages: [mnemonic: [data_root: "var/memory", namespace: "support"]]` and pass
+`stack_runtime: MyApp.AIRuntime` in the AgentServer runtime options. Mnemonic
+resolves its Engine resource for each operation; no Engine PID enters `ctx`
+or a checkpoint. The 0.2 Engine implementation is retained on this branch.

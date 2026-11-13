@@ -22,7 +22,7 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
       id: :mnemonic,
       version: "0.2.0",
       contract: 1,
-      spectre: "~> 0.3.3",
+      spectre: "~> 0.4.0",
       provides: [{:service, :memory}],
       requires: [],
       conflicts: [],
@@ -55,6 +55,38 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
         {:error, _reason} = error ->
           error
       end
+    end
+
+    @impl Spectre.Stack.Installable
+    def tools(config) do
+      bindings = config |> Map.get(:options, []) |> Keyword.get(:bind, [])
+
+      unless Keyword.keyword?(bindings) and Keyword.keys(bindings) -- [:remember] == [],
+        do: raise(ArgumentError, "Mnemonic bind accepts only remember: host_operation")
+
+      operations = %{recall: %{path: :cognitive, retry: :safe, max_bytes: 1_048_576}}
+
+      operations =
+        case Keyword.fetch(bindings, :remember) do
+          :error ->
+            operations
+
+          {:ok, operation} ->
+            Map.put(operations, :remember, %{
+              path: :governed,
+              operation: operation,
+              max_bytes: 1_048_576
+            })
+        end
+
+      %{
+        mnemonic: %{
+          contract: 1,
+          adapter: Spectre.Mnemonic.ServerTool,
+          default: nil,
+          operations: operations
+        }
+      }
     end
 
     @impl Spectre.Stack.Installable
