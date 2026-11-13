@@ -10,13 +10,14 @@ SpectreMnemonic is distributed from GitHub:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"}
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "feature/stack-tools-0.4"}
   ]
 end
 ```
 
 There is currently no Hex package for SpectreMnemonic.
-Spectre `~> 0.3.3` is an optional dependency; add it only for Stack integration.
+Spectre is optional for standalone use. For unreleased core 0.4 Stack
+integration, use the Git/path dependencies in the [README](../README.md).
 
 ## Supervise an Engine
 
@@ -287,123 +288,17 @@ Immediate persistence and later consolidation can be used independently.
 | Only observations | `search_observations/2` | observation records |
 | Only curated mental models | `search_mental_models/2` | mental-model records |
 
-## Spectre Agent integration
+## Spectre core 0.4 AgentServer integration
 
-Mnemonic can be installed as the memory service in a Spectre Stack:
+Use the [current Stack → Agent → Server example](../README.md) and
+[core 0.4 migration guide](MIGRATING_TO_SPECTRE_0_4.md). Explicit tools require a
+named Stack runtime. For user-partitioned memory declare `isolate_by([:subject])`
+inside the install block; the host supplies a canonical subject and carries the
+same partition into an admitted save candidate. Use `automatic: false` when
+saving should happen only through an explicit governed command.
 
-```elixir
-defmodule MyApp.AI do
-  use Spectre.Stack
-
-  install Spectre.Mnemonic do
-    isolate_by [:instance]
-  end
-end
-
-defmodule MyApp.Agent do
-  use Spectre.Agent, stack: MyApp.AI
-end
-
-children = [
-  {Spectre.Stack.Runtime,
-   stack: MyApp.AI,
-   name: MyApp.AIRuntime,
-   packages: [mnemonic: [data_root: "data/memory"]]},
-  {Spectre.Supervisor, name: MyApp.SpectreSupervisor}
-]
-
-Spectre.instance(
-  MyApp.SpectreSupervisor,
-  MyApp.Agent,
-  subject,
-  stack_runtime: MyApp.AIRuntime
-)
-```
-
-`Spectre.Stack.Runtime` supervises the same `SpectreMnemonic.Engine` used by a
-standalone application. Selecting the Stack activates
-`Spectre.Mnemonic.Memory`; a second `use Spectre.Mnemonic` is not required.
-The runtime name is resolved for each callback and is never persisted in a Run,
-checkpoint, Journal payload, or receipt.
-
-Spectre's normal memory callbacks then:
-
-1. derive an opaque Mnemonic scope from the declared isolation dimensions;
-2. recall memory before the Agent handles the turn;
-3. persist a compact logical projection after a turn commits;
-4. keep full Results, States, process handles, and adapter handles out of
-   durable memory;
-5. emit privacy-safe Journal outcomes containing dimension names and status,
-   never memory content or subject values.
-
-### Instance isolation
-
-`isolate_by: []` remains the historical default and deliberately shares the
-unscoped partition among every Agent and Subject using that installation. It is
-not changed automatically because doing so would make 0.1.x shared memory
-invisible.
-
-`isolate_by [:instance]` is recommended for new installations. It derives the
-opaque scope from `{instance_ref.schema_version, instance_ref.key}`. Agent
-definition versions and Stack digests do not change that logical identity.
-Missing Instance refs fail closed with:
-
-```elixir
-{:error, {:mnemonic_isolation_dimension_required, :instance}}
-```
-
-### Canonical subject isolation
-
-If `:subject` is present in `isolate_by`, the runtime must supply an explicit
-canonical `%Spectre.Subject{}`:
-
-```elixir
-subject = Spectre.Subject.new(account.id)
-
-{:ok, memory_opts} =
-  Spectre.Mnemonic.Memory.options(MyApp.Agent,
-    agent: MyApp.Agent,
-    subject: subject,
-    input: input,
-    state: state,
-    stack_runtime: MyApp.AIRuntime
-  )
-```
-
-The partition uses `Spectre.Subject.key/1`. Mnemonic does not infer identity
-from a sender name, phone number, `Input.Source.actor_id`, or conversation id.
-Different channel identities share memory only after the Subject Registry links
-them and the owning Agent Instance supplies the same canonical Subject.
-
-Missing canonical subjects fail closed with
-`:mnemonic_canonical_subject_required`. Scalar identities passed explicitly by
-application code are normalized through `Spectre.Subject.new/1`.
-
-### Other isolation dimensions
-
-- `:agent` uses canonical `Spectre.AgentRef`, so two logical Agent instances
-  backed by the same module do not share memory accidentally.
-- `:conversation` follows the current Run/Input origin. It is not the stable
-  persistence identity of the Subject-owned Agent Instance.
-- `:flow` and `:task` use the corresponding current runtime context.
-- `:instance` uses the stable schema-versioned `Spectre.Instance.Ref` key and
-  fails closed when only legacy Session metadata is available.
-
-Mnemonic memory values are never stored in `%Spectre.Run{}`. Recall is resolved
-again when a restored Run advances.
-
-### Inspect the compiled installation
-
-```elixir
-{:ok, config} = Spectre.Mnemonic.config(MyApp.Agent)
-config.store
-config.isolate_by
-config.options
-```
-
-The Stack installation owns one Engine resource. Its default `storage_id` is
-derived from `{stack_owner, installation_id}`, not the complete Stack digest,
-so a compatible Stack update does not silently select a fresh data directory.
+The [historical Instance adapter](LEGACY_0_3.md) remains documented separately.
+The standalone Engine and memory APIs above are unchanged.
 
 ## Next steps
 

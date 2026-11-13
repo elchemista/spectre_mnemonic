@@ -1,7 +1,8 @@
 # Spectre Mnemonic public API — 0.2.0
 
 This file is the normative public API manifest for Spectre Mnemonic `0.2.0`.
-Its package and Stack contracts target Spectre `0.3.3` from Hex.
+Its package and Stack contracts target unreleased Spectre core `~> 0.4.0`.
+Use the Git/path installation in the [README](../README.md).
 For task-oriented explanations and examples, start with the
 [API guide](API_GUIDE.md); use this manifest to determine compatibility.
 Compatibility guarantees apply only to the
@@ -35,7 +36,9 @@ host dependencies.
 ## Manifest
 
 - `Spectre.Mnemonic`
-  - functions: `config/1`, `erase_instance/1`, `erase_instance/2`, `erasure_plan/1`, `erasure_plan/2`
+  - functions: `tools/1`, `config/1`, `erase_instance/1`, `erase_instance/2`, `erasure_plan/1`, `erasure_plan/2`
+- `Spectre.Mnemonic.ServerTool`
+  - functions: `execute/3` (host executor only, after GAM admission)
 - `Spectre.Mnemonic.Memory`
   - functions: `options/1`, `options/2`, `remember/4`
 - `SpectreMnemonic`
@@ -179,3 +182,10 @@ host dependencies.
 - `SpectreMnemonic.Secrets.Crypto.AESGCM`
 - `SpectreMnemonic.Secrets.Crypto.Adapter`
   - callbacks: `decrypt/3`, `encrypt/3`, `shred/2` (optional)
+
+## Core 0.4 Server tools
+
+The Stack Installable `tools/1` descriptor and generated Server helpers are
+documented in the [migration guide](MIGRATING_TO_SPECTRE_0_4.md). Native direct
+APIs keep their existing contracts; helper results are explicitly projected
+for durable Server use. See the [documentation index](INDEX.md).

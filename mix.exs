@@ -20,9 +20,13 @@ defmodule SpectreMnemonic.MixProject do
       dialyzer: [plt_add_apps: [:mix]],
       docs: [
         main: "readme",
-        source_ref: "v#{@version}",
+        source_ref: "feature/stack-tools-0.4",
         extras: [
           "README.md",
+          "docs/INDEX.md",
+          "docs/MIGRATING_TO_SPECTRE_0_4.md",
+          "docs/LEGACY_0_3.md",
+          "docs/STANDALONE.md",
           "docs/GETTING_STARTED.md",
           "docs/MEMORY_GUIDE.md",
           "docs/RETRIEVAL_AND_KNOWLEDGE.md",

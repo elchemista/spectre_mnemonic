@@ -1,12 +1,34 @@
 if Code.ensure_loaded?(Spectre.Stack.Installable) do
   defmodule Spectre.Mnemonic do
     @moduledoc """
-    Stack-installable definition for Spectre Mnemonic.
+    Stack installation and supervised memory resources for Spectre core 0.4.
 
-    The installation compiles memory-store and isolation declarations into
-    immutable data. Selecting it activates the Spectre memory adapter while
-    leaving ownership of the Mnemonic application, named processes, and ETS
-    tables with the host.
+    Install Mnemonic in a Stack, select it on the Agent, and declare
+    `use Spectre.Server, tools: MyApp.AI` on the Server. This installation's
+    `tools/1` descriptor generates `mnemonic/3`; callers do not import that
+    helper from this module.
+
+        install Spectre.Mnemonic,
+          automatic: false,
+          bind: [remember: :save_notes] do
+          isolate_by([:subject])
+        end
+
+    Explicit recall requires a named Stack runtime and every declared identity
+    partition. It returns a portable packet in `handle_result/3`. Explicit
+    remember creates a proposal for the host's bound operation; the admitted
+    executor calls `Spectre.Mnemonic.ServerTool.execute/3` only after GAM has
+    authorized that effect. The host commits the authenticated partition in
+    the candidate, rather than trusting a model-supplied subject.
+
+    Use `automatic: false` when saving requires explicit consent. Otherwise
+    the legacy automatic memory adapter also recalls and persists turns.
+    The runtime supervises each Stack's engine; live processes and storage
+    handles do not enter Server checkpoints. The direct `SpectreMnemonic`
+    API remains available independently of the generated helpers.
+
+    See the [Governed Act Model](https://spectre.guide/en/governed-act-model)
+    for authority, evidence, and unresolved-effect responsibilities.
     """
 
     alias Spectre.Instance.Ref, as: InstanceRef

@@ -1,388 +1,139 @@
-# SpectreMnemonic
+# Spectre Mnemonic for core 0.4
 
-SpectreMnemonic is an Elixir memory engine for live applications and agents. It
-keeps recent memory in ETS, links related moments into a graph, persists durable
-records through append-only stores, and retrieves context with text ranking,
-graph expansion, optional embeddings, and hybrid durable search.
+A supervised Elixir memory engine with an explicit AgentServer integration:
+recall evidence during cognition; save through an admitted host operation when
+the application requires consent. The existing standalone Engine 0.2 APIs,
+text retrieval, embeddings, graph search and persistence remain
+available. Core 0.4 does not change the satellite's independent version number.
 
-Version 0.2.0 has one core, `SpectreMnemonic.Engine`: applications can supervise
-it directly, while Spectre can supervise the same Engine as a Stack resource.
-Multiple independent Engines may run in one BEAM VM. The runtime is explicitly
-single-node; a deployment must never activate the same `storage_id` on two
-nodes at once.
+[Documentation index](docs/INDEX.md) · [Migrate from core 0.3](docs/MIGRATING_TO_SPECTRE_0_4.md)
 
-It is a memory layer, not an application database. Use it to remember events,
-preferences, decisions, facts, documents, and tool output; then retrieve the
-evidence an application or agent needs for its next action.
+## Installation on this development branch
 
-```elixir
-{:ok, _memory} =
-  SpectreMnemonic.remember("Alice's email is alice@example.com",
-    scope: {:subject, "alice"},
-    kind: :personal_fact,
-    persist?: true
-  )
-
-{:ok, packet} =
-  SpectreMnemonic.recall("How can I contact Alice?",
-    scope: {:subject, "alice"}
-  )
-
-Enum.map(packet.moments, & &1.text)
-```
-
-## Choose the right entry point
-
-| Goal | Call | Returns |
-| --- | --- | --- |
-| Store one immediate event | `signal/2` | signal and searchable moment |
-| Ingest richer text or structured input | `remember/2` | intake packet with root, chunks, summaries, entities, and links |
-| Build an active-memory context packet | `recall/2` | ranked evidence and related graph context |
-| Search active and durable memory | `search/2` | flat list of search results |
-| Build source-linked reasoning evidence | `reflect/2` | mental models, observations, raw memories, and citations |
-| Persist selected active memory | `consolidate/1` | durable knowledge records |
-| Suppress selected memory logically | `forget/2` | number of forgotten records |
-| Physically erase one partition | `erase_partition/1` | verified erasure report |
-
-The complete high-level call index is in the
-[API guide](docs/API_GUIDE.md). The exact compatibility surface is defined by
-the [public API manifest](docs/PUBLIC_API.md).
-
-## Installation
-
-SpectreMnemonic is distributed from GitHub:
+This is the **unreleased Spectre core 0.4 integration**. Satellite package
+versions are independent; no published Hex 0.4 release is assumed here. Pin
+reviewed Git commits for deployment. During development use:
 
 ```elixir
-def deps do
+defp deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"}
+    {:spectre, github: "elchemista/spectre",
+     branch: "feature/agent-server-gam", override: true},
+    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic",
+     branch: "feature/stack-tools-0.4"}
   ]
 end
 ```
 
-Spectre is optional. Add `{:spectre, "~> 0.3.3"}` only when using the Stack
-integration.
+For sibling checkouts, replace these with `path: "../spectre"` and
+`path: "../spectre_mnemonic"` dependencies. Package integration tests use
+`SPECTRE_PATH=../spectre mix test`.
 
-Telemetry is also optional. Add `{:telemetry, "~> 1.3"}` in the host when it
-needs Mnemonic lifecycle events; the standalone core remains functional when
-Telemetry is absent.
+Spectre remains optional for standalone `SpectreMnemonic` use. Supervise an
+explicit `SpectreMnemonic.Engine` when calling those APIs directly; see the
+[standalone guide](docs/STANDALONE.md).
 
-Supervise an Engine with stable storage identity and an application namespace:
-
-```elixir
-children = [
-  {SpectreMnemonic.Engine,
-   name: MyApp.Memory,
-   storage_id: "my-app-memory",
-   namespace: "my_app",
-   data_root: "data/memory"}
-]
-```
-
-Address it with the existing option-based API:
+## Explicit memory in Stack → Agent → Server
 
 ```elixir
-SpectreMnemonic.remember("Alice prefers email",
-  engine: MyApp.Memory,
-  scope: {:customer, "alice"}
-)
-
-SpectreMnemonic.recall("How should I contact Alice?",
-  engine: MyApp.Memory,
-  scope: {:customer, "alice"}
-)
-```
-
-JSON remains host-owned. Elixir's built-in `JSON` module requires no extra
-dependency:
-
-```elixir
-config :spectre_mnemonic,
-  json_library: JSON
-```
-
-`json_library` is required only by JSON-backed features: `.mnemonic`
-export/read operations and the local Model2Vec artifact loader. The rest of the
-memory engine starts and runs without a JSON package. To use Jason instead, add
-`{:jason, "~> 1.4"}` to the host application's dependencies and configure
-`json_library: Jason`. Do not rely on a transitive JSON dependency.
-
-For 0.1.x compatibility, a configured global `namespace:` starts
-`SpectreMnemonic.DefaultEngine`, so calls without `engine:` keep working. When
-that legacy configuration is absent, the application still starts and such a
-call returns `{:error, :mnemonic_engine_required}`.
-
-The OTP application owns only shared registries and bounded support
-infrastructure. Each Engine owns its configuration, persistence pipeline,
-indexes, projection shards, queues, embedding space, scheduler, and lifecycle.
-
-See [Getting started](docs/GETTING_STARTED.md) for supervision, scopes,
-configuration, and a complete first workflow.
-
-## Five-minute workflow
-
-### 1. Remember durable information
-
-```elixir
-scope = {:project, "checkout"}
-
-{:ok, intake} =
-  SpectreMnemonic.remember(
-    "The checkout deploy moved to Friday because the payment sandbox is unavailable.",
-    scope: scope,
-    stream: :planning,
-    task_id: "deploy-42",
-    tags: [:checkout, :release],
-    persist?: true
-  )
-
-intake.root
-intake.associations
-```
-
-`remember/2` can chunk long input, create summaries and categories, extract an
-entity/timeline graph, and aggregate related memory inside the same partition.
-Use `signal/2` when you only need one immediate event.
-
-### 2. Recall a bounded evidence packet
-
-```elixir
-{:ok, packet} =
-  SpectreMnemonic.recall("Why did the checkout deploy move?",
-    scope: scope,
-    budget: :mid,
-    max_tokens: 2_000,
-    graph_depth: 2,
-    trace: true
-  )
-
-packet.moments
-packet.observations
-packet.mental_models
-packet.knowledge
-packet.trace
-```
-
-Recall gathers evidence; it does not generate a final prose answer. The caller
-can inspect the packet, render it, or pass it to an agent or language model.
-
-### 3. Search durable history
-
-```elixir
-{:ok, results} =
-  SpectreMnemonic.search("payment sandbox deploy",
-    scope: scope,
-    limit: 10,
-    min_vector_similarity: 0.45
-  )
-
-Enum.map(results, &{&1.source, &1.family, &1.id, &1.score})
-```
-
-Search combines active candidates with the rebuildable durable index. It works
-without embeddings and adds vector/signature ranking when embeddings exist.
-
-### 4. Consolidate or forget
-
-```elixir
-{:ok, _knowledge} =
-  SpectreMnemonic.consolidate(scope: scope, min_attention: 1.0)
-
-{:ok, _count} =
-  SpectreMnemonic.forget({:task, "deploy-42"}, scope: scope)
-```
-
-Forgetting is logical suppression. Physical partition erasure is a separate,
-explicit operation described in
-[Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md).
-
-## Spectre Agent integration
-
-Install Mnemonic in a Spectre Stack:
-
-```elixir
-defmodule MyApp.AI do
+defmodule MyApp.MemoryAI do
   use Spectre.Stack
-
-  install Spectre.Mnemonic do
-    isolate_by [:instance]
+  install Spectre.Mnemonic, automatic: false, bind: [remember: :save_note] do
+    isolate_by([:subject])
   end
 end
 
+defmodule MyApp.MemoryServer do
+  use Spectre.Server, tools: MyApp.MemoryAI
+
+  def handle_flow({:notes, :recall}, input, ctx),
+    do: mnemonic(ctx, {:recall, input.text}, on_result: :recalled)
+
+  def handle_flow({:notes, :remember}, input, ctx),
+    do: mnemonic(ctx, {:remember, input.text}, on_result: :saved)
+
+  def handle_result(:recalled, {:ok, packet}, ctx),
+    do: respond(ctx, Enum.map_join(packet.moments, "\n", &Map.get(&1, :text, "[locked memory]")))
+
+  def handle_result(:saved, {:governed, %{outcome: %{status: :succeeded}}}, ctx),
+    do: respond(ctx, "The note was saved.")
+
+  def handle_result(tag, result, ctx), do: super(tag, result, ctx)
+end
+
+defmodule MyApp.MemoryAgent do
+  use Spectre.Agent, stack: MyApp.MemoryAI, server: MyApp.MemoryServer
+  flow :notes do
+    on(:remember, regex: ~r/^remember /i)
+    on(:recall, regex: ~r/^recall /i)
+  end
+end
+```
+
+`mnemonic/3` is generated from `tools/1`; the package does not export a helper
+that you should import. `automatic: false` removes the automatic recall/persist
+port while retaining the Engine resource and explicit tools. This prevents
+implicit ingestion before your save-consent flow. The compatibility default is
+`automatic: true`; changing it requires reviewing the application's behavior.
+
+## Engine ownership, partition and consent
+
+Supervise `Spectre.Stack.Runtime` with a **stable name**, then supply that name
+to the Server and to its host executor:
+
+```elixir
 children = [
   {Spectre.Stack.Runtime,
-   stack: MyApp.AI,
-   name: MyApp.AIRuntime,
-   packages: [mnemonic: [data_root: "data/memory"]]},
-  {Spectre.Supervisor, name: MyApp.SpectreSupervisor}
+   stack: MyApp.MemoryAI, name: MyApp.MemoryRuntime,
+   packages: [mnemonic: [data_root: "var/memory", namespace: "notes"]]}
 ]
 ```
 
-Spectre resolves the Engine resource through the named Stack Runtime and calls
-Mnemonic through its normal memory lifecycle. `isolate_by: []` remains the
-historical shared-memory default; `[:instance]` is the recommended opt-in and
-fails closed when no `%Spectre.Instance.Ref{}` is available.
+Start the Server with `agent: MyApp.MemoryAgent`,
+`stack_runtime: MyApp.MemoryRuntime`,
+`identity: %{subject: Spectre.Subject.new(account_id)}` and the host's
+`gam: {Spectre.Server.GAM, gam_config}`. Because `remember` is bound to
+`:save_note`, startup checks that this host binding exists. The host's candidate
+factory copies the authenticated subject into the candidate consequence; the
+executor reconstructs that committed identity. The model cannot select its
+own partition. See the [executor example](docs/MIGRATING_TO_SPECTRE_0_4.md#host-executor-and-partition).
 
-The full setup, isolation behavior, and direct adapter calls are documented in
-[Getting started](docs/GETTING_STARTED.md#spectre-agent-integration).
+Use the **block DSL** `isolate_by([:subject])`; it is not an installation keyword
+option. Missing `stack_runtime` or required subject fails closed. Explicit tools
+do not fall back to the compatibility DefaultEngine. Multiple Engines can run
+in one VM, but one durable `storage_id` must have only one writer across nodes.
 
-## Main capabilities
+## Results and persistence
 
-- Active ETS memory with scoped bounds, streams, tasks, temporal validity, and
-  attention.
-- Rich intake for text, maps, lists, documents, chats, tasks, and tool events.
-- Partition-local entity resolution, typed graph links, reversible merges,
-  Episodes, and deterministic Atlas projections.
-- Optional caller-provided or adapter-generated embeddings normalized, pooled,
-  and indexed through Vettore 0.3.5, with native CPU/GPU execution and no Nx
-  requirement.
-- BM25-style durable search with text, entity, vector, binary-signature, and
-  lifecycle signals, backed by protected per-Engine ETS indexes rather than
-  corpus copies or hot-path replay.
-- Evidence-grounded observations, curated mental models, and structured
-  reflection packets.
-- Governance states, contradiction tracking, provenance, freshness decay, and
-  retention sweeps.
-- Compact progressive knowledge and reusable learned skills in
-  `knowledge.smem`.
-- Encrypted secret memory with explicit authorization before reveal.
-- Verified `.mnemonic` exports and durable-first physical partition erasure.
-- Content-free health, recall diagnostics, and optional Telemetry events for
-  memory, persistence, repair, maintenance, and erasure operations.
-- Plugs and adapters for extraction, embeddings, persistence, compaction,
-  labels, secrets, and action runtimes.
+Recall delivers `{:ok, packet_map}`; a successful governed save delivers the
+core's `{:governed, result}`. Packet maps use explicit per-record field
+allowlists, ISO timestamps and locked secret placeholders. Runtime options,
+raw input, generic record metadata, vectors and encryption material are not
+copied to checkpoints. Direct standalone calls retain native structs.
 
-## Documentation map
+The executor uses `Spectre.Mnemonic.ServerTool.execute/3` only after admission.
+A trusted command ID becomes `operation_id` for durable correlation; a host
+explicit override takes precedence. This is **not whole-ingestion idempotency**:
+an uncertain write must be reconciled, not blindly retried. The Server owns
+pending consent, expiry/resumption and result delivery; the Engine owns memory.
 
-- [Getting started](docs/GETTING_STARTED.md) — installation, namespace, scopes,
-  first workflow, and Spectre integration.
-- [Writing and connecting memory](docs/MEMORY_GUIDE.md) — `signal`, `remember`,
-  temporal data, plugs, embeddings, graphs, artifacts, actions, and secrets.
-- [Retrieval and knowledge](docs/RETRIEVAL_AND_KNOWLEDGE.md) — recall, search,
-  reflection, observations, mental models, governance, and progressive
-  knowledge.
-- [Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md) — stores,
-  compaction, scheduler, export, erasure, evaluation, and operational limits.
-- [Migrating to 0.2.0](docs/MIGRATING_TO_0_2.md) — DefaultEngine compatibility,
-  explicit Engine adoption, scope identity, adapter, and deployment changes.
-- [Privacy, data protection, and GDPR operations](docs/PRIVACY_AND_GDPR.md) —
-  responsibility boundaries, minimisation, retention, subject requests, and
-  verified erasure.
-- [API guide](docs/API_GUIDE.md) — every `SpectreMnemonic` facade call grouped by
-  use case, with return values and examples.
-- [`.mnemonic` format](docs/MNEMONIC_FORMAT.md) — normative container, privacy,
-  validation, and reader contract.
-- [Public API manifest](docs/PUBLIC_API.md) — normative compatibility surface.
-- [Release checklist](RELEASE.md) — version alignment, compatibility, quality,
-  documentation, distribution, and privacy gates.
+## Where GAM participates
 
-## Important boundaries
+The [Governed Act Model manifesto](https://spectre.guide/en/governed-act-model)
+distinguishes evidence, bounded authority, admitted Acts and unresolved duties.
+An installed tool or a model proposal is not user consent. Spectre's default
+cognitive path can classify, select, observe and prepare proposals without
+requesting end-user permission for every computation. The host declares the
+governed surface and its bindings; protected disclosure or resource use can
+also belong to that surface. GAM records the governed lifecycle and gates the
+host executor. Uncertain effects require reconciliation, not a blind retry.
 
-- Every operation addresses exactly one `{namespace, scope}` partition.
-  Omitting `scope:` selects only the unscoped partition.
-- Engine identity and durable `storage_id` are separate. An Engine name or PID
-  may be used for one call; runtime handles are never persisted.
-- The same `storage_id` must have exactly one active writer across all nodes.
-  Registry protection covers duplicate Engines only inside the current VM.
-- `recall/2` and `reflect/2` return evidence, not generated prose.
-- `forget/2` hides memory logically; `erase_partition/1` performs verified
-  physical erasure for supported stores.
-- `.mnemonic` read and stream calls validate detached exports. Format version 1
-  does not import or restore data into live memory.
-- A `.mnemonic` file is not encrypted. Exported copies, backups, provider data,
-  and host logs remain outside `erase_partition/1`.
-- Embeddings are optional. Text, fingerprints, graph traversal, and durable
-  scoring continue to work without a model.
-- Action recipes are inert data unless an application explicitly configures an
-  action runtime adapter.
+## Memory capabilities and documentation
 
-## Example and development
-
-Run the local end-to-end demonstration:
-
-```bash
-mix run --no-start example/demo.exs
-```
-
-Run the standard quality checks:
-
-```bash
-mix format --check-formatted
-mix compile --warnings-as-errors
-mix credo --strict
-mix dialyzer
-mix test
-mix docs --warnings-as-errors
-mix hex.audit
-```
-
-The default test suite is offline. Real local embedding and Spectre Agent test
-commands are listed in
-[Persistence and operations](docs/PERSISTENCE_AND_OPERATIONS.md#evaluation-and-development).
-
-## Spectre 0.4 Server tools
-
-```elixir
-install Spectre.Mnemonic,
-  automatic: false,
-  bind: [remember: :save_report]
-```
-
-`use Spectre.Server, tools: MyApp.AI` generates `mnemonic/3` from the Stack
-registration. `mnemonic(ctx, {:recall, cue}, on_result: :memories)` is cognitive.
-`mnemonic(ctx, {:remember, observation}, on_result: :saved)` becomes a governed
-`:save_report` proposal. The host must configure that GAM binding, its policy
-and executor. Without `bind:`, only recall is exposed. No helper is imported
-from this package and installation grants no write authority.
-
-An admitted host executor calls
-`Spectre.Mnemonic.ServerTool.execute(:remember, args, service_context)` and
-records its portable result before building GAM evidence. It must reconcile an
-uncertain write; this adapter does not claim provider idempotency. A trusted
-`service_context.command_id` is forwarded as the durable `operation_id` for
-correlation; an explicit host `operation_id` takes precedence. This identifier
-alone does not make the whole ingestion replay-safe: new memory/source IDs may
-be generated, so an uncertain save still requires reconciliation.
-`automatic: false` disables the automatic memory port while retaining explicit
-helpers, preventing implicit ingestion before an explicit save confirmation.
-The default `automatic: true` preserves the legacy integration.
-
-Returned packets expose an explicit allowlist for each supported record type,
-with timestamps as ISO strings. Unknown record types are rejected; new fields
-and generic record metadata do not automatically enter checkpoints. Runtime
-options, vectors and encryption material are excluded. Secret records remain
-locked in this projection, even when another caller obtained an authorized
-in-memory reveal. Automatic Server recall uses the same projection; standalone
-Mnemonic calls keep their native record contract.
-
-Run `SPECTRE_PATH=../spectre mix test` against the core 0.4 working branch.
-
-For an isolated Engine, supervise `Spectre.Stack.Runtime` with
-`stack: MyApp.AI, name: MyApp.AIRuntime,
-packages: [mnemonic: [data_root: "var/memory", namespace: "support"]]` and pass
-`stack_runtime: MyApp.AIRuntime` in the AgentServer runtime options. Mnemonic
-resolves its Engine resource for each operation; no Engine PID enters `ctx`
-or a checkpoint. The 0.2 Engine implementation is retained on this branch.
-
-Explicit `mnemonic` tools require a named `stack_runtime`; they never silently
-fall back to the compatibility DefaultEngine. Direct legacy `Memory` calls
-retain their compatibility behavior. For per-user memory, declare
-`isolate_by([:subject])` inside the `install Spectre.Mnemonic do ... end`
-block. Recall uses the Server's trusted `identity.subject`.
-The host candidate factory must copy that authenticated subject into the
-candidate's consequence; the admitted executor reconstructs its context from
-that committed partition, for example:
-
-```elixir
-# `payload` is the admitted candidate consequence, produced by the host.
-# The model's `{:remember, observation}` request cannot choose this partition.
-Spectre.Mnemonic.ServerTool.execute(:remember,
-  %{observation: payload["observation"]},
-  %{agent: MyApp.Agent, command_id: act.ref,
-    identity: %{subject: Spectre.Subject.new(payload["subject"])},
-    options: [stack_runtime: MyApp.AIRuntime]})
-```
-
-For `:conversation` isolation, the host also commits and restores the matching
-conversation identifier. Missing isolation dimensions fail closed before any
-write. The Stack runtime is host configuration, not a model-supplied argument.
+- [Direct memory APIs and workflows](docs/STANDALONE.md)
+- [Writing, embeddings, graphs and secrets](docs/MEMORY_GUIDE.md)
+- [Retrieval and knowledge](docs/RETRIEVAL_AND_KNOWLEDGE.md)
+- [Persistence, operations and erasure](docs/PERSISTENCE_AND_OPERATIONS.md)
+- [Public API contract](docs/PUBLIC_API.md)
+- [Engine 0.2 migration](docs/MIGRATING_TO_0_2.md)
+- [Historical Instance integration](docs/LEGACY_0_3.md)
