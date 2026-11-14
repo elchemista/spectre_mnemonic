@@ -159,3 +159,6 @@ defmodule SpectreMnemonic.MemoryCase do
     end)
   end
 end
+
+Code.require_file("support/server_tool_stack.ex", __DIR__)
+Code.require_file("support/server_tool_agent.ex", __DIR__)

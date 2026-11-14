@@ -5,6 +5,9 @@ defmodule Spectre.Mnemonic.ServerTool.Projection do
   # silently persisted into an agent conversation. Generic metadata, raw input,
   # storage configuration, embeddings and runtime handles remain private.
   @fields %{
+    SpectreMnemonic.Reflection.Packet =>
+      ~w(query mental_models observations raw_memories knowledge evidence citations confidence usage)a,
+    SpectreMnemonic.Atlas => ~w(nodes edges clusters stats layout_hints truncated)a,
     SpectreMnemonic.Recall.Packet =>
       ~w(cue query_context search_results active_status moments observations mental_models episodes knowledge artifacts associations action_recipes confidence usage)a,
     SpectreMnemonic.Intake.Packet =>

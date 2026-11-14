@@ -14,7 +14,7 @@ version numbers remain independent. Use the Git/path dependencies in the
 | Application behavior | Flow bodies / Instance and Run continuation | `Spectre.Server` callbacks and queued commands |
 | Tool entry | Direct call / Action provider | Generated helper schedules a command; no import from package |
 | Results | Immediate value or Invocation resumption | `handle_result(tag, result, ctx)` after worker result acquisition |
-| Effects | Legacy application policies | Host GAM candidate, presentation, consent and admitted executor |
+| Effects | Legacy application policies | Automatic AgentServer GAM lifecycle and registered effect adapter |
 | Durability | Legacy Run/Instance projection | Server checkpoint, inbox/outbox and typed portable results |
 
 The migration does **not** remove `SpectreMnemonic.Engine` and the direct signal/remember/recall/search APIs. Direct calls do not acquire
@@ -40,7 +40,7 @@ early. Never put PIDs, functions or provider clients into persisted arguments.
 
 Cognitive `:safe` operations can replay after interruption. `:never` operations
 return `{:tool_unknown, details}` after uncertain execution and need application
-reconciliation. Governed operations require an explicit host binding and follow
+reconciliation. Governed operations require an allowed operation entry in automatic GAM and follow
 GAM reconciliation; they are not automatically retried as cognitive calls.
 Native GenServer callbacks remain available through the Server behavior; return
 commands through that boundary rather than bypassing its bookkeeping.
@@ -60,41 +60,37 @@ email address or sender handle. `:instance` refers to the legacy Instance key
 and should not be copied into a new AgentServer without deliberately supplying
 that compatibility identity.
 
-## Host executor and partition
+## Expanded operation catalogue
 
-The callback's tool request contains the observation, not authority. The host
-candidate factory must commit the authenticated partition into its consequence:
+The generated helper now exposes nine explicit read operations and thirteen
+host-bindable writes. Start with `mnemonic(ctx, {:search, cue, limit: 5},
+on_result: :found)` for flat active/durable results, and `{:recall, cue}` for a
+context packet. See the [operation table and option placement](../README.md#choosing-a-memory-operation-in-an-agentserver).
+No additional imports or package-specific macros are needed.
 
-```elixir
-# In the host's candidate factory, using trusted service context:
-payload = %{
-  "observation" => args.observation,
-  "subject" => context.identity.subject.id
-}
-# Include payload in the candidate consequence and bind its consent material.
-```
+Read helpers now disable reinforcement and secret reveal. Saving, learning,
+forgetting and maintenance remain distinct governed operations. Recompile the
+Stack and Server together after changing descriptors; review existing checkpoints
+instead of bypassing the immutable tool-contract mismatch.
 
-The admitted executor reconstructs the same context from that committed payload:
+## Authenticated partition
 
-```elixir
-Spectre.Mnemonic.ServerTool.execute(:remember,
-  %{observation: payload["observation"]},
-  %{agent: MyApp.MemoryAgent, command_id: act.ref,
-    identity: %{subject: Spectre.Subject.new(payload["subject"])},
-    options: [stack_runtime: MyApp.MemoryRuntime]})
-```
+The callback's tool request contains the observation, not authority. Configure
+`identity` at AgentServer startup, provide the named Stack runtime and allow the
+registered memory operation. Spectre freezes the complete authenticated partition
+and normalized arguments in the Candidate. After admission, its registered effect
+adapter reconstructs the same execution identity from that committed material.
 
-A custom subject scheme requires committing/reconstructing the complete canonical
-subject identity, not merely its ID. For `:conversation` isolation, also commit
-and restore the conversation identifier. The runtime name is trusted host
-configuration. Missing Stack runtime or required partition fails before writing;
-explicit tools do not silently use DefaultEngine. Direct legacy `Memory` calls
-retain their compatibility behavior.
+For `:conversation` isolation, provide the conversation identifier in trusted
+identity as well. The model cannot replace subject, conversation or runtime name.
+Missing Stack runtime or required partition fails before writing; explicit tools
+do not silently use DefaultEngine. Direct legacy `Memory` calls retain their
+compatibility behavior.
 
-The executor projects its result before building GAM evidence. Command identity
-is forwarded as `operation_id` (explicit host options win), enabling correlation
-with the persisted batch. This is not full-ingestion idempotency: reconciliation
-is still required after an ambiguous acknowledgement.
+The adapter projects its result before building GAM evidence. Command identity
+is forwarded as `operation_id`, enabling correlation with the persisted batch.
+This is not full-ingestion idempotency: reconciliation is still required after
+an ambiguous acknowledgement.
 
 ## Portable results and engine migration
 
@@ -135,8 +131,41 @@ See [core AgentServer](https://github.com/elchemista/spectre/blob/feature/agent-
 3. Replace legacy flow effects with explicit helper commands/result handlers;
    retain direct APIs only where caller-owned execution is intentional.
 4. Configure named resources and trusted identity required by the package.
-5. Bind governed effects to the host's candidates/executors and consent handling.
+5. Configure allowed operations and confirmation in AgentServer; use
+   `handle_action/2` for business checks. Spectre constructs GAM records and runs
+   the registered executor only after admission.
 6. Test refused, uncertain and interrupted paths as well as successful results;
    verify portable snapshots before deploying existing conversations.
 7. Review checkpoint/installation changes explicitly; never replay a potentially
    executed effect just to work around a migration error.
+
+## Reusable Skill servers
+
+Use the Stack-generated `mnemonic` helper in a Skill's ordinary
+`Spectre.Server` callbacks. The Agent mounts `Spectre.Skill, server: ...`; each
+mount then owns its GenServer, state, workers, streams, pending intentions and
+checkpoint key. No package-specific Skill adapter or extra installation is needed.
+
+```text
+AgentServer ─────┐
+Research Skill ──┼──→ one automatic GAM boundary → same Domain / authority ledger
+Knowledge Skill ┘
+```
+
+The root creates this connection once and passes it to the children. Do not
+bootstrap another Domain, copy the ledger, implement a Skill Host or extend
+ingress manually. Mounting grants no authority. Governed effects must satisfy
+both root `gam:` operations and the mount's `governed:` references; scoped
+Kinetic references keep their complete mounted scope. Ledger/Lab inspect the
+calling runtime's checkpoint, not a copy of the shared GAM history.
+
+The shared kernel orders admission while workers can run concurrently. Every
+proposal retains its Skill invocation provenance. A confirmation belongs to the
+originating mount and exact presentation, so it cannot approve a different
+Skill's pending request. Timer expiry and closure enter the same lifecycle
+ledger without erasing Acts, uncertain Outcomes or Duties. No per-Skill GAM
+configuration is required.
+
+See the [core shared/local ownership table and confirmation example](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md),
+[automatic GAM contract](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/MANAGED_GAM.md)
+and [LiveView showcase](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/DEMO.md).

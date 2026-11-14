@@ -16,6 +16,23 @@ release declarations.
   and documentation index, and scope the previous Instance examples as legacy.
 - Retain native/direct APIs; installation does not grant authority or consent.
 
+### Expanded AgentServer memory operations
+
+- Add explicit search, reflection, observation/model/knowledge queries, status and
+  atlas reads; expose the scoped write catalogue only through host bindings.
+- Validate operation-specific options; protect runtime/partition identity and
+  keep memory results portable. Read helpers do not reinforce or reveal secrets.
+- Preserve the owning namespace during default compact-knowledge processing.
+  Named-engine search, learning, compaction, forget and isolation have regression tests.
+
+### Skill runtime regression
+
+- Reinforcement resolves a record's owning engine from its internal namespace
+  when no engine reference is stored in metadata. Named Stack engines no longer
+  route graph updates through the default engine. Busy update errors propagate
+  without crashing recall. Covered by a named-engine regression and the
+  Spectre 0.4 two-Skill LiveView showcase.
+
 
 ## [0.2.0] - 2026-08-26
 

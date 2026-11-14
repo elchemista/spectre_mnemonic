@@ -5,23 +5,14 @@ end
 defmodule Spectre.Mnemonic.ServerToolTest do
   use SpectreMnemonic.MemoryCase, async: false
 
+  alias Spectre.GAM.Canonical.Value
+  alias Spectre.Mnemonic.Memory, as: MnemonicMemory
   alias Spectre.Mnemonic.ServerTool
+  alias Spectre.Mnemonic.ServerToolTest.{Agent, Stack}
+  alias Spectre.Stack.Tools
+  alias SpectreMnemonic.Engine.Context, as: EngineContext
   alias SpectreMnemonic.Memory.{Moment, Secret}
-
-  defmodule Stack do
-    use Spectre.Stack
-
-    install Spectre.Mnemonic,
-      namespace: :server_tool_test,
-      automatic: false,
-      bind: [remember: :save_report] do
-      isolate_by([:subject])
-    end
-  end
-
-  defmodule Agent do
-    use Spectre.Agent, stack: Stack
-  end
+  alias SpectreMnemonic.Persistence.Manager
 
   test "remember requires an explicit governed host binding" do
     assert %{recall: %{path: :cognitive}} = Spectre.Mnemonic.tools(%{}).mnemonic.operations
@@ -30,7 +21,7 @@ defmodule Spectre.Mnemonic.ServerToolTest do
     assert config.isolate_by == [:subject]
     tools = Spectre.Mnemonic.tools(config)
     assert %{path: :governed, operation: :save_report} = tools.mnemonic.operations.remember
-    assert Spectre.Stack.Tools.validate!(tools) == tools
+    assert Tools.validate!(tools) == tools
     refute Keyword.has_key?(Agent.__spectre_config__(), :memory)
 
     assert_raise ArgumentError, fn ->
@@ -65,7 +56,7 @@ defmodule Spectre.Mnemonic.ServerToolTest do
     refute inspect(data) =~ "SECRET"
     refute inspect(data) =~ "PLAINTEXT"
     refute inspect(data) =~ "CIPHER"
-    assert {:ok, _} = Spectre.GAM.Canonical.Value.encode(data)
+    assert {:ok, _} = Value.encode(data)
 
     assert {:error, :nonportable_mnemonic_result} =
              ServerTool.project(:recall, {:ok, %{runtime: self()}})
@@ -146,10 +137,10 @@ defmodule Spectre.Mnemonic.ServerToolTest do
     raw = ServerTool.invoke(:recall, request, %{service_context: context})
     assert {:ok, {:ok, recalled}} = ServerTool.project(:recall, raw)
     assert Enum.any?(recalled.moments, &(&1.text == "Luca uses Shopify"))
-    assert {:ok, _} = Spectre.GAM.Canonical.Value.encode(recalled)
+    assert {:ok, _} = Value.encode(recalled)
 
     assert {:ok, automatic} =
-             Spectre.Mnemonic.Memory.recall("Shopify",
+             MnemonicMemory.recall("Shopify",
                agent: Agent,
                stack_runtime: runtime_name,
                subject: Spectre.Subject.new("alice"),
@@ -157,21 +148,25 @@ defmodule Spectre.Mnemonic.ServerToolTest do
              )
 
     refute is_struct(automatic)
-    assert {:ok, _} = Spectre.GAM.Canonical.Value.encode(automatic)
+    assert {:ok, _} = Value.encode(automatic)
 
     assert {:ok, memory_opts} =
-             Spectre.Mnemonic.Memory.options(
+             MnemonicMemory.options(
                Agent,
                Keyword.put(context.options, :subject, context.identity.subject)
              )
 
     assert {:ok, records} =
-             SpectreMnemonic.Engine.Context.with(
+             EngineContext.with(
                memory_opts,
-               &SpectreMnemonic.Persistence.Manager.replay/1
+               &Manager.replay/1
              )
 
-    assert Enum.any?(records, &(&1.operation_id == "admitted:save-report"))
+    # Intake has per-record operation ids; the admitted command identifies the batch.
+    batch =
+      "batch_" <> Base.url_encode64(:crypto.hash(:sha256, "admitted:save-report"), padding: false)
+
+    assert Enum.any?(records, &(&1.batch_id == batch))
 
     explicit = %{
       context
@@ -182,9 +177,9 @@ defmodule Spectre.Mnemonic.ServerToolTest do
              ServerTool.execute(:remember, %{observation: "Giulia uses Phoenix"}, explicit)
 
     assert {:ok, records} =
-             SpectreMnemonic.Engine.Context.with(
+             EngineContext.with(
                memory_opts,
-               &SpectreMnemonic.Persistence.Manager.replay/1
+               &Manager.replay/1
              )
 
     expected_batch =

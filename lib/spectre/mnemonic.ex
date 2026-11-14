@@ -14,6 +14,11 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
           isolate_by([:subject])
         end
 
+    The tagged helper also supports `{:search, cue, limit: 5}`, `{:reflect, cue}`,
+    `{:atlas}` and specialized evidence queries. Read helpers disable reinforcement
+    and secret reveal. Additional writes such as `forget` and `learn` need their
+    own `bind:` entries; see the README operation table.
+
     Explicit recall requires a named Stack runtime and every declared identity
     partition. It returns a portable packet in `handle_result/3`. Explicit
     remember creates a proposal for the host's bound operation; the admitted
@@ -33,6 +38,7 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
 
     alias Spectre.Instance.Ref, as: InstanceRef
     alias Spectre.Mnemonic.Memory, as: MnemonicMemory
+    alias Spectre.Mnemonic.ServerTool.Operations
     alias Spectre.Stack.DSL
     alias SpectreMnemonic.Engine.Context, as: EngineContext
     alias SpectreMnemonic.Erasure.Report, as: ErasureReport
@@ -83,23 +89,22 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
     def tools(config) do
       bindings = config |> Map.get(:options, []) |> Keyword.get(:bind, [])
 
-      unless Keyword.keyword?(bindings) and Keyword.keys(bindings) -- [:remember] == [],
-        do: raise(ArgumentError, "Mnemonic bind accepts only remember: host_operation")
+      writes = Operations.writes()
 
-      operations = %{recall: %{path: :cognitive, retry: :safe, max_bytes: 1_048_576}}
+      unless Keyword.keyword?(bindings) and Keyword.keys(bindings) -- writes == [],
+        do:
+          raise(
+            ArgumentError,
+            "Mnemonic bind accepts only explicit memory write operations: #{inspect(writes)}"
+          )
+
+      reads = Operations.reads()
+      operations = Map.new(reads, &{&1, %{path: :cognitive, retry: :safe, max_bytes: 1_048_576}})
 
       operations =
-        case Keyword.fetch(bindings, :remember) do
-          :error ->
-            operations
-
-          {:ok, operation} ->
-            Map.put(operations, :remember, %{
-              path: :governed,
-              operation: operation,
-              max_bytes: 1_048_576
-            })
-        end
+        Enum.reduce(bindings, operations, fn {name, operation}, acc ->
+          Map.put(acc, name, %{path: :governed, operation: operation, max_bytes: 1_048_576})
+        end)
 
       %{
         mnemonic: %{
@@ -109,6 +114,40 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
           operations: operations
         }
       }
+    end
+
+    @doc "Registers explicitly bound writes for managed GAM, with authenticated partitions."
+    @impl Spectre.Stack.Installable
+    @spec effects(map()) :: map()
+    def effects(config) do
+      partition =
+        Enum.filter(
+          Map.get(config, :isolate_by, []),
+          &(&1 in [:subject, :conversation, :task, :flow])
+        )
+
+      config
+      |> tools()
+      |> get_in([:mnemonic, :operations])
+      |> Enum.reduce(%{}, fn
+        {name, %{path: :governed, operation: operation}}, effects ->
+          if Map.has_key?(effects, operation),
+            do: raise(ArgumentError, "memory writes must have distinct governed bindings")
+
+          Map.put(effects, operation, %{
+            contract: 1,
+            adapter: Spectre.Mnemonic.ServerTool,
+            operation: name,
+            side_effect: :non_idempotent,
+            material: :arguments,
+            partition: partition,
+            schema_hash: nil,
+            config: %{}
+          })
+
+        _, effects ->
+          effects
+      end)
     end
 
     @impl Spectre.Stack.Installable

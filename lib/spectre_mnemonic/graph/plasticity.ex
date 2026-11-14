@@ -172,11 +172,12 @@ defmodule SpectreMnemonic.Graph.Plasticity do
   end
 
   @spec conditional_hot_update(Association.t(), non_neg_integer()) ::
-          {:cont, {:ok, non_neg_integer()}}
+          {:cont, {:ok, non_neg_integer()}} | {:halt, {:error, term()}}
   defp conditional_hot_update(updated, count) do
     case Focus.upsert_association_if_present(updated) do
       :ok -> {:cont, {:ok, count + 1}}
       :missing -> {:cont, {:ok, count}}
+      {:error, reason} -> {:halt, {:error, reason}}
     end
   end
 
