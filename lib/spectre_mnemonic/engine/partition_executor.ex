@@ -34,15 +34,27 @@ defmodule SpectreMnemonic.Engine.PartitionExecutor do
   end
 
   def key(record) when is_map(record) do
+    {namespace, scope} = Scope.partition(record)
+
     engine =
       record
       |> Map.get(:metadata, %{})
       |> then(fn metadata ->
-        if is_map(metadata), do: Map.get(metadata, :engine_ref, :default), else: :default
+        if is_map(metadata), do: Map.get(metadata, :engine_ref), else: nil
       end)
 
-    {namespace, scope} = Scope.partition(record)
-    {:memory_partition, engine, namespace, scope}
+    {:memory_partition, engine || namespace_engine(namespace), namespace, scope}
+  end
+
+  # Persisted graph records need not contain a runtime engine handle. Resolve
+  # their internal namespace before falling back to the legacy default engine;
+  # otherwise reinforcement enters another executor and another set of tables.
+  @spec namespace_engine(term()) :: term()
+  defp namespace_engine(namespace) do
+    case SpectreMnemonic.Engine.resolve_internal_namespace(namespace) do
+      {:ok, runtime} -> runtime.config.ref
+      {:error, _reason} -> :default
+    end
   end
 
   @doc false

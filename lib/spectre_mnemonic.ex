@@ -2,11 +2,16 @@ defmodule SpectreMnemonic do
   @moduledoc """
   Public facade for the Spectre Mnemonic memory engine.
 
-  This module is the API users should call. Implementation details live under
+  This module is the standalone API. Implementation details live under
   `SpectreMnemonic.*` so the outside surface can stay small and stable.
 
   Spectre Mnemonic is not a database of everything.
   Spectre Mnemonic is a living focus that slowly becomes organized memory.
+
+  This is the direct memory API. In a Spectre core 0.4 AgentServer, install
+  `Spectre.Mnemonic` in the Stack and use its generated `mnemonic/3` helper.
+  Explicit tools require the named Stack runtime and authenticated partition;
+  a governed remember operation is executed only after host GAM admission.
   """
 
   alias SpectreMnemonic.Active.Focus

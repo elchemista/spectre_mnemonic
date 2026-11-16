@@ -1,16 +1,44 @@
 if Code.ensure_loaded?(Spectre.Stack.Installable) do
   defmodule Spectre.Mnemonic do
     @moduledoc """
-    Stack-installable definition for Spectre Mnemonic.
+    Stack installation and supervised memory resources for Spectre core 0.4.
 
-    The installation compiles memory-store and isolation declarations into
-    immutable data. Selecting it activates the Spectre memory adapter while
-    leaving ownership of the Mnemonic application, named processes, and ETS
-    tables with the host.
+    Install Mnemonic in a Stack, select it on the Agent, and declare
+    `use Spectre.Server, tools: MyApp.AI` on the Server. This installation's
+    `tools/1` descriptor generates `mnemonic/3`; callers do not import that
+    helper from this module.
+
+        install Spectre.Mnemonic,
+          automatic: false,
+          bind: [remember: :save_notes] do
+          isolate_by([:subject])
+        end
+
+    The tagged helper also supports `{:search, cue, limit: 5}`, `{:reflect, cue}`,
+    `{:atlas}` and specialized evidence queries. Read helpers disable reinforcement
+    and secret reveal. Additional writes such as `forget` and `learn` need their
+    own `bind:` entries; see the README operation table.
+
+    Explicit recall requires a named Stack runtime and every declared identity
+    partition. It returns a portable packet in `handle_result/3`. Explicit
+    remember creates a proposal for the host's bound operation; the admitted
+    executor calls `Spectre.Mnemonic.ServerTool.execute/3` only after GAM has
+    authorized that effect. The host commits the authenticated partition in
+    the candidate, rather than trusting a model-supplied subject.
+
+    Use `automatic: false` when saving requires explicit consent. Otherwise
+    the legacy automatic memory adapter also recalls and persists turns.
+    The runtime supervises each Stack's engine; live processes and storage
+    handles do not enter Server checkpoints. The direct `SpectreMnemonic`
+    API remains available independently of the generated helpers.
+
+    See the [Governed Act Model](https://spectre.guide/en/governed-act-model)
+    for authority, evidence, and unresolved-effect responsibilities.
     """
 
     alias Spectre.Instance.Ref, as: InstanceRef
     alias Spectre.Mnemonic.Memory, as: MnemonicMemory
+    alias Spectre.Mnemonic.ServerTool.Operations
     alias Spectre.Stack.DSL
     alias SpectreMnemonic.Engine.Context, as: EngineContext
     alias SpectreMnemonic.Erasure.Report, as: ErasureReport
@@ -22,7 +50,7 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
       id: :mnemonic,
       version: "0.2.0",
       contract: 1,
-      spectre: "~> 0.3.3",
+      spectre: "~> 0.4.0",
       provides: [{:service, :memory}],
       requires: [],
       conflicts: [],
@@ -55,6 +83,71 @@ if Code.ensure_loaded?(Spectre.Stack.Installable) do
         {:error, _reason} = error ->
           error
       end
+    end
+
+    @impl Spectre.Stack.Installable
+    def tools(config) do
+      bindings = config |> Map.get(:options, []) |> Keyword.get(:bind, [])
+
+      writes = Operations.writes()
+
+      unless Keyword.keyword?(bindings) and Keyword.keys(bindings) -- writes == [],
+        do:
+          raise(
+            ArgumentError,
+            "Mnemonic bind accepts only explicit memory write operations: #{inspect(writes)}"
+          )
+
+      reads = Operations.reads()
+      operations = Map.new(reads, &{&1, %{path: :cognitive, retry: :safe, max_bytes: 1_048_576}})
+
+      operations =
+        Enum.reduce(bindings, operations, fn {name, operation}, acc ->
+          Map.put(acc, name, %{path: :governed, operation: operation, max_bytes: 1_048_576})
+        end)
+
+      %{
+        mnemonic: %{
+          contract: 1,
+          adapter: Spectre.Mnemonic.ServerTool,
+          default: nil,
+          operations: operations
+        }
+      }
+    end
+
+    @doc "Registers explicitly bound writes for managed GAM, with authenticated partitions."
+    @impl Spectre.Stack.Installable
+    @spec effects(map()) :: map()
+    def effects(config) do
+      partition =
+        Enum.filter(
+          Map.get(config, :isolate_by, []),
+          &(&1 in [:subject, :conversation, :task, :flow])
+        )
+
+      config
+      |> tools()
+      |> get_in([:mnemonic, :operations])
+      |> Enum.reduce(%{}, fn
+        {name, %{path: :governed, operation: operation}}, effects ->
+          if Map.has_key?(effects, operation),
+            do: raise(ArgumentError, "memory writes must have distinct governed bindings")
+
+          Map.put(effects, operation, %{
+            contract: 1,
+            adapter: Spectre.Mnemonic.ServerTool,
+            operation: name,
+            side_effect: :non_idempotent,
+            material: :arguments,
+            partition: partition,
+            schema_hash: nil,
+            config: %{}
+          })
+
+        _, effects ->
+          effects
+      end)
     end
 
     @impl Spectre.Stack.Installable

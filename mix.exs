@@ -12,6 +12,7 @@ defmodule SpectreMnemonic.MixProject do
       app: :spectre_mnemonic,
       name: "SpectreMnemonic",
       version: @version,
+      package: package(),
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       test_ignore_filters: [~r|^test/fixtures/|],
@@ -19,10 +20,16 @@ defmodule SpectreMnemonic.MixProject do
       description: description(),
       dialyzer: [plt_add_apps: [:mix]],
       docs: [
+        assets: %{"docs/assets" => "docs/assets"},
         main: "readme",
-        source_ref: "v#{@version}",
+        source_ref: "feature/stack-tools-0.4",
         extras: [
           "README.md",
+          "docs/INDEX.md",
+          "docs/AGENT_SERVER.md",
+          "docs/MIGRATING_TO_SPECTRE_0_4.md",
+          "docs/LEGACY_0_3.md",
+          "docs/STANDALONE.md",
           "docs/GETTING_STARTED.md",
           "docs/MEMORY_GUIDE.md",
           "docs/RETRIEVAL_AND_KNOWLEDGE.md",
@@ -38,6 +45,7 @@ defmodule SpectreMnemonic.MixProject do
         ],
         groups_for_extras: [
           Guides: [
+            "docs/AGENT_SERVER.md",
             "docs/GETTING_STARTED.md",
             "docs/MEMORY_GUIDE.md",
             "docs/RETRIEVAL_AND_KNOWLEDGE.md",
@@ -103,7 +111,20 @@ defmodule SpectreMnemonic.MixProject do
         {:spectre, path: Path.expand(path, __DIR__), override: true, optional: true}
 
       _unset ->
-        {:spectre, "~> 0.3.3", optional: true}
+        {:spectre, "~> 0.4.0", optional: true}
     end
+  end
+
+  defp package do
+    [
+      licenses: ["Apache-2.0"],
+      links: %{
+        "GitHub" => @source_url,
+        "Documentation" => "#{@source_url}/blob/feature/stack-tools-0.4/README.md",
+        "Changelog" => "#{@source_url}/blob/feature/stack-tools-0.4/CHANGELOG.md"
+      },
+      files:
+        ~w(lib priv docs example mix.exs .formatter.exs README.md CHANGELOG.md RELEASE.md LICENSE)
+    ]
   end
 end

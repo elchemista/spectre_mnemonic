@@ -423,10 +423,15 @@ optional crypto result.
 | sweep_expired/1 | expired moments | hidden | may remain until compaction | allowed |
 | erase_partition/1 | entire explicit partition | absent | verified removal for supported stores | optional sealing |
 
-For Spectre-owned Engines, use `Spectre.Mnemonic.erasure_plan/2` and
+For the legacy Spectre Instance integration, use `Spectre.Mnemonic.erasure_plan/2` and
 `erase_instance/2` with the stable `%Spectre.Instance.Ref{}` and named Stack
 Runtime. These functions resolve the same core partition and never place the
 runtime handle in durable data.
+
+A core 0.4 AgentServer using subject/conversation isolation must explicitly
+address that same host-owned partition when erasing data; do not invent an
+Instance reference or assume `erase_instance/2` targets a Server partition.
+See the [0.4 migration guide](MIGRATING_TO_SPECTRE_0_4.md#authenticated-partition).
 
 ## Export a partition
 

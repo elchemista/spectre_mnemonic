@@ -10,6 +10,8 @@ if Code.ensure_loaded?(Spectre.Instance.Ref) do
     records contain dimension names and outcomes, never subjects or content.
     """
 
+    alias Spectre.Mnemonic.ServerTool
+
     @spec recall(term(), keyword()) :: {:ok, term()} | {:error, term()}
     def recall(cue, opts) when is_list(opts) do
       with {:ok, agent} <- agent(opts),
@@ -17,7 +19,16 @@ if Code.ensure_loaded?(Spectre.Instance.Ref) do
              options(agent, Keyword.put(opts, :mnemonic_operation_kind, :recall)) do
         result = SpectreMnemonic.recall(cue, memory_opts)
         record(agent, :mnemonic_recall, result, memory_opts)
-        result
+        recall_result(result, Keyword.get(opts, :spectre_server, false))
+      end
+    end
+
+    defp recall_result(result, false), do: result
+
+    defp recall_result(result, true) do
+      case ServerTool.project(:recall, result) do
+        {:ok, portable} -> portable
+        {:error, reason} -> {:error, reason}
       end
     end
 

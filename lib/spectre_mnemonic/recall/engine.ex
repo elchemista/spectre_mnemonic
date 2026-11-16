@@ -150,7 +150,10 @@ defmodule SpectreMnemonic.Recall.Engine do
         used_tokens
       )
 
-    revealed = Enum.map(components.moments, &Secrets.maybe_reveal(&1, opts))
+    revealed =
+      if Keyword.get(opts, :reveal_secrets?, true),
+        do: Enum.map(components.moments, &Secrets.maybe_reveal(&1, opts)),
+        else: components.moments
 
     episodes = recall_episodes(revealed, opts)
     trace = recall_trace(traversal.paths, revealed, episodes, opts)
@@ -197,7 +200,8 @@ defmodule SpectreMnemonic.Recall.Engine do
           )
       }
 
-      maybe_reinforce(traversal.paths, components.moments, opts)
+      if Keyword.get(opts, :reinforce?, true),
+        do: maybe_reinforce(traversal.paths, components.moments, opts)
 
       {:ok, packet}
     end

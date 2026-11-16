@@ -6,6 +6,42 @@ The current package and public API version is `0.2.0`. The numbered sections
 below record internal development milestones; they are not published package
 release declarations.
 
+## [Unreleased — Spectre core 0.4 integration]
+
+- Exercise the existing 0.4 branch in CI against explicit compatible source checkouts; refresh obsolete dependency locks.
+
+- Add Apache-2.0 package metadata, source links and explicit distribution files,
+  including guides and examples, for release artifact validation.
+
+- Target the unreleased core 0.4 Stack contract on `feature/stack-tools-0.4`;
+  satellite package versions remain independent.
+- Register generated Server helpers through `tools/1`, with portable results,
+  explicit cognitive scheduling and host-bound governed effects.
+- Document a runnable Stack → Agent → Server setup, with package-specific
+  contracts and links to the shared GAM, Skill and recovery guides. Retained
+  standalone and Instance/Run APIs remain documented separately.
+- Move the AgentServer read/write catalogue and result contracts into a focused
+  memory guide; keep Engine setup and the first recall/save flow in the README.
+- Retain native/direct APIs; installation does not grant authority or consent.
+
+### Expanded AgentServer memory operations
+
+- Add explicit search, reflection, observation/model/knowledge queries, status and
+  atlas reads; expose the scoped write catalogue only through host bindings.
+- Validate operation-specific options; protect runtime/partition identity and
+  keep memory results portable. Read helpers do not reinforce or reveal secrets.
+- Preserve the owning namespace during default compact-knowledge processing.
+  Named-engine search, learning, compaction, forget and isolation have regression tests.
+
+### Skill runtime regression
+
+- Reinforcement resolves a record's owning engine from its internal namespace
+  when no engine reference is stored in metadata. Named Stack engines no longer
+  route graph updates through the default engine. Busy update errors propagate
+  without crashing recall. Covered by a named-engine regression and the
+  Spectre 0.4 two-Skill LiveView showcase.
+
+
 ## [0.2.0] - 2026-08-26
 
 ### Highlights

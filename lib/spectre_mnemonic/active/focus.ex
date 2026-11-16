@@ -192,7 +192,7 @@ defmodule SpectreMnemonic.Active.Focus do
   end
 
   @doc false
-  @spec upsert_association_if_present(Association.t()) :: :ok | :missing
+  @spec upsert_association_if_present(Association.t()) :: :ok | :missing | {:error, term()}
   def upsert_association_if_present(%Association{} = association) do
     Command.run_for_record(association, fn -> do_upsert_association_if_present(association) end)
   end

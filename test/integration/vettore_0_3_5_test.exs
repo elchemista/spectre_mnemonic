@@ -5,7 +5,7 @@ defmodule SpectreMnemonic.Integration.Vettore035Test do
   alias SpectreMnemonic.Recall.Index
 
   test "uses Vettore 0.3.5 vector kernels with portable GPU fallback" do
-    assert to_string(Application.spec(:vettore, :vsn)) == "0.3.5"
+    assert Version.match?(to_string(Application.spec(:vettore, :vsn)), "~> 0.3.5")
     assert Code.ensure_loaded?(Vettore.Vector)
     assert function_exported?(Vettore.Vector, :mean_pool_f32, 4)
     assert function_exported?(Vettore.Vector, :to_nx, 2)

@@ -473,6 +473,11 @@ run/3.
 
 ## Engine and Spectre integration calls
 
+For new core 0.4 applications use the [Server helper and authenticated partition guide](MIGRATING_TO_SPECTRE_0_4.md).
+The automatic memory port and Instance erasure calls below are retained
+compatibility APIs; explicit tools require a named Stack runtime and trusted
+partition identity. Standalone Engine calls remain unchanged.
+
 ### SpectreMnemonic.Engine
 
 Start one independent memory runtime under your supervisor:
