@@ -8,12 +8,20 @@ release declarations.
 
 ## [Unreleased — Spectre core 0.4 integration]
 
+- Exercise the existing 0.4 branch in CI against explicit compatible source checkouts; refresh obsolete dependency locks.
+
+- Add Apache-2.0 package metadata, source links and explicit distribution files,
+  including guides and examples, for release artifact validation.
+
 - Target the unreleased core 0.4 Stack contract on `feature/stack-tools-0.4`;
   satellite package versions remain independent.
 - Register generated Server helpers through `tools/1`, with portable results,
   explicit cognitive scheduling and host-bound governed effects.
-- Rewrite the README around Stack → Agent → Server, add the 0.3 migration guide
-  and documentation index, and scope the previous Instance examples as legacy.
+- Document a runnable Stack → Agent → Server setup, with package-specific
+  contracts and links to the shared GAM, Skill and recovery guides. Retained
+  standalone and Instance/Run APIs remain documented separately.
+- Move the AgentServer read/write catalogue and result contracts into a focused
+  memory guide; keep Engine setup and the first recall/save flow in the README.
 - Retain native/direct APIs; installation does not grant authority or consent.
 
 ### Expanded AgentServer memory operations

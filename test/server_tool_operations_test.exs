@@ -5,7 +5,7 @@ defmodule Spectre.Mnemonic.ServerToolOperationsTest do
   alias Spectre.Mnemonic.ServerTool
   alias Spectre.Mnemonic.ServerTool.Operations
   alias Spectre.Mnemonic.ServerToolTest.{Agent, Stack}
-  alias Spectre.Stack.Tools
+  alias Spectre.Stack.{Effects, Tools}
   alias SpectreMnemonic.Engine.Context, as: EngineContext
   alias SpectreMnemonic.Persistence.Manager
 
@@ -16,7 +16,7 @@ defmodule Spectre.Mnemonic.ServerToolOperationsTest do
     assert descriptor.operation == :remember
     assert descriptor.partition == [:subject]
     assert %{} = Spectre.Mnemonic.effects(%{})
-    assert Spectre.Stack.Effects.validate!(%{save_notes: descriptor})
+    assert Effects.validate!(%{save_notes: descriptor})
 
     assert_raise ArgumentError, fn ->
       Spectre.Mnemonic.effects(%{options: [bind: [remember: :shared, forget: :shared]]})

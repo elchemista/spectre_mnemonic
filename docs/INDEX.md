@@ -3,6 +3,7 @@
 Start with the current README for core 0.4; legacy examples are explicitly separated.
 
 - [Current 0.4 overview and example](../README.md)
+- [AgentServer reads, writes and results](AGENT_SERVER.md)
 - [Migration from core 0.3](MIGRATING_TO_SPECTRE_0_4.md)
 - [Standalone APIs and workflows](STANDALONE.md)
 - [Public API contract](PUBLIC_API.md)

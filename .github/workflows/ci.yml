@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/stack-tools-0.4
   pull_request:
   workflow_dispatch:
 
@@ -39,6 +40,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Check out compatible spectre
+        uses: actions/checkout@v6
+        with:
+          repository: elchemista/spectre
+          ref: feature/agent-server-gam
+          path: _compat/spectre
+          persist-credentials: false
+
+      - name: Select compatible dependency sources
+        run: |
+          echo "SPECTRE_PATH=$GITHUB_WORKSPACE/_compat/spectre" >> "$GITHUB_ENV"
 
       - name: Set up Elixir and Erlang/OTP
         id: beam
@@ -88,6 +101,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out compatible spectre
+        uses: actions/checkout@v6
+        with:
+          repository: elchemista/spectre
+          ref: feature/agent-server-gam
+          path: _compat/spectre
+          persist-credentials: false
+
+      - name: Select compatible dependency sources
+        run: |
+          echo "SPECTRE_PATH=$GITHUB_WORKSPACE/_compat/spectre" >> "$GITHUB_ENV"
+
       - name: Set up Elixir and Erlang/OTP
         uses: erlef/setup-beam@v1
         with:
@@ -111,6 +136,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Check out compatible spectre
+        uses: actions/checkout@v6
+        with:
+          repository: elchemista/spectre
+          ref: feature/agent-server-gam
+          path: _compat/spectre
+          persist-credentials: false
+
+      - name: Select compatible dependency sources
+        run: |
+          echo "SPECTRE_PATH=$GITHUB_WORKSPACE/_compat/spectre" >> "$GITHUB_ENV"
 
       - name: Set up Elixir and Erlang/OTP
         uses: erlef/setup-beam@v1
@@ -138,6 +175,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Check out compatible spectre
+        uses: actions/checkout@v6
+        with:
+          repository: elchemista/spectre
+          ref: feature/agent-server-gam
+          path: _compat/spectre
+          persist-credentials: false
+
+      - name: Select compatible dependency sources
+        run: |
+          echo "SPECTRE_PATH=$GITHUB_WORKSPACE/_compat/spectre" >> "$GITHUB_ENV"
 
       - name: Set up Elixir and Erlang/OTP
         uses: erlef/setup-beam@v1

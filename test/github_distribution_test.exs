@@ -17,7 +17,9 @@ defmodule SpectreMnemonic.GitHubDistributionTest do
         assert opts[:optional]
     end
 
-    refute Keyword.has_key?(config, :package)
+    assert config[:package][:licenses] == ["Apache-2.0"]
+    assert "docs" in config[:package][:files]
+    refute "test" in config[:package][:files]
   end
 
   test "Vettore uses Hex 0.3.5 or an explicit local path" do

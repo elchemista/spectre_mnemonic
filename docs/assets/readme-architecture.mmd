@@ -1,0 +1,7 @@
+flowchart TB
+  S["AgentServer"] -->|"search / recall"| E["Named memory Engine"]
+  E -->|"portable evidence"| S
+  S -->|"bound write"| G["GAM admission"]
+  G -->|"admitted write"| E
+  E -->|"write receipt"| G
+  G -->|"governed result"| S
