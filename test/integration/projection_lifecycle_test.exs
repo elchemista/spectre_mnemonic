@@ -17,6 +17,23 @@ defmodule SpectreMnemonic.Integration.ProjectionLifecycleTest do
 
   @namespace "spectre_mnemonic_test"
 
+  test "overlapping durable rebuilds preserve the readable committed generation" do
+    opts = [namespace: @namespace, scope: :overlapping_rebuild]
+    assert {:ok, _} = SpectreMnemonic.signal("committed orchard", opts)
+    pid = DurableIndex.server(@namespace)
+    {:ok, ref, _runtime_opts} = GenServer.call(pid, :begin_rebuild)
+
+    assert {:error, :rebuild_in_progress} = DurableIndex.rebuild(opts)
+    assert {:ok, [_]} = DurableIndex.search("orchard", opts)
+
+    assert {:error, :stale_rebuild} =
+             GenServer.call(pid, {:finish_rebuild, make_ref(), {:error, :offline}})
+
+    assert {:error, :offline} = GenServer.call(pid, {:finish_rebuild, ref, {:error, :offline}})
+    assert :ok = DurableIndex.rebuild(opts)
+    assert {:ok, [_]} = DurableIndex.search("orchard", opts)
+  end
+
   defmodule OfflineAtlasStore do
     def capabilities(_opts), do: [:append, :replay]
     def replay(_opts), do: {:ok, []}

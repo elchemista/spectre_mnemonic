@@ -9,6 +9,27 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
   alias SpectreMnemonic.Persistence.Store.Postgres
   alias SpectreMnemonic.Persistence.Store.Record
 
+  test "framed logs upgrade legacy atomic counters without reusing an existing sequence" do
+    root = tmp_root("legacy-atomic-sequence")
+    File.mkdir_p!(root)
+    path = Path.join(root, "log.smem")
+    key = {__MODULE__, make_ref()}
+    on_exit(fn -> FramedLog.reset_sequence_counter(key) end)
+
+    assert :ok = FramedLog.write_file(path, FileFrame.encode(1, :first))
+    assert :ok = FramedLog.append(path, FileFrame.encode(2, :second), sync: true)
+    assert :ok = FramedLog.append(path, FileFrame.encode(3, :third))
+    legacy = :atomics.new(1, [])
+    :atomics.put(legacy, 1, 10)
+    :persistent_term.put(key, {:atomics, legacy})
+
+    assert {:ok, counter} = FramedLog.sequence_counter(key, path)
+    assert :atomics.get(counter, 1) == 10
+    assert :atomics.add_get(counter, 1, 1) == 11
+    assert :persistent_term.get(key, :missing) == :missing
+    assert {:ok, ^counter} = FramedLog.sequence_counter(key, path)
+  end
+
   test "framed logs preserve valid frames through data sync and cross-directory installation" do
     root = tmp_root("synced-installation")
     File.mkdir_p!(Path.join(root, "source"))

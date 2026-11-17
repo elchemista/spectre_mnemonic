@@ -62,4 +62,37 @@ defmodule SpectreMnemonic.Knowledge.ProjectionLifecycleTest do
     assert {:ok, _} = Supervisor.restart_child(runtime.engine_pid, child)
     assert {:ok, [%{text: "journal fallback"}], _} = Projection.events(opts)
   end
+
+  test "lost projection tables fall back to the journal without hiding other read errors" do
+    opts = [namespace: @namespace, scope: :lost_knowledge_table]
+    assert {:ok, _} = SMEM.append(%{type: :fact, text: "durable knowledge"}, opts)
+    {:ok, runtime} = Engine.resolve(SpectreMnemonic.DefaultEngine)
+    child = {Projection, runtime.config.ref}
+
+    [{pid, _tables}] =
+      Registry.lookup(Engine.Registry, {:knowledge_projection, runtime.config.ref})
+
+    assert_raise Protocol.UndefinedError, fn -> Projection.candidates([%{}], opts) end
+
+    :sys.replace_state(pid, fn state ->
+      :ets.delete(state.tables.postings)
+      state
+    end)
+
+    try do
+      assert {:error, :knowledge_projection_unavailable} = Projection.events(opts)
+
+      assert {:error, :knowledge_projection_unavailable} =
+               Projection.candidates(["durable"], opts)
+
+      assert {:ok, [%{text: "durable knowledge"}]} = Base.events(opts)
+      assert {:ok, [_]} = Base.search("durable", opts)
+      assert_raise Protocol.UndefinedError, fn -> Projection.candidates([%{}], opts) end
+    after
+      :ok = Supervisor.terminate_child(runtime.engine_pid, child)
+      {:ok, _pid} = Supervisor.restart_child(runtime.engine_pid, child)
+    end
+
+    assert {:ok, [%{text: "durable knowledge"}], _} = Projection.events(opts)
+  end
 end

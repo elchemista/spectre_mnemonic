@@ -8,7 +8,8 @@ release declarations.
 
 ## 0.2.0 — 2026-11-17
 
-- Exercise the existing 0.4 branch in CI against explicit compatible source checkouts; refresh obsolete dependency locks.
+- Verify published Spectre 0.4 in package CI; retain explicit source overrides for compatibility checks.
+- Enforce hot and pinned byte accounting, and retain journal fallback when knowledge projection tables disappear during recovery.
 
 - Add Apache-2.0 package metadata, source links and explicit distribution files,
   including guides and examples, for release artifact validation.

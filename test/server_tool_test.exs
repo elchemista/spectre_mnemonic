@@ -14,6 +14,31 @@ defmodule Spectre.Mnemonic.ServerToolTest do
   alias SpectreMnemonic.Memory.{Moment, Secret}
   alias SpectreMnemonic.Persistence.Manager
 
+  test "generated requests retain documented options without accepting host identity overrides" do
+    for {operation, args, options} <- [
+          {:learn, ["approved observation"], [name: "preference", metadata: %{source: "chat"}]},
+          {:remember, ["approved observation"],
+           [kind: :fact, tags: [:reviewed], extract_entities?: false]},
+          {:recall, ["preference"], [include_knowledge: true, include_observations: false]},
+          {:forget, [{:stream, :chat}], []},
+          {:forget, [{:task, "task-1"}], []},
+          {:compact_knowledge, [], []},
+          {:sweep_expired, [], []}
+        ] do
+      assert {:ok, request} = ServerTool.prepare(operation, args ++ [options], %{})
+      assert :ok = Value.validate(request)
+
+      assert {:error, :invalid_mnemonic_options} =
+               ServerTool.prepare(operation, args ++ [[engine: :another_owner]], %{})
+    end
+
+    assert {:error, :invalid_mnemonic_request} = ServerTool.prepare(:learn, [], %{})
+
+    for options <- [[tags: [self()]], [metadata: %Moment{}], [metadata: %{pid: self()}]] do
+      assert {:error, _reason} = ServerTool.prepare(:remember, ["observation", options], %{})
+    end
+  end
+
   test "effect adapter distinguishes invalid requests from an admitted successful write" do
     root = Path.join(System.tmp_dir!(), "mnemonic-effects-#{System.unique_integer([:positive])}")
     runtime_name = __MODULE__.EffectRuntime

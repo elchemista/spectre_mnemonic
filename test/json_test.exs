@@ -62,6 +62,44 @@ defmodule SpectreMnemonic.JSONTest do
              JSON.decode("{}")
   end
 
+  test "encoder failures remain explicit without accepting invalid output" do
+    Application.put_env(:spectre_mnemonic, :json_library, __MODULE__.FailingLibrary)
+
+    assert {:error, :refused} = JSON.encode(:refuse)
+    assert {:error, :invalid_json_encoding} = JSON.encode(:invalid)
+
+    assert {:error, {:json_library_failure, __MODULE__.FailingLibrary, %RuntimeError{}}} =
+             JSON.encode(:raise)
+
+    assert {:error, {:json_library_failure, __MODULE__.FailingLibrary, {:throw, :offline}}} =
+             JSON.encode(:throw)
+  end
+
+  test "decoder exceptions and unexpected responses cannot become decoded records" do
+    Application.put_env(:spectre_mnemonic, :json_library, __MODULE__.FailingLibrary)
+
+    assert {:error, :invalid_json_input} = JSON.decode(:not_a_binary)
+
+    assert {:error, {:json_library_failure, __MODULE__.FailingLibrary, %RuntimeError{}}} =
+             JSON.decode("raise")
+
+    assert {:error, {:json_library_failure, __MODULE__.FailingLibrary, {:throw, :offline}}} =
+             JSON.decode("throw")
+
+    assert {:error, {:json_library_failure, __MODULE__.FailingLibrary, {:unexpected_result, 42}}} =
+             JSON.decode("invalid")
+  end
+
+  defmodule FailingLibrary do
+    def encode(:refuse), do: {:error, :refused}
+    def encode(:invalid), do: {:ok, [%{}]}
+    def encode(:raise), do: raise("encoding unavailable")
+    def encode(:throw), do: throw(:offline)
+    def decode("raise"), do: raise("decoding unavailable")
+    def decode("throw"), do: throw(:offline)
+    def decode("invalid"), do: 42
+  end
+
   defmodule IodataLibrary do
     @moduledoc false
 

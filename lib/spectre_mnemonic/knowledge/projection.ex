@@ -75,8 +75,7 @@ defmodule SpectreMnemonic.Knowledge.Projection do
   @doc false
   @spec events(keyword()) :: {:ok, [map()], map()} | {:error, term()}
   def events(opts) when is_list(opts) do
-    with {:ok, runtime} <- runtime(opts),
-         {:ok, _pid, tables} <- owner(runtime.config.ref) do
+    read_projection(opts, fn _runtime, tables ->
       partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
       ids = all_partition_ids(tables, partition)
       events = fetch_documents(tables.documents, partition, ids)
@@ -87,14 +86,13 @@ defmodule SpectreMnemonic.Knowledge.Projection do
          candidates: length(events),
          mode: :projection
        }}
-    end
+    end)
   end
 
   @doc false
   @spec candidates([binary()], keyword()) :: {:ok, [map()], map()} | {:error, term()}
   def candidates(terms, opts) when is_list(terms) and is_list(opts) do
-    with {:ok, runtime} <- runtime(opts),
-         {:ok, _pid, tables} <- owner(runtime.config.ref) do
+    read_projection(opts, fn runtime, tables ->
       partition = {Identity.namespace!(opts), Scope.from_opts(opts)}
       limit = candidate_limit(runtime.config, opts)
 
@@ -112,6 +110,23 @@ defmodule SpectreMnemonic.Knowledge.Projection do
          lexical: min(length(Enum.uniq(lexical_ids)), limit),
          mode: :candidate_first
        }}
+    end)
+  end
+
+  @spec read_projection(keyword(), (Runtime.t(), tables() -> result)) ::
+          result | {:error, term()}
+        when result: term()
+  defp read_projection(opts, fun) do
+    with {:ok, runtime} <- runtime(opts),
+         {:ok, _pid, tables} <- owner(runtime.config.ref) do
+      try do
+        fun.(runtime, tables)
+      catch
+        :error, :badarg ->
+          if Enum.any?(Map.values(tables), &(:ets.info(&1) == :undefined)),
+            do: {:error, :knowledge_projection_unavailable},
+            else: :erlang.raise(:error, :badarg, __STACKTRACE__)
+      end
     end
   end
 

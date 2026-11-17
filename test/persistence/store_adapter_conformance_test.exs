@@ -52,6 +52,38 @@ defmodule SpectreMnemonic.Persistence.StoreAdapterConformanceTest do
              Conformance.audit(__MODULE__.LegacyAdapter)
   end
 
+  test "invalid and failed adapter contracts cannot advertise a usable backend" do
+    assert {:error, {:invalid_store_adapter, 42}} = Adapter.describe(42)
+
+    assert {:error, {:store_adapter_unavailable, __MODULE__.MissingAdapter, :nofile}} =
+             Adapter.describe(__MODULE__.MissingAdapter)
+
+    assert {:error, {:store_contract_failed, __MODULE__.FailingContract, RuntimeError}} =
+             Adapter.describe(__MODULE__.FailingContract, failure: :raise)
+
+    assert {:error, {:store_contract_failed, __MODULE__.FailingContract, {:throw, :offline}}} =
+             Adapter.describe(__MODULE__.FailingContract, failure: :throw)
+
+    assert {:error, {:invalid_store_contract, :shape}} =
+             Adapter.describe(__MODULE__.FailingContract, failure: :invalid)
+  end
+
+  test "legacy capability hints remain explicitly non-conformant" do
+    assert {:ok, %Contract{replay_fold: true, erase_semantics: :tombstone, conformant?: false}} =
+             Adapter.describe(__MODULE__.LegacyAdapter,
+               capabilities: [:append, :replay_fold, :erase_partition]
+             )
+
+    assert {:ok, %Contract{replay_fold: false, erase_semantics: :none, conformant?: false}} =
+             Adapter.describe(String)
+  end
+
+  defmodule FailingContract do
+    def contract(failure: :raise), do: raise("contract unavailable")
+    def contract(failure: :throw), do: throw(:offline)
+    def contract(failure: :invalid), do: :invalid
+  end
+
   defp tmp_root(label) do
     path =
       Path.join(
@@ -67,7 +99,7 @@ defmodule SpectreMnemonic.Persistence.StoreAdapterConformanceTest do
     @behaviour SpectreMnemonic.Persistence.Store.Adapter
 
     @impl SpectreMnemonic.Persistence.Store.Adapter
-    def capabilities(_opts), do: [:append]
+    def capabilities(opts), do: Keyword.get(opts, :capabilities, [:append])
 
     @impl SpectreMnemonic.Persistence.Store.Adapter
     def put(_record, _opts), do: :ok
