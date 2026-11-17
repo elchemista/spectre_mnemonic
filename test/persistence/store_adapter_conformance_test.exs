@@ -29,6 +29,9 @@ defmodule SpectreMnemonic.Persistence.StoreAdapterConformanceTest do
     assert checks.erase_partition == :ok
     assert checks.verify_erased == :ok
     assert {:ok, %{available?: true}} = FileStore.health(data_root: root)
+    assert FileStore.classify_retry(:enospc) == :retryable
+    assert FileStore.classify_retry(:eacces) == :permanent
+    assert FileStore.classify_retry(:unrecognized) == :unknown
   end
 
   test "placeholder adapters are explicitly non-conformant" do

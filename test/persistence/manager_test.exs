@@ -14,6 +14,67 @@ defmodule SpectreMnemonic.Persistence.ManagerTest do
   alias SpectreMnemonic.Persistence.Store.S3
   alias SpectreMnemonic.Persistence.WriteReceipt
 
+  defmodule SemanticOutputAdapter do
+    def compact(_input, opts), do: {:ok, Keyword.fetch!(opts, :semantic_output)}
+  end
+
+  test "semantic adapters accept reviewed record envelopes and tombstones in portable forms" do
+    configure_chaos_store([:append, :replay], replay_result: {:ok, []})
+    knowledge = record(:knowledge, %{id: "enveloped", text: "distilled"})
+
+    assert {:ok, %{written: 2, results: [{:chaos, %{written: 2}}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: SemanticOutputAdapter,
+               semantic_output: [
+                 knowledge,
+                 %{family: :knowledge, payload: %{id: "mapped"}},
+                 :ignored
+               ]
+             )
+
+    tombstone = record(:tombstones, %{family: :moments, id: "enveloped-delete"})
+
+    assert {:ok, %{tombstones: 3, results: [{:chaos, %{written: 3}}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: SemanticOutputAdapter,
+               semantic_output: %{
+                 tombstones: [
+                   tombstone,
+                   %{family: :moments, id: "mapped-delete"},
+                   %{"family" => "moments", "id" => "portable-delete"},
+                   %{"family" => "no-such-family", "id" => "ignored"},
+                   :ignored
+                 ],
+                 replace_ids: ["missing-source"]
+               }
+             )
+  end
+
+  test "semantic compaction rejects non-tombstone envelopes and reports failed writes" do
+    configure_chaos_store([:append, :replay], replay_result: {:ok, []})
+
+    assert {:ok, %{results: [{:chaos, {:error, {:invalid_tombstone_family, :knowledge}}}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: SemanticOutputAdapter,
+               semantic_output: %{tombstones: [record(:knowledge, %{id: "wrong-family"})]}
+             )
+
+    configure_chaos_store([:append, :replay],
+      replay_result: {:ok, []},
+      put_result: {:error, :offline}
+    )
+
+    assert {:ok, %{written: 0, results: [{:chaos, {:error, :offline}}]}} =
+             Manager.compact(
+               mode: :semantic,
+               semantic_compact_adapter: SemanticOutputAdapter,
+               semantic_output: [{:knowledge, %{id: "failed-write"}}]
+             )
+  end
+
   test "writes to primary and duplicate stores but skips duplicate false stores" do
     configure_stores([
       store(:primary, role: :primary),

@@ -9,6 +9,85 @@ defmodule SpectreMnemonic.Persistence.FileStoreHardeningTest do
   alias SpectreMnemonic.Persistence.Store.Postgres
   alias SpectreMnemonic.Persistence.Store.Record
 
+  test "framed logs preserve valid frames through data sync and cross-directory installation" do
+    root = tmp_root("synced-installation")
+    File.mkdir_p!(Path.join(root, "source"))
+    File.mkdir_p!(Path.join(root, "destination"))
+    source = Path.join([root, "source", "log.smem"])
+    destination = Path.join([root, "destination", "log.smem"])
+    first = FileFrame.encode(1, :first)
+    second = FileFrame.encode(2, :second)
+
+    assert :ok = FramedLog.write_file(source, first, sync: :data)
+    assert :ok = FramedLog.append(source, second, sync: false)
+    assert :ok = FramedLog.sync_file(source)
+    assert :ok = FramedLog.rename(source, destination)
+    refute File.exists?(source)
+    assert File.read!(destination) == first <> second
+    assert {:ok, %{status: :clean, last_sequence: 2}} = FramedLog.recover_tail(destination)
+    assert :ok = FramedLog.remove(destination)
+    assert :ok = FramedLog.remove(destination)
+    assert {:error, :enoent} = FramedLog.sync_file(destination)
+    assert {:error, directory_error} = FramedLog.remove(Path.dirname(destination))
+    assert directory_error in [:eisdir, :eperm]
+  end
+
+  @tag capture_log: true
+  test "legacy record identities resolve a writer crash after the durable frame committed" do
+    for dedupe? <- [true, false] do
+      root = tmp_root("legacy-ambiguous-#{dedupe?}")
+      stored = record("legacy-ambiguous")
+      stored = if dedupe?, do: stored, else: %{stored | dedupe_key: nil}
+
+      injector = fn
+        :after_store_commit -> {:exit, :simulated_writer_crash}
+        _ -> :ok
+      end
+
+      assert {:ok, 1} = StoreFile.put(stored, data_root: root, failure_injector: injector)
+      assert {:ok, [{1, _timestamp, ^stored}]} = StoreFile.replay(data_root: root)
+    end
+  end
+
+  test "legacy snapshots remain readable and migrate to framed snapshots during compaction" do
+    root = tmp_root("legacy-snapshot-upgrade")
+    File.mkdir_p!(Path.join(root, "snapshots"))
+    path = Path.join([root, "snapshots", "current.term"])
+    stored = record("legacy-snapshot-memory")
+    File.write!(path, :erlang.term_to_binary(%{version: 1, records: [stored]}))
+
+    assert {:ok, [{1, _timestamp, ^stored}]} = StoreFile.replay(data_root: root)
+
+    assert {:ok, [^stored]} =
+             StoreFile.replay_fold([data_root: root], [], fn {_, _, record}, _ ->
+               {:halt, [record]}
+             end)
+
+    assert {:ok, ^path} = StoreFile.compact(data_root: root)
+    assert String.starts_with?(File.read!(path), "SMEM")
+    assert {:ok, [{1, _timestamp, ^stored}]} = StoreFile.replay(data_root: root)
+  end
+
+  test "malformed legacy snapshots recover from the previous snapshot before compaction" do
+    root = tmp_root("invalid-legacy-snapshot")
+    File.mkdir_p!(Path.join(root, "snapshots"))
+    path = Path.join([root, "snapshots", "current.term"])
+    previous = Path.join([root, "snapshots", "previous.term"])
+    stored = record("backup-snapshot-memory")
+
+    for invalid <- [
+          "not an Erlang term",
+          :erlang.term_to_binary(%{version: 1, records: :invalid})
+        ] do
+      File.write!(path, invalid)
+      File.write!(previous, :erlang.term_to_binary(%{version: 1, records: [stored]}))
+      assert {:ok, [{1, _timestamp, ^stored}]} = StoreFile.replay(data_root: root)
+      assert {:ok, ^path} = StoreFile.compact(data_root: root)
+      assert {:ok, [{1, _timestamp, ^stored}]} = StoreFile.replay(data_root: root)
+      assert Path.wildcard(path <> ".tmp-*") == []
+    end
+  end
+
   test "frame reader stops safely on corrupt, invalid, incomplete, and halted frames" do
     first = FileFrame.encode(1, :first, 100)
     second = FileFrame.encode(2, :second, 200)

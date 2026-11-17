@@ -77,7 +77,8 @@ defmodule SpectreMnemonic.Active.Eviction do
   @doc false
   @spec adjust_bytes(tuple(), integer()) :: :ok
   def adjust_bytes(key, delta) do
-    ETS.update_counter(:mnemonic_hot_bytes, key, {2, delta, 0, 0}, {key, 0})
+    update = if delta < 0, do: {2, delta, 0, 0}, else: {2, delta}
+    ETS.update_counter(:mnemonic_hot_bytes, key, update, {key, 0})
     :ok
   end
 

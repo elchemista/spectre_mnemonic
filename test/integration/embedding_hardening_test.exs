@@ -10,6 +10,22 @@ defmodule SpectreMnemonic.Integration.EmbeddingHardeningTest do
   alias SpectreMnemonic.QueryContext
   alias SpectreMnemonic.Recall.Index
 
+  test "equivalent provider configurations retain one space and explicit ids survive metadata omissions" do
+    config = [fast: [provider: :fixture, model: "model", revision: "r1", dimensions: 2]]
+    space = Space.new(config)
+
+    assert Space.new(%{
+             fast: %{provider: :fixture, model: "model", revision: "r1", dimensions: 2}
+           }) == space
+
+    assert Space.new(space) == space
+    assert Space.id(nil, embedding_space: space) == space.id
+    assert Space.new(space_id: " explicit ").id == "explicit"
+    assert Space.new(space_id: :explicit).id == "explicit"
+    assert Space.new(space_id: "   ").id != ""
+    assert Space.id(%{model: "model", revision: "r2", dimensions: 2}) != space.id
+  end
+
   test "embedding service contains legacy adapter exceptions and throws" do
     Application.put_env(:spectre_mnemonic, :embedding_adapter, __MODULE__.RaisingAdapter)
     raising = Service.embed("safe ingestion", [])

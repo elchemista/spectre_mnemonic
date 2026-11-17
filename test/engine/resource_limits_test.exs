@@ -67,8 +67,8 @@ defmodule SpectreMnemonic.Engine.ResourceLimitsTest do
          namespace: "bounded-rich-intake",
          limits: [
            max_chunks_per_intake: 2,
-           max_hot_bytes_per_scope: 4_000,
-           max_hot_bytes_per_engine: 8_000
+           max_hot_bytes_per_scope: 16_000,
+           max_hot_bytes_per_engine: 32_000
          ]}
       )
 
@@ -105,8 +105,10 @@ defmodule SpectreMnemonic.Engine.ResourceLimitsTest do
         {scope_bytes, engine_bytes}
       end)
 
-    assert scope_bytes <= 4_000
-    assert engine_bytes <= 8_000
+    assert scope_bytes > 0
+    assert scope_bytes <= 16_000
+    assert engine_bytes > 0
+    assert engine_bytes <= 32_000
   end
 
   test "pinned bytes are bounded for intake and later governance transitions" do

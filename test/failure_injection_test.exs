@@ -4,6 +4,36 @@ defmodule SpectreMnemonic.FailureInjectionTest do
   alias SpectreMnemonic.FailureInjection
   alias SpectreMnemonic.FailureInjection.Injector
 
+  defmodule ContextInjector do
+    def checkpoint(point, context, state), do: {:return, {point, context, state}}
+  end
+
+  test "injector configuration supports callback state and preserves requested failure semantics" do
+    assert {:point, %{attempt: 2}, :state} =
+             FailureInjection.checkpoint(:point, [failure_injector: {ContextInjector, :state}], %{
+               attempt: 2
+             })
+
+    assert {:error, {:invalid_failure_injector, 42}} =
+             FailureInjection.checkpoint(:point, failure_injector: 42)
+
+    assert {:error, {:invalid_failure_injection_action, :point, :invalid}} =
+             FailureInjection.checkpoint(:point, failure_injector: fn _ -> :invalid end)
+
+    for exception <- [
+          "injected failure",
+          RuntimeError,
+          RuntimeError.exception("injected failure")
+        ] do
+      assert_raise RuntimeError, fn ->
+        FailureInjection.checkpoint(:point, failure_injector: fn _ -> {:raise, exception} end)
+      end
+    end
+
+    pid = start_supervised!({Injector, script: [point: {:return, :injected}]})
+    assert :injected = FailureInjection.checkpoint(:point, failure_injector: pid)
+  end
+
   test "replays checkpoint actions deterministically and records their context" do
     pid =
       start_supervised!(

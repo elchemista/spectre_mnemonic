@@ -105,6 +105,48 @@ defmodule SpectreMnemonic.ExportFormatConformanceTest do
   @scope_digest String.duplicate("a", 64)
   @sections ~w(nodes edges clusters models knowledge governance)
 
+  test "redaction callbacks fail safely and cannot replace an existing export on a throw" do
+    scope = :redaction_failure
+    output = path("redaction-failure")
+    assert {:ok, _} = SpectreMnemonic.signal("private export body", scope: scope)
+    File.write!(output, "previous export")
+
+    assert {:error, {:mnemonic_export_failed, :throw, :redactor_offline}} =
+             SpectreMnemonic.export(output,
+               scope: scope,
+               mode: {:redacted, fn _ -> throw(:redactor_offline) end}
+             )
+
+    assert File.read!(output) == "previous export"
+
+    assert {:ok, _} =
+             SpectreMnemonic.export(output,
+               scope: scope,
+               mode: {:redacted, fn _ -> raise "redactor offline" end}
+             )
+
+    assert {:ok, export} = SpectreMnemonic.Export.read(output)
+    assert Enum.any?(export.nodes, &(&1["redaction_error"] == "redactor offline"))
+    refute inspect(export) =~ "private export body"
+
+    assert {:ok, _} =
+             SpectreMnemonic.export(output,
+               scope: scope,
+               mode: {:redacted, fn _ -> "approved value" end}
+             )
+
+    assert {:ok, export} = SpectreMnemonic.Export.read(output)
+    assert Enum.any?(export.nodes, &(&1["value"] == "approved value"))
+  end
+
+  test "failed export installation removes its temporary file and preserves the destination" do
+    output = path("directory-destination")
+    File.mkdir_p!(output)
+    assert {:error, _reason} = SpectreMnemonic.export(output)
+    assert File.dir?(output)
+    assert Path.wildcard(output <> ".tmp-*") == []
+  end
+
   test "writer rejects malformed paths and option containers" do
     assert {:error, {:invalid_export_path, nil}} = SpectreMnemonic.export(nil)
     assert {:error, {:invalid_export_path, ""}} = SpectreMnemonic.export("")

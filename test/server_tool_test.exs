@@ -14,6 +14,43 @@ defmodule Spectre.Mnemonic.ServerToolTest do
   alias SpectreMnemonic.Memory.{Moment, Secret}
   alias SpectreMnemonic.Persistence.Manager
 
+  test "effect adapter distinguishes invalid requests from an admitted successful write" do
+    root = Path.join(System.tmp_dir!(), "mnemonic-effects-#{System.unique_integer([:positive])}")
+    runtime_name = __MODULE__.EffectRuntime
+
+    start_supervised!(
+      {Spectre.Stack.Runtime,
+       stack: Stack,
+       name: runtime_name,
+       packages: [mnemonic: [data_root: root, namespace: "effect_adapter_test"]]}
+    )
+
+    on_exit(fn -> File.rm_rf(root) end)
+
+    context = %{
+      agent: Agent,
+      identity: %{subject: Spectre.Subject.new("owner")},
+      options: [stack_runtime: runtime_name]
+    }
+
+    assert {:error, :definitive_no_effect, :invalid_mnemonic_write} =
+             ServerTool.execute_effect(:recall, %{cue: "read is not an effect"}, context)
+
+    assert {:error, :definitive_no_effect, :invalid_mnemonic_write} =
+             ServerTool.execute_effect(:unknown, %{}, context)
+
+    assert {:error, :definitive_no_effect, :mnemonic_stack_runtime_required} =
+             ServerTool.execute_effect(:remember, %{observation: "must not write"}, %{
+               context
+               | options: []
+             })
+
+    assert {:ok, %{root: %{text: "admitted observation"}}} =
+             ServerTool.execute_effect(:remember, %{observation: "admitted observation"}, context)
+
+    assert {:error, :invalid_mnemonic_result} = ServerTool.project(:recall, :unexpected)
+  end
+
   test "remember requires an explicit governed host binding" do
     assert %{recall: %{path: :cognitive}} = Spectre.Mnemonic.tools(%{}).mnemonic.operations
     refute Map.has_key?(Spectre.Mnemonic.tools(%{}).mnemonic.operations, :remember)

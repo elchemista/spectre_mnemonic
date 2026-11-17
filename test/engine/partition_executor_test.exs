@@ -3,6 +3,21 @@ defmodule SpectreMnemonic.Engine.PartitionExecutorTest do
 
   alias SpectreMnemonic.Engine.PartitionExecutor
 
+  test "idle executors release their process and expired wall-clock deadlines do not run work" do
+    key = partition_key({:idle_partition, make_ref()})
+    assert {:ok, first} = PartitionExecutor.trans(key, fn -> {:ok, self()} end, idle_timeout: 10)
+    monitor = Process.monitor(first)
+    assert_receive {:DOWN, ^monitor, :process, ^first, :normal}, 1_000
+    wait_for_registry_cleanup(key)
+    assert {:ok, second} = PartitionExecutor.trans(key, fn -> {:ok, self()} end)
+    refute second == first
+
+    assert {:error, :mnemonic_deadline_exceeded} =
+             PartitionExecutor.trans(key, fn -> flunk("expired work executed") end,
+               deadline: DateTime.add(DateTime.utc_now(), -1, :second)
+             )
+  end
+
   test "serializes one partition while allowing different partitions to run" do
     parent = self()
     first_key = partition_key({:test_partition, make_ref()})
@@ -115,6 +130,20 @@ defmodule SpectreMnemonic.Engine.PartitionExecutorTest do
       _other ->
         Process.sleep(1)
         wait_for_queue(executor, minimum)
+    end
+  end
+
+  defp wait_for_registry_cleanup(key, attempts \\ 1_000)
+  defp wait_for_registry_cleanup(_key, 0), do: flunk("retired executor remained registered")
+
+  defp wait_for_registry_cleanup(key, attempts) do
+    case Registry.lookup(SpectreMnemonic.Engine.PartitionRegistry, {:partition, key}) do
+      [] ->
+        :ok
+
+      _entry ->
+        Process.sleep(1)
+        wait_for_registry_cleanup(key, attempts - 1)
     end
   end
 

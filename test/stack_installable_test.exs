@@ -87,6 +87,62 @@ defmodule SpectreMnemonic.StackInstallableTest do
   alias SpectreMnemonic.StackInstallableTest.Stack, as: TestStack
   alias SpectreMnemonic.StackInstallableTest.Store
 
+  test "installation rejects conflicting stores and invalid isolation before starting resources" do
+    for {block, reason} <- [
+          {quote(do: store(nil)), {:invalid_store, nil}},
+          {quote(
+             do:
+               (
+                 store(Store)
+                 store(Store)
+               )
+           ), {:duplicate_declaration, :store}},
+          {quote(do: isolate_by([])), {:invalid_isolate_by, :empty}},
+          {quote(do: isolate_by(:subject)), {:invalid_isolate_by, :subject}},
+          {quote(do: isolate_by([:unknown])), {:invalid_isolate_by, [:unknown]}},
+          {quote(do: isolate_by([:subject, :subject])),
+           {:duplicate_isolation_dimension, [:subject, :subject]}},
+          {quote(
+             do:
+               (
+                 isolate_by([:subject])
+                 isolate_by([:agent])
+               )
+           ), {:duplicate_declaration, :isolate_by}}
+        ] do
+      assert {:error, ^reason} = Spectre.Mnemonic.compile([], block, __ENV__)
+    end
+  end
+
+  test "erasure and identity adapters reject malformed host inputs before touching storage" do
+    assert {:error, {:invalid_mnemonic_instance_ref, :invalid}} =
+             Spectre.Mnemonic.erasure_plan(:invalid)
+
+    assert {:error, {:invalid_mnemonic_instance_ref, :invalid}} =
+             Spectre.Mnemonic.erase_instance(:invalid)
+
+    instance = InstanceRef.new(InstanceAgent, Subject.new("invalid-options"))
+
+    for opts <- [:invalid, [:not_keyword]] do
+      assert {:error, :invalid_mnemonic_erasure_options} =
+               Spectre.Mnemonic.erasure_plan(instance, opts)
+
+      assert {:error, :invalid_mnemonic_erasure_options} =
+               Spectre.Mnemonic.erase_instance(instance, opts)
+    end
+
+    assert {:error, {:invalid_mnemonic_subject, _reason}} =
+             Memory.options(Agent, subject: %Subject{id: nil})
+
+    assert {:error, {:invalid_mnemonic_subject, _reason}} = Memory.options(Agent, subject: self())
+
+    assert {:error, {:invalid_mnemonic_agent_ref, :invalid}} =
+             Memory.options(Agent, agent_ref: :invalid)
+
+    assert {:error, {:invalid_mnemonic_agent_ref, _reason}} =
+             Memory.options(Agent, agent_ref: %AgentRef{schema_version: 1, id: nil})
+  end
+
   test "publishes the versioned Mnemonic Stack contract" do
     assert {:ok, package} = V1.verify_installable(Spectre.Mnemonic)
     assert package.id == :mnemonic

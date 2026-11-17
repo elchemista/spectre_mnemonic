@@ -3,6 +3,38 @@ defmodule SpectreMnemonic.Engine.HotStoreTest do
 
   alias SpectreMnemonic.Active.ETS
   alias SpectreMnemonic.Active.Focus
+  alias SpectreMnemonic.Engine
+
+  test "nested table contexts restore the previous engine even after a callback fails" do
+    first = start_supervised!({Engine, namespace: "ets-first", storage_id: "ets-first"})
+    second = start_supervised!({Engine, namespace: "ets-second", storage_id: "ets-second"})
+    {:ok, first_runtime} = Engine.resolve(first)
+
+    ETS.with_engine(first_runtime, fn ->
+      first_table = ETS.table(first_runtime, :mnemonic_status)
+      assert ETS.whereis(:mnemonic_status) == first_table
+      assert ETS.insert(:mnemonic_status, {:same_key, :first})
+
+      assert_raise RuntimeError, "nested callback failed", fn ->
+        ETS.with_engine(second, fn ->
+          refute ETS.whereis(:mnemonic_status) == first_table
+          assert ETS.insert(:mnemonic_status, {:same_key, :second})
+          raise "nested callback failed"
+        end)
+      end
+
+      assert ETS.lookup(:mnemonic_status, :same_key) == [{:same_key, :first}]
+      assert ETS.info(:mnemonic_status, :size) == 1
+      assert ETS.select(:mnemonic_status, [{{:same_key, :"$1"}, [], [:"$1"]}]) == [:first]
+      assert ETS.whereis(:unknown_table) == :undefined
+    end)
+
+    assert {:error, _reason} = ETS.attach(__MODULE__.Missing)
+
+    assert_raise ArgumentError, ~r/mnemonic ETS table unavailable/, fn ->
+      ETS.table(__MODULE__.Missing, :mnemonic_status)
+    end
+  end
 
   defmodule BlockingExtraction do
     @moduledoc false
