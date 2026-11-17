@@ -4,9 +4,30 @@ defmodule SpectreMnemonic.Engine.PartitionExecutorTest do
   alias SpectreMnemonic.Engine.PartitionExecutor
 
   test "idle executors release their process and expired wall-clock deadlines do not run work" do
+    parent = self()
     key = partition_key({:idle_partition, make_ref()})
-    assert {:ok, first} = PartitionExecutor.trans(key, fn -> {:ok, self()} end, idle_timeout: 10)
+
+    request =
+      Task.async(fn ->
+        PartitionExecutor.trans(
+          key,
+          fn ->
+            send(parent, {:idle_executor_ready, self()})
+
+            receive do
+              :release_idle_executor -> {:ok, self()}
+            after
+              5_000 -> flunk("idle executor was not released")
+            end
+          end,
+          idle_timeout: 10
+        )
+      end)
+
+    assert_receive {:idle_executor_ready, first}, 1_000
     monitor = Process.monitor(first)
+    send(first, :release_idle_executor)
+    assert {:ok, ^first} = Task.await(request)
     assert_receive {:DOWN, ^monitor, :process, ^first, :normal}, 1_000
     wait_for_registry_cleanup(key)
     assert {:ok, second} = PartitionExecutor.trans(key, fn -> {:ok, self()} end)
