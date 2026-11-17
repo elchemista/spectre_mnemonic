@@ -24,17 +24,17 @@ the [public API manifest](PUBLIC_API.md).
 
 ## Installation
 
-SpectreMnemonic is distributed from GitHub:
+Add SpectreMnemonic to your dependencies:
 
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "feature/stack-tools-0.4"}
+    {:spectre_mnemonic, "~> 0.2.0"}
   ]
 end
 ```
 
-Spectre is optional. For Stack integration use the unreleased core branch
+Spectre is optional. For Stack integration use Spectre `~> 0.4.0`
 shown in the [current README](../README.md).
 
 Telemetry is also optional. Add `{:telemetry, "~> 1.3"}` in the host when it

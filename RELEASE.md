@@ -1,8 +1,7 @@
 # Release checklist
 
-Use this checklist for the next SpectreMnemonic release. The repository remains
-GitHub-distributed; a release tag is a compatibility declaration even when no
-Hex package is published.
+Use this checklist to prepare matching source and Hex artifacts for
+SpectreMnemonic. Tagging and publication are separate maintainer actions.
 
 ## 1. Freeze the release scope
 
@@ -36,7 +35,7 @@ The export writer reads its library version from the OTP application.
 
 - Ensure the release dependency is `{:vettore, "~> 0.3.5"}` with
   `VETTORE_PATH` unset.
-- Ensure Spectre resolves to the supported `~> 0.3.3` line with
+- Ensure Spectre resolves to the supported `~> 0.4.0` line with
   `SPECTRE_PATH` unset.
 - Run `mix deps.get --check-locked` and confirm it does not modify `mix.lock`.
 - Confirm the Vettore 0.3.5 package checksum and precompiled NIF download on

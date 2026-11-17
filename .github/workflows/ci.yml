@@ -1,10 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
-      - feature/stack-tools-0.4
   pull_request:
   workflow_dispatch:
 
@@ -45,7 +41,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: elchemista/spectre
-          ref: feature/agent-server-gam
+          ref: affe0b6ee33c957bc9aff9eec70cf7e7c33e80d6
           path: _compat/spectre
           persist-credentials: false
 
@@ -105,7 +101,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: elchemista/spectre
-          ref: feature/agent-server-gam
+          ref: affe0b6ee33c957bc9aff9eec70cf7e7c33e80d6
           path: _compat/spectre
           persist-credentials: false
 
@@ -141,7 +137,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: elchemista/spectre
-          ref: feature/agent-server-gam
+          ref: affe0b6ee33c957bc9aff9eec70cf7e7c33e80d6
           path: _compat/spectre
           persist-credentials: false
 
@@ -180,7 +176,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: elchemista/spectre
-          ref: feature/agent-server-gam
+          ref: affe0b6ee33c957bc9aff9eec70cf7e7c33e80d6
           path: _compat/spectre
           persist-credentials: false
 

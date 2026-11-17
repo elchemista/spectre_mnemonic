@@ -6,15 +6,14 @@ The current package and public API version is `0.2.0`. The numbered sections
 below record internal development milestones; they are not published package
 release declarations.
 
-## [Unreleased — Spectre core 0.4 integration]
+## 0.2.0 — 2026-11-17
 
 - Exercise the existing 0.4 branch in CI against explicit compatible source checkouts; refresh obsolete dependency locks.
 
 - Add Apache-2.0 package metadata, source links and explicit distribution files,
   including guides and examples, for release artifact validation.
 
-- Target the unreleased core 0.4 Stack contract on `feature/stack-tools-0.4`;
-  satellite package versions remain independent.
+- Target the Spectre 0.4 Stack contract; satellite package versions remain independent.
 - Register generated Server helpers through `tools/1`, with portable results,
   explicit cognitive scheduling and host-bound governed effects.
 - Document a runnable Stack → Agent → Server setup, with package-specific

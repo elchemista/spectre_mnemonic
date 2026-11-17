@@ -108,4 +108,4 @@ pending consent, expiry/resumption and result delivery; the Engine owns memory.
 Use the same Stack and helper in a Skill Server. Enable bound writes in root
 `gam.operations` and the mount's `governed:` references. Configure identity and
 the shared Stack runtime on the root; a mount does not create a second Engine
-or GAM Domain. See the [core Skill guide](https://github.com/elchemista/spectre/blob/feature/agent-server-gam/docs/SKILLS.md).
+or GAM Domain. See the [core Skill guide](https://github.com/elchemista/spectre/blob/0.4.0/docs/SKILLS.md).

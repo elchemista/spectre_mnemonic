@@ -398,7 +398,7 @@ application can install Nx itself:
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "main"},
+    {:spectre_mnemonic, "~> 0.2.0"},
     {:nx, "~> 0.11"}
   ]
 end

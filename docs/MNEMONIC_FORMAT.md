@@ -43,7 +43,7 @@ Every decoded frame has this JSON shape:
 ```
 
 The machine-readable Draft 2020-12 schema is
-[`priv/mnemonic_schema_v1.json`](https://github.com/elchemista/spectre_mnemonic/blob/feature/stack-tools-0.4/priv/mnemonic_schema_v1.json). It defines
+[`priv/mnemonic_schema_v1.json`](https://github.com/elchemista/spectre_mnemonic/blob/0.2.0/priv/mnemonic_schema_v1.json). It defines
 the manifest, every content section, the common record envelope, edges,
 clusters, and the trailer. Implementations apply it to every decoded frame in
 addition to the semantic checks below.

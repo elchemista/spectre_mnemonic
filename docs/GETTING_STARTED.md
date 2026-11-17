@@ -5,19 +5,18 @@ memory and explains the partition model used by every other feature.
 
 ## Install the dependency
 
-SpectreMnemonic is distributed from GitHub:
+Add SpectreMnemonic to your dependencies:
 
 ```elixir
 def deps do
   [
-    {:spectre_mnemonic, github: "elchemista/spectre_mnemonic", branch: "feature/stack-tools-0.4"}
+    {:spectre_mnemonic, "~> 0.2.0"}
   ]
 end
 ```
 
-There is currently no Hex package for SpectreMnemonic.
-Spectre is optional for standalone use. For unreleased core 0.4 Stack
-integration, use the Git/path dependencies in the [README](../README.md).
+Spectre is optional for standalone use. For Spectre 0.4 Stack
+integration, use the dependencies in the [README](../README.md).
 
 ## Supervise an Engine
 

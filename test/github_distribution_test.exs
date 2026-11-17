@@ -3,6 +3,7 @@ defmodule SpectreMnemonic.GitHubDistributionTest do
 
   test "Spectre uses Hex normally and the explicit compatibility path when requested" do
     config = Mix.Project.config()
+    assert config[:docs][:source_ref] == config[:version]
     dependency = Enum.find(Keyword.fetch!(config, :deps), &(elem(&1, 0) == :spectre))
 
     case System.get_env("SPECTRE_PATH") do
